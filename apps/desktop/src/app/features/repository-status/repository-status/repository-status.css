@@ -1,0 +1,67 @@
+.status-card {
+  border: 1px solid #30363d;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  background: #161b22;
+  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 20%);
+}
+
+.card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #8b949e;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h2 {
+  margin: 0.3rem 0 0;
+  font-size: 1.25rem;
+}
+
+button {
+  border: 1px solid #388bfd;
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.8rem;
+  color: #fff;
+  background: #1f6feb;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #388bfd;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1rem;
+  margin: 2rem 0 0;
+}
+
+dt {
+  color: #8b949e;
+  font-size: 0.8rem;
+}
+
+dd {
+  margin: 0.3rem 0 0;
+  font-weight: 600;
+}
+
+.error {
+  color: #f85149;
+}
+
+.muted {
+  margin: 2rem 0 0;
+  color: #8b949e;
+}

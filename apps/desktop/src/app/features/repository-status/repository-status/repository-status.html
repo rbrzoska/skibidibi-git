@@ -1,0 +1,45 @@
+<section class="status-card" aria-live="polite" aria-label="Repository status">
+  <div class="card-heading">
+    <div>
+      <p class="eyebrow">repository status</p>
+      <h2>Current workspace</h2>
+    </div>
+    <button type="button" (click)="statusStore.refresh()">Refresh</button>
+  </div>
+
+  @let state = statusStore.state();
+  @switch (state.kind) {
+    @case ('loading') {
+      <p class="muted">Loading repository status…</p>
+    }
+    @case ('error') {
+      <p class="error">{{ state.message }}</p>
+    }
+    @case ('ready') {
+      <dl>
+        <div>
+          <dt>Path</dt>
+          <dd>{{ statusStore.repositoryPath() }}</dd>
+        </div>
+        <div>
+          <dt>Head</dt>
+          <dd>{{ state.status.branch.head ?? 'detached HEAD' }}</dd>
+        </div>
+        <div>
+          <dt>Branch state</dt>
+          <dd>
+            {{ state.status.branch.unborn ? 'unborn' : state.status.branch.detached ? 'detached' : 'attached' }}
+          </dd>
+        </div>
+        <div>
+          <dt>Remote</dt>
+          <dd>↑ {{ state.status.branch.ahead }} · ↓ {{ state.status.branch.behind }}</dd>
+        </div>
+        <div>
+          <dt>Changes</dt>
+          <dd>{{ state.status.entries.length }}</dd>
+        </div>
+      </dl>
+    }
+  }
+</section>

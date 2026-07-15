@@ -1,0 +1,15 @@
+{
+  "name": "skibidibi-git",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "build": "pnpm --filter @skibidibi-git/desktop build",
+    "lint": "pnpm --filter @skibidibi-git/desktop lint",
+    "test": "pnpm --filter @skibidibi-git/desktop test"
+  }
+}
