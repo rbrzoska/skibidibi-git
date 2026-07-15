@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+    "crates/app-domain",
+    "crates/git-core",
+    "crates/repo-runtime",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/rbrzoska/skibidibi-git"
+
+[workspace.dependencies]
+app-domain = { path = "crates/app-domain" }
+git-core = { path = "crates/git-core" }
+repo-runtime = { path = "crates/repo-runtime" }
+serde = { version = "1", features = ["derive"] }
+tauri = "2"
+tauri-build = "2"
+tempfile = "3"
+thiserror = "2"
