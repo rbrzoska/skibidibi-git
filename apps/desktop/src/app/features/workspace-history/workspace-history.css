@@ -1,0 +1,43 @@
+:host { display: block; min-width: 0; }
+.workspace-grid { --sidebar-width: 18rem; display: grid; grid-template-columns: var(--sidebar-width) .4rem minmax(24rem, 1fr) minmax(17rem, 22rem); min-height: calc(100vh - 6.75rem); }
+.workspace-grid.resizing-sidebar { cursor: col-resize; user-select: none; }
+.navigation, .inspector { min-width: 0; padding: .8rem; background: #161b22; }
+.navigation { overflow: auto; }
+.inspector { border-left: 1px solid #30363d; }
+.sidebar-resizer { position: relative; z-index: 3; width: .4rem; border-right: 1px solid #30363d; background: #161b22; cursor: col-resize; touch-action: none; }
+.sidebar-resizer::after { position: absolute; inset: 0 -.2rem; content: ''; }
+.sidebar-resizer:hover, .sidebar-resizer:focus-visible, .resizing-sidebar .sidebar-resizer { outline: 0; background: #388bfd; }
+.filter { display: flex; gap: .5rem; border: 1px solid #30363d; border-radius: .45rem; padding: .45rem .6rem; color: #8b949e; background: #0d1117; }
+.filter input { min-width: 0; width: 100%; border: 0; outline: 0; color: #e6edf3; background: transparent; }
+details { border-bottom: 1px solid #30363d; padding: .25rem 0; }
+summary { display: flex; justify-content: space-between; padding: .7rem .25rem; color: #c9d1d9; cursor: pointer; font-size: .78rem; font-weight: 700; text-transform: uppercase; }
+summary strong { color: #8b949e; }
+ul { display: grid; gap: .2rem; margin: 0 0 .6rem; padding: 0; list-style: none; }
+li { min-width: 0; color: #b1bac4; font-size: .78rem; }
+li small { color: #7ee787; }
+.navigation-action-error { margin-top: .5rem; border: 1px solid #f8514966; border-radius: .4rem; padding: .5rem .6rem; color: #ff7b72; background: #f8514914; font-size: .75rem; overflow-wrap: anywhere; }
+.branch-tree, .worktree-list { gap: 0; }
+.tree-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; align-items: center; gap: .35rem; min-width: 0; width: 100%; border: 0; border-radius: .35rem; padding: .4rem .45rem .4rem calc(.35rem + var(--tree-depth, 0) * 1rem); color: #b1bac4; background: transparent; font: inherit; text-align: left; }
+button.tree-row { cursor: pointer; }
+button.tree-row:hover:not(:disabled), button.tree-row:focus-visible { outline: 0; color: #fff; background: #21262d; }
+button.tree-row:disabled { cursor: default; opacity: .72; }
+.tree-row.active { color: #fff; background: #1f6f43; opacity: 1; }
+.tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chevron { width: .65rem; color: #8b949e; font-size: 1rem; text-align: center; }
+.folder-icon { color: #d29922; }
+.branch-icon { grid-column: 2; color: #8b949e; }
+.branch-row .tree-label { grid-column: 3; }
+.pinned-current { margin-bottom: .2rem; border-bottom: 1px solid #2ea04366; border-radius: .35rem; }
+.branch-badges { display: inline-flex; align-items: center; justify-content: flex-end; gap: .25rem; min-width: 0; }
+.branch-badges small { border-radius: 999px; padding: .08rem .3rem; font-size: .65rem; font-weight: 750; white-space: nowrap; }
+.branch-badges .ahead-token { color: #56d364; background: #23863629; }
+.branch-badges .behind-token { color: #79c0ff; background: #1f6feb29; }
+.branch-badges .upstream-gone { color: #ffa657; background: #9e6a032e; }
+.remote-row { cursor: default; }
+.worktree-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+.worktree-row .tree-label { grid-column: 2; }
+.stash-row { display: flex; justify-content: space-between; gap: .5rem; overflow: hidden; border-radius: .35rem; padding: .45rem .6rem; white-space: nowrap; }
+.stash-row span { overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 68rem) { .workspace-grid { grid-template-columns: var(--sidebar-width) .4rem minmax(24rem, 1fr); } .inspector { display: none; } }
+@media (max-width: 48rem) { .workspace-bar { grid-template-columns: auto auto minmax(0, 1fr) auto; } .branch-pill { display: none; } .workspace-grid { grid-template-columns: 1fr; } .sidebar-resizer { display: none; } .navigation { border-right: 0; border-bottom: 1px solid #30363d; } .commit-row { grid-template-columns: 2rem minmax(0, 1fr) auto; } .commit-row time { display: none; } }

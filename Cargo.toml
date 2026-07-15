@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/desktop/src-tauri",
     "crates/app-domain",
+    "crates/app-store",
     "crates/git-core",
     "crates/repo-runtime",
 ]
@@ -16,10 +17,14 @@ repository = "https://github.com/rbrzoska/skibidibi-git"
 
 [workspace.dependencies]
 app-domain = { path = "crates/app-domain" }
+app-store = { path = "crates/app-store" }
 git-core = { path = "crates/git-core" }
 repo-runtime = { path = "crates/repo-runtime" }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 tauri = "2"
 tauri-build = "2"
+tauri-plugin-dialog = "2.7.1"
 tempfile = "3"
 thiserror = "2"
+uuid = { version = "1.23.5", features = ["v4"] }

@@ -15,4 +15,8 @@ export class RepositoryStatus {
   protected updateRepositoryPath(event: Event): void {
     this.statusStore.setRepositoryPath((event.target as HTMLInputElement).value);
   }
+
+  protected selectRepositoryDirectory(): void {
+    void this.statusStore.selectRepositoryDirectory();
+  }
 }

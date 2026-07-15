@@ -17,10 +17,36 @@ export class RepositoryStatusStore {
   private requestGeneration = 0;
 
   readonly repositoryPath = signal('');
+  readonly isSelectingDirectory = signal(false);
   readonly state = signal<RepositoryStatusState>({ kind: 'idle' });
 
   setRepositoryPath(repositoryPath: string): void {
     this.repositoryPath.set(repositoryPath.trim());
+  }
+
+  async selectRepositoryDirectory(): Promise<void> {
+    if (this.isSelectingDirectory()) {
+      return;
+    }
+
+    this.isSelectingDirectory.set(true);
+    try {
+      const selection = await this.ipc.invoke('select_repository_directory', {
+        initialPath: this.repositoryPath() || null,
+      });
+
+      if (selection.path !== null) {
+        this.setRepositoryPath(selection.path);
+        await this.refresh();
+      }
+    } catch {
+      this.state.set({
+        kind: 'error',
+        message: 'The directory picker is unavailable. Enter the repository path manually.',
+      });
+    } finally {
+      this.isSelectingDirectory.set(false);
+    }
   }
 
   async refresh(): Promise<void> {

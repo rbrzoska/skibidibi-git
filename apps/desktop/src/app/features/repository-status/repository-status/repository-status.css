@@ -54,6 +54,8 @@ button:disabled {
 }
 
 input {
+  min-width: 0;
+  width: 100%;
   border: 1px solid #30363d;
   border-radius: 0.5rem;
   padding: 0.65rem 0.75rem;
@@ -62,11 +64,38 @@ input {
   font: inherit;
 }
 
+.repository-path-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+}
+
+.secondary-button {
+  border-color: #484f58;
+  color: #f0f6fc;
+  background: #21262d;
+  white-space: nowrap;
+}
+
+.secondary-button:hover {
+  background: #30363d;
+}
+
+@media (max-width: 38rem) {
+  .repository-path-control {
+    grid-template-columns: 1fr;
+  }
+}
+
 dl {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
   gap: 1rem;
   margin: 2rem 0 0;
+}
+
+dl > div {
+  min-width: 0;
 }
 
 dt {
@@ -77,6 +106,7 @@ dt {
 dd {
   margin: 0.3rem 0 0;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .error {

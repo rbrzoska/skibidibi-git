@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.rbrzoska.skibidibi-git",
   "build": {
-    "beforeDevCommand": "pnpm --dir .. exec ng serve desktop",
-    "beforeBuildCommand": "pnpm --dir .. exec ng build desktop",
+    "beforeDevCommand": "pnpm --filter @skibidibi-git/desktop start",
+    "beforeBuildCommand": "pnpm --filter @skibidibi-git/desktop build",
     "devUrl": "http://localhost:4200",
     "frontendDist": "../dist/desktop/browser"
   },

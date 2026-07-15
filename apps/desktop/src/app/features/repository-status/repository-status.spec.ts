@@ -22,6 +22,47 @@ const status: RepositoryStatusResponse = {
 };
 
 describe('RepositoryStatusStore', () => {
+  it('loads the selected repository directory', async () => {
+    const ipc: DesktopIpcClient = {
+      invoke: vi
+        .fn()
+        .mockResolvedValueOnce({ path: '/work/selected-repository' })
+        .mockResolvedValueOnce(status),
+    };
+    TestBed.configureTestingModule({
+      providers: [RepositoryStatusStore, { provide: DESKTOP_IPC, useValue: ipc }],
+    });
+    const store = TestBed.inject(RepositoryStatusStore);
+
+    await store.selectRepositoryDirectory();
+
+    expect(ipc.invoke).toHaveBeenNthCalledWith(1, 'select_repository_directory', {
+      initialPath: null,
+    });
+    expect(ipc.invoke).toHaveBeenNthCalledWith(2, 'repository_status', {
+      repositoryPath: '/work/selected-repository',
+    });
+    expect(store.repositoryPath()).toBe('/work/selected-repository');
+    expect(store.state()).toEqual({ kind: 'ready', status });
+  });
+
+  it('keeps the current repository when directory selection is cancelled', async () => {
+    const ipc: DesktopIpcClient = {
+      invoke: vi.fn().mockResolvedValue({ path: null }),
+    };
+    TestBed.configureTestingModule({
+      providers: [RepositoryStatusStore, { provide: DESKTOP_IPC, useValue: ipc }],
+    });
+    const store = TestBed.inject(RepositoryStatusStore);
+    store.setRepositoryPath('/work/current-repository');
+
+    await store.selectRepositoryDirectory();
+
+    expect(ipc.invoke).toHaveBeenCalledOnce();
+    expect(store.repositoryPath()).toBe('/work/current-repository');
+    expect(store.state()).toEqual({ kind: 'idle' });
+  });
+
   it('passes repositoryPath to the typed IPC command', async () => {
     const ipc: DesktopIpcClient = {
       invoke: vi.fn().mockResolvedValue(status),

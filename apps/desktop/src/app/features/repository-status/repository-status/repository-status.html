@@ -15,13 +15,23 @@
 
   <label class="repository-path">
     <span>Repository path</span>
-    <input
-      type="text"
-      autocomplete="off"
-      placeholder="/absolute/path/to/repository"
-      [value]="statusStore.repositoryPath()"
-      (input)="updateRepositoryPath($event)"
-    />
+    <span class="repository-path-control">
+      <input
+        type="text"
+        autocomplete="off"
+        placeholder="/absolute/path/to/repository"
+        [value]="statusStore.repositoryPath()"
+        (input)="updateRepositoryPath($event)"
+      />
+      <button
+        type="button"
+        class="secondary-button"
+        [disabled]="statusStore.isSelectingDirectory()"
+        (click)="selectRepositoryDirectory()"
+      >
+        {{ statusStore.isSelectingDirectory() ? 'Opening…' : 'Choose folder' }}
+      </button>
+    </span>
   </label>
 
   @let state = statusStore.state();

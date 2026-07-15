@@ -1,0 +1,73 @@
+<main class="launcher">
+  <header class="hero">
+    <p class="eyebrow">local-first desktop git client</p>
+    <h1>Choose a repository</h1>
+    <p>Continue where you left off, or open another working directory.</p>
+  </header>
+
+  <section class="recent" aria-labelledby="recent-heading">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">remembered repositories</p>
+        <h2 id="recent-heading">Recent</h2>
+      </div>
+      <span class="count">{{ catalog.count() }}</span>
+    </div>
+
+    <div class="repository-list">
+      @for (repository of catalog.repositories(); track repository.id) {
+        <button type="button" class="repository-row" (click)="openRepository(repository)">
+          <span class="provider-mark" [class.local]="repository.provider === 'local'">
+            {{ repository.provider === 'github' ? 'GH' : 'L' }}
+          </span>
+          <span class="repository-identity">
+            <strong>{{ repository.name }}</strong>
+            <small>{{ repository.path }}</small>
+          </span>
+          <span class="integration" [class.local]="repository.integration === 'local-only'">
+            <i aria-hidden="true"></i>
+            @if (repository.availability === 'missing') {
+              Missing locally
+            } @else if (repository.integration === 'connected') {
+              GitHub connected
+            } @else if (repository.integration === 'attention') {
+              Integration needs attention
+            } @else if (repository.integration === 'unchecked') {
+              {{ repository.transport.toUpperCase() }} · unchecked
+            } @else {
+              Local only
+            }
+          </span>
+          <span class="last-opened">{{ repository.lastOpenedLabel }}</span>
+          <span class="chevron" aria-hidden="true">›</span>
+        </button>
+      }
+      @let catalogState = catalog.state();
+      @if (catalogState.kind === 'loading') {
+        <p class="catalog-message">Loading remembered repositories…</p>
+      } @else if (catalogState.kind === 'error') {
+        <p class="catalog-message error">{{ catalogState.message }}</p>
+      } @else if (catalog.repositories().length === 0) {
+        <p class="catalog-message">No remembered repositories yet. Choose a folder below.</p>
+      }
+    </div>
+  </section>
+
+  <section class="open-repository" aria-labelledby="open-heading">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">open another</p>
+        <h2 id="open-heading">Repository directory</h2>
+      </div>
+      <button
+        type="button"
+        class="open-workspace"
+        [disabled]="statusStore.repositoryPath().length === 0"
+        (click)="openSelectedRepository()"
+      >
+        Open workspace
+      </button>
+    </div>
+    <app-repository-status />
+  </section>
+</main>

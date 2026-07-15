@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 
 import { App } from './app';
 import { DESKTOP_IPC, DesktopIpc } from './core/ipc/desktop-ipc';
@@ -7,7 +8,7 @@ describe('App', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [App],
-      providers: [{ provide: DESKTOP_IPC, useExisting: DesktopIpc }],
+      providers: [provideRouter([]), { provide: DESKTOP_IPC, useExisting: DesktopIpc }],
     }).compileComponents();
   });
 
@@ -26,6 +27,6 @@ describe('App', () => {
     fixture.detectChanges();
 
     const compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.querySelector('h1')?.textContent).toContain('Skibidibi Git');
+    expect(compiled.textContent).toContain('Skibidibi Git');
   });
 });

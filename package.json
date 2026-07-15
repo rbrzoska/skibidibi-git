@@ -8,8 +8,14 @@
     "pnpm": "^11.7.0"
   },
   "scripts": {
+    "start": "pnpm tauri dev",
+    "dev": "pnpm tauri dev",
+    "tauri": "tauri",
     "build": "pnpm --filter @skibidibi-git/desktop build",
     "lint": "pnpm --filter @skibidibi-git/desktop lint",
     "test": "pnpm --filter @skibidibi-git/desktop test"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
   }
 }
