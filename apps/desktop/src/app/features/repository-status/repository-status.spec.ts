@@ -31,10 +31,11 @@ describe('RepositoryStatusStore', () => {
     });
     const store = TestBed.inject(RepositoryStatusStore);
 
+    store.setRepositoryPath('/work/skibidibi-git');
     await store.refresh();
 
     expect(ipc.invoke).toHaveBeenCalledWith('repository_status', {
-      repositoryPath: '~/projects/skibidibi-git',
+      repositoryPath: '/work/skibidibi-git',
     });
     expect(store.state()).toEqual({ kind: 'ready', status });
   });
@@ -48,11 +49,38 @@ describe('RepositoryStatusStore', () => {
     });
     const store = TestBed.inject(RepositoryStatusStore);
 
+    store.setRepositoryPath('/missing/repository');
     await store.refresh();
 
     expect(store.state()).toEqual({
       kind: 'error',
-      message: 'Repository status is unavailable. Check the desktop bridge and try again.',
+      message: 'Repository status is unavailable. Check the path and desktop bridge.',
     });
+  });
+
+  it('keeps the newest result when refresh requests finish out of order', async () => {
+    let resolveFirst: ((value: RepositoryStatusResponse) => void) | undefined;
+    const first = new Promise<RepositoryStatusResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const newest: RepositoryStatusResponse = {
+      ...status,
+      branch: { ...status.branch, head: 'newest' },
+    };
+    const ipc: DesktopIpcClient = {
+      invoke: vi.fn().mockReturnValueOnce(first).mockResolvedValueOnce(newest),
+    };
+    TestBed.configureTestingModule({
+      providers: [RepositoryStatusStore, { provide: DESKTOP_IPC, useValue: ipc }],
+    });
+    const store = TestBed.inject(RepositoryStatusStore);
+    store.setRepositoryPath('/work/skibidibi-git');
+
+    const olderRefresh = store.refresh();
+    await store.refresh();
+    resolveFirst?.(status);
+    await olderRefresh;
+
+    expect(store.state()).toEqual({ kind: 'ready', status: newest });
   });
 });

@@ -22,10 +22,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 11.7.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.22.3
           cache: pnpm
       - name: Install and check Angular workspace
         run: |
@@ -38,10 +38,10 @@ jobs:
           else
             pnpm install --no-frozen-lockfile
           fi
-          if [ -f angular.json ]; then
-            pnpm exec ng lint
-            pnpm exec ng test --watch=false --no-progress --browsers=ChromeHeadless
-            pnpm exec ng build
+          if [ -f apps/desktop/angular.json ]; then
+            pnpm lint
+            pnpm test
+            pnpm build
           else
             echo "No angular.json yet; skipping Angular-specific checks."
           fi
@@ -58,6 +58,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: actions/cache@v4
         with:
           path: |
@@ -67,7 +72,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - name: Format, lint, and test Rust workspace

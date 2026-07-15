@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
 import { DESKTOP_IPC, type DesktopIpcClient } from '../../../core/ipc/desktop-ipc';
+import { RepositoryStatusStore } from '../repository-status';
 import { RepositoryStatus } from './repository-status';
 
 describe('RepositoryStatus', () => {
@@ -30,6 +31,9 @@ describe('RepositoryStatus', () => {
 
     fixture = TestBed.createComponent(RepositoryStatus);
     component = fixture.componentInstance;
+    const store = TestBed.inject(RepositoryStatusStore);
+    store.setRepositoryPath('/work/skibidibi-git');
+    await store.refresh();
     await fixture.whenStable();
   });
 

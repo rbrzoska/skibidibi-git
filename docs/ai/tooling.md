@@ -21,3 +21,10 @@ args = ["exec", "ng", "mcp"]
 ```
 
 Run it from this repository's workspace root so pnpm resolves the pinned CLI.
+
+## Angular build cache
+
+The repository currently disables the Angular CLI disk cache in `apps/desktop/angular.json`.
+Angular 22.0.6 cold production builds deadlocked in the esbuild service when the pnpm-approved
+LMDB cache was enabled, while cache-free builds were repeatable. Re-enable it only after a
+cold-build check passes on macOS, Windows, and Linux.

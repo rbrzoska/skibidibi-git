@@ -11,4 +11,8 @@ import { RepositoryStatusStore } from '../repository-status';
 })
 export class RepositoryStatus {
   protected readonly statusStore = inject(RepositoryStatusStore);
+
+  protected updateRepositoryPath(event: Event): void {
+    this.statusStore.setRepositoryPath((event.target as HTMLInputElement).value);
+  }
 }

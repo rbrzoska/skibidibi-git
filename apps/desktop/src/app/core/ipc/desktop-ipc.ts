@@ -1,4 +1,4 @@
-import { Injectable, InjectionToken } from '@angular/core';
+import { Injectable, InjectionToken, isDevMode } from '@angular/core';
 
 export interface RepositoryStatusRequest {
   readonly repositoryPath: string;
@@ -80,7 +80,13 @@ export class DesktopIpc implements DesktopIpcClient {
       return this.core.invoke<DesktopIpcContract[C]['response']>(command, request);
     }
 
-    return this.invokeMock(command);
+    if (isDevMode()) {
+      return this.invokeMock(command);
+    }
+
+    return Promise.reject(
+      new Error('The Tauri IPC bridge is unavailable in the production application.'),
+    );
   }
 
   private invokeMock<C extends DesktopCommand>(

@@ -40,6 +40,28 @@ button:hover {
   background: #388bfd;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.repository-path {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 1.5rem;
+  color: #8b949e;
+  font-size: 0.8rem;
+}
+
+input {
+  border: 1px solid #30363d;
+  border-radius: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  color: #f0f6fc;
+  background: #0d1117;
+  font: inherit;
+}
+
 dl {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));

@@ -4,11 +4,31 @@
       <p class="eyebrow">repository status</p>
       <h2>Current workspace</h2>
     </div>
-    <button type="button" (click)="statusStore.refresh()">Refresh</button>
+    <button
+      type="button"
+      [disabled]="statusStore.state().kind === 'loading' || statusStore.repositoryPath().length === 0"
+      (click)="statusStore.refresh()"
+    >
+      Refresh
+    </button>
   </div>
+
+  <label class="repository-path">
+    <span>Repository path</span>
+    <input
+      type="text"
+      autocomplete="off"
+      placeholder="/absolute/path/to/repository"
+      [value]="statusStore.repositoryPath()"
+      (input)="updateRepositoryPath($event)"
+    />
+  </label>
 
   @let state = statusStore.state();
   @switch (state.kind) {
+    @case ('idle') {
+      <p class="muted">Enter an absolute repository path to load its status.</p>
+    }
     @case ('loading') {
       <p class="muted">Loading repository status…</p>
     }

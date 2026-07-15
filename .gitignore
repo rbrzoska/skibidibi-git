@@ -15,6 +15,7 @@ target/
 
 # Desktop/app build output
 src-tauri/target/
+**/src-tauri/gen/schemas/
 
 # Local development documentation and generated caches
 docs_dev/

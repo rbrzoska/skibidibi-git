@@ -4,8 +4,8 @@
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": ">=22.0.0",
-    "pnpm": ">=11.0.0"
+    "node": "^22.22.3 || ^24.15.0 || ^26.0.0",
+    "pnpm": "^11.7.0"
   },
   "scripts": {
     "build": "pnpm --filter @skibidibi-git/desktop build",
