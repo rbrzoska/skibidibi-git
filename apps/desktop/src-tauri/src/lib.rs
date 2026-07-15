@@ -1,19 +1,24 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use app_domain::{
-    CommitDetails, CommitHistoryPage, FileDiff, IntegrationHealth, IntegrationHealthIssue,
-    IntegrationHealthState, RememberRepositoryInput, RememberedRepository, RepositoryAvailability,
-    RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider, RepositoryStatus,
-    RepositoryTransport, SwitchBranchRequest, SwitchBranchResult,
+    ApplyIndexChangeRequest, ApplyIndexChangeResult, CommitDetails, CommitHistoryPage,
+    CreateCommitRequest, CreateCommitResult, DeleteBranchRequest, DeleteBranchResult,
+    FetchRepositoryResult, FileDiff, IntegrationHealth, IntegrationHealthIssue,
+    IntegrationHealthState, RememberRepositoryInput, RememberedRepository, RemoveWorktreeRequest,
+    RemoveWorktreeResult, RepositoryAvailability, RepositoryHealthUpdate, RepositoryNavigation,
+    RepositoryProvider, RepositoryStatus, RepositoryTransport, SwitchBranchRequest,
+    SwitchBranchResult, WorkingTreeFileDiff,
 };
 use app_store::{CatalogError, RepositoryCatalog};
 use repo_runtime::{
-    BranchSwitchError, FileDiffRuntimeError, HistoryRuntimeError, NavigationRuntimeError,
-    RepositoryRuntime, RepositoryRuntimeError,
+    BranchSwitchError, FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError,
+    MutationRuntimeError, NavigationRuntimeError, RepositoryRuntime, RepositoryRuntimeError,
+    WorkingTreeDiffRuntimeError,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -23,7 +28,7 @@ use uuid::Uuid;
 struct AppState {
     repositories: RepositoryRuntime,
     catalog: Mutex<RepositoryCatalog>,
-    mutations: Arc<Mutex<()>>,
+    mutations: MutationLockRegistry,
 }
 
 impl AppState {
@@ -31,8 +36,28 @@ impl AppState {
         Self {
             repositories: RepositoryRuntime::default(),
             catalog: Mutex::new(catalog),
-            mutations: Arc::new(Mutex::new(())),
+            mutations: MutationLockRegistry::default(),
         }
+    }
+}
+
+#[derive(Default)]
+struct MutationLockRegistry {
+    locks: Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
+}
+
+impl MutationLockRegistry {
+    fn for_repository(&self, repository: &Path) -> Result<Arc<Mutex<()>>, CommandError> {
+        let mut locks = self.locks.lock().map_err(|_| CommandError {
+            message: "repository mutation registry is unavailable".to_owned(),
+        })?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(repository).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(repository.to_path_buf(), Arc::downgrade(&lock));
+        Ok(lock)
     }
 }
 
@@ -82,7 +107,15 @@ impl From<NavigationRuntimeError> for CommandError {
 impl From<BranchSwitchError> for CommandError {
     fn from(error: BranchSwitchError) -> Self {
         Self {
-            message: error.to_string(),
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<MaintenanceError> for CommandError {
+    fn from(error: MaintenanceError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
         }
     }
 }
@@ -91,6 +124,22 @@ impl From<FileDiffRuntimeError> for CommandError {
     fn from(error: FileDiffRuntimeError) -> Self {
         Self {
             message: error.to_string(),
+        }
+    }
+}
+
+impl From<WorkingTreeDiffRuntimeError> for CommandError {
+    fn from(error: WorkingTreeDiffRuntimeError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<MutationRuntimeError> for CommandError {
+    fn from(error: MutationRuntimeError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
         }
     }
 }
@@ -125,6 +174,79 @@ fn resolve_repository_path(
         .ok_or_else(|| CommandError {
             message: format!("remembered repository not found: {repository_id}"),
         })
+}
+
+fn read_small_git_pointer(path: &Path) -> Result<String, CommandError> {
+    let metadata = std::fs::metadata(path).map_err(|error| CommandError {
+        message: format!("Git metadata pointer is unavailable: {error}"),
+    })?;
+    if metadata.len() > 64 * 1024 {
+        return Err(CommandError {
+            message: "Git metadata pointer is unexpectedly large".to_owned(),
+        });
+    }
+    std::fs::read_to_string(path).map_err(|error| CommandError {
+        message: format!("Git metadata pointer is invalid: {error}"),
+    })
+}
+
+fn resolve_git_common_dir(repository: &Path) -> Result<PathBuf, CommandError> {
+    let repository = std::fs::canonicalize(repository).map_err(|error| CommandError {
+        message: format!("repository path is unavailable: {error}"),
+    })?;
+    let dot_git = repository.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        std::fs::canonicalize(dot_git)
+    } else if dot_git.is_file() {
+        let pointer = read_small_git_pointer(&dot_git)?;
+        let value = pointer
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("gitdir: "))
+            .ok_or_else(|| CommandError {
+                message: "linked-worktree Git directory pointer is invalid".to_owned(),
+            })?;
+        let candidate = Path::new(value);
+        std::fs::canonicalize(if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            repository.join(candidate)
+        })
+    } else if repository.join("HEAD").is_file() && repository.join("objects").is_dir() {
+        Ok(repository)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Git directory not found",
+        ))
+    }
+    .map_err(|error| CommandError {
+        message: format!("Git directory is unavailable: {error}"),
+    })?;
+
+    let common_pointer = git_dir.join("commondir");
+    if !common_pointer.is_file() {
+        return Ok(git_dir);
+    }
+    let value = read_small_git_pointer(&common_pointer)?;
+    let candidate = Path::new(value.trim());
+    std::fs::canonicalize(if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        git_dir.join(candidate)
+    })
+    .map_err(|error| CommandError {
+        message: format!("Git common directory is unavailable: {error}"),
+    })
+}
+
+fn mutation_lock(
+    state: &State<'_, AppState>,
+    repository_path: &Path,
+) -> Result<Arc<Mutex<()>>, CommandError> {
+    state
+        .mutations
+        .for_repository(&resolve_git_common_dir(repository_path)?)
 }
 
 fn repository_availability(path: &str) -> RepositoryAvailability {
@@ -216,6 +338,73 @@ async fn repository_file_diff(
 }
 
 #[tauri::command]
+async fn repository_working_tree_file_diff(
+    repository_id: String,
+    path: String,
+    old_path: Option<String>,
+    entry_kind: app_domain::StatusEntryKind,
+    state: State<'_, AppState>,
+) -> Result<WorkingTreeFileDiff, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .working_tree_file_diff(&repository_path, &path, old_path.as_deref(), entry_kind)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("working-tree file diff task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_apply_index_change(
+    repository_id: String,
+    operation: ApplyIndexChangeRequest,
+    state: State<'_, AppState>,
+) -> Result<ApplyIndexChangeResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .apply_index_change(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("index mutation task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_create_commit(
+    repository_id: String,
+    operation: CreateCommitRequest,
+    state: State<'_, AppState>,
+) -> Result<CreateCommitResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .create_commit(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("commit task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
 async fn repository_navigation(
     repository_id: String,
     state: State<'_, AppState>,
@@ -236,23 +425,107 @@ async fn repository_navigation(
 #[tauri::command]
 async fn switch_repository_branch(
     repository_id: String,
-    full_name: String,
+    operation: SwitchBranchRequest,
     state: State<'_, AppState>,
 ) -> Result<SwitchBranchResult, CommandError> {
     let repository_path = resolve_repository_path(&repository_id, &state)?;
     let repositories = state.repositories.clone();
-    let mutations = Arc::clone(&state.mutations);
+    let mutation = mutation_lock(&state, &repository_path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let _mutation_guard = mutations.lock().map_err(|_| CommandError {
+        let _mutation_guard = mutation.lock().map_err(|_| CommandError {
             message: "repository mutation queue is unavailable".to_owned(),
         })?;
         repositories
-            .switch_branch(&repository_path, &SwitchBranchRequest { full_name })
+            .switch_branch(&repository_path, &operation)
             .map_err(CommandError::from)
     })
     .await
     .map_err(|error| CommandError {
         message: format!("branch switch task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn delete_repository_branch(
+    repository_id: String,
+    full_name: String,
+    expected_oid: String,
+    state: State<'_, AppState>,
+) -> Result<DeleteBranchResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    let mutation = mutation_lock(&state, &repository_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .delete_branch(
+                &repository_path,
+                &DeleteBranchRequest {
+                    full_name,
+                    expected_oid,
+                },
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("branch deletion task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn remove_repository_worktree(
+    repository_id: String,
+    path: String,
+    expected_head: Option<String>,
+    branch_full_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<RemoveWorktreeResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    let mutation = mutation_lock(&state, &repository_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .remove_worktree_and_branch(
+                &repository_path,
+                &RemoveWorktreeRequest {
+                    path,
+                    expected_head,
+                    branch_full_name,
+                },
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("worktree removal task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_fetch(
+    repository_id: String,
+    state: State<'_, AppState>,
+) -> Result<FetchRepositoryResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    let mutation = mutation_lock(&state, &repository_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .fetch_repository(&repository_path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("fetch task failed: {error}"),
     })?
 }
 
@@ -404,8 +677,14 @@ pub fn run() {
             repository_history,
             repository_commit_detail,
             repository_file_diff,
+            repository_working_tree_file_diff,
+            repository_apply_index_change,
+            repository_create_commit,
             repository_navigation,
             switch_repository_branch,
+            delete_repository_branch,
+            remove_repository_worktree,
+            repository_fetch,
             select_repository_directory,
             list_remembered_repositories,
             remember_repository,

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct SwitchBranchRequest {
     /// A fully-qualified local ref, for example `refs/heads/feature/safe`.
     pub full_name: String,
+    pub stash_on_dirty: bool,
+    pub stash_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +18,7 @@ pub struct SwitchBranchResult {
     pub head: String,
     /// False when the requested branch was already checked out in this worktree.
     pub changed: bool,
+    pub stash_created: bool,
 }
 
 #[cfg(test)]
@@ -29,6 +32,7 @@ mod tests {
             name: "feature/safe".to_owned(),
             head: "0123456789012345678901234567890123456789".to_owned(),
             changed: false,
+            stash_created: false,
         };
 
         assert_eq!(value.full_name, "refs/heads/feature/safe");

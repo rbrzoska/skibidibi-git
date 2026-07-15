@@ -7,7 +7,9 @@
       <small>{{ repository()?.path ?? repositoryId }}</small>
     </span>
     <span class="branch-pill">⑂ {{ branchName() }}</span>
-    <button type="button" (click)="refreshWorkspace()">Refresh</button>
+    <button type="button" [disabled]="workspaceActionBusy()" (click)="refreshWorkspace()">
+      {{ refreshingWorkspace() ? 'Refreshing…' : 'Refresh' }}
+    </button>
   </header>
 
   <div
@@ -25,8 +27,25 @@
           (input)="updateNavigationFilter($any($event.target).value)"
         />
       </label>
+      <div class="navigation-toggles" aria-label="Repository view settings">
+        <label class="toggle-control">
+          <input type="checkbox" [checked]="currentOnly()" (change)="setCurrentOnly($any($event.target).checked)" />
+          <span>Current only</span>
+        </label>
+        <label class="toggle-control">
+          <input type="checkbox" [checked]="autoFetch()" (change)="setAutoFetch($any($event.target).checked)" />
+          <span>{{ fetchingRepository() ? 'Fetching…' : 'Auto fetch' }}</span>
+        </label>
+        <label class="toggle-control">
+          <input type="checkbox" [checked]="liveChanges()" (change)="setLiveChanges($any($event.target).checked)" />
+          <span>Live changes</span>
+        </label>
+      </div>
       @if (navigationActionError()) {
         <p class="navigation-action-error" role="alert">{{ navigationActionError() }}</p>
+      }
+      @if (liveChanges() && statusStore.backgroundError()) {
+        <p class="navigation-action-error" role="status">{{ statusStore.backgroundError() }}</p>
       }
       @let navigation = navigationState();
       @if (navigation.kind === 'loading') {
@@ -35,7 +54,7 @@
         <div class="navigation-state error-state"><p>{{ navigation.message }}</p><button type="button" (click)="loadNavigation()">Retry</button></div>
       } @else {
         <details open>
-          <summary><span>Local branches</span><strong>{{ localBranches().length }}</strong></summary>
+          <summary><span>Local branches</span><strong>{{ currentOnly() ? (currentLocalBranch() ? 1 : 0) : localBranches().length }}</strong></summary>
           @if (localBranchTree().length === 0 && currentLocalBranch() === null) {
             <p class="section-placeholder">{{ navigationFilter() ? 'No matching local branches.' : 'No local branches found.' }}</p>
           }
@@ -53,7 +72,7 @@
                 </button>
               </li>
             }
-            @for (node of localBranchTree(); track node.kind + ':' + node.path) {
+            @for (node of currentOnly() ? [] : localBranchTree(); track node.kind + ':' + node.path) {
               <li [style.--tree-depth]="node.depth">
                 @if (node.kind === 'folder') {
                   <button
@@ -68,32 +87,36 @@
                     <small>{{ node.branchCount }}</small>
                   </button>
                 } @else {
-                  <button
-                    type="button"
-                    class="tree-row branch-row"
-                    [class.active]="node.branch.current"
-                    [disabled]="node.branch.current || switchingBranch() !== null"
-                    [attr.aria-current]="node.branch.current ? 'true' : null"
-                    [title]="node.branch.current ? node.branch.name + ' (current branch)' : 'Switch to ' + node.branch.name"
-                    (click)="switchBranch(node.branch)"
-                  >
-                    <span class="branch-icon" aria-hidden="true">⑂</span>
-                    <span class="tree-label">{{ node.name }}</span>
-                    @if (switchingBranch() === node.branch.fullName) {
-                      <small>switching…</small>
-                    } @else {
-                      <span class="branch-badges">
-                        @if (node.branch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ node.branch.ahead }}</small> }
-                        @if (node.branch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ node.branch.behind }}</small> }
-                        @if (node.branch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
-                      </span>
-                    }
-                  </button>
+                  <div class="tree-action-row">
+                    <button
+                      type="button"
+                      class="tree-row branch-row"
+                      [disabled]="workspaceActionBusy()"
+                      [title]="'Switch to ' + node.branch.name"
+                      (click)="switchBranch(node.branch)"
+                    >
+                      <span class="branch-icon" aria-hidden="true">⑂</span>
+                      <span class="tree-label">{{ node.name }}</span>
+                      @if (switchingBranch() === node.branch.fullName) {
+                        <small>switching…</small>
+                      } @else {
+                        <span class="branch-badges">
+                          @if (node.branch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ node.branch.ahead }}</small> }
+                          @if (node.branch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ node.branch.behind }}</small> }
+                          @if (node.branch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
+                        </span>
+                      }
+                    </button>
+                    <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Delete local branch ' + node.branch.name" [title]="'Delete local branch ' + node.branch.name" (click)="deleteBranch(node.branch)">
+                      {{ deletingBranch() === node.branch.fullName ? '…' : '×' }}
+                    </button>
+                  </div>
                 }
               </li>
             }
           </ul>
         </details>
+        @if (!currentOnly()) {
         <details open>
           <summary><span>Remote branches</span><strong>{{ remoteBranches().length }}</strong></summary>
           @if (remoteBranchTree().length === 0) {
@@ -128,29 +151,38 @@
             }
           </ul>
         </details>
+        }
         <details open>
-          <summary><span>Worktrees</span><strong>{{ orderedWorktrees().length }}</strong></summary>
-          @if (orderedWorktrees().length === 0) { <p class="section-placeholder">No linked worktrees found.</p> }
+          <summary><span>Worktrees</span><strong>{{ visibleWorktrees().length }}</strong></summary>
+          @if (visibleWorktrees().length === 0) { <p class="section-placeholder">No linked worktrees found.</p> }
           <ul class="worktree-list">
-            @for (worktree of orderedWorktrees(); track worktree.path) {
+            @for (worktree of visibleWorktrees(); track worktree.path) {
               <li>
-                <button
-                  type="button"
-                  class="tree-row worktree-row"
-                  [disabled]="openingWorktree() !== null || worktreeDisabledReason(worktree) !== null"
-                  [title]="worktreeDisabledReason(worktree) === null ? 'Open worktree: ' + worktree.path : worktreeBranchLabel(worktree) + ' (' + worktreeDisabledReason(worktree) + ')'"
-                  (click)="openWorktree(worktree)"
-                >
-                  <span aria-hidden="true">⌂</span>
-                  <span class="tree-label">{{ worktreeBranchLabel(worktree) }}</span>
-                  @if (openingWorktree() === worktree.path) { <small>opening…</small> }
-                  @else if (worktreeDisabledReason(worktree); as reason) { <small>{{ reason }}</small> }
-                  @else if (worktree.locked) { <small>locked</small> }
-                </button>
+                <div class="tree-action-row">
+                  <button
+                    type="button"
+                    class="tree-row worktree-row"
+                    [disabled]="workspaceActionBusy() || worktreeDisabledReason(worktree) !== null"
+                    [title]="worktreeDisabledReason(worktree) === null ? 'Open worktree: ' + worktree.path : worktreeBranchLabel(worktree) + ' (' + worktreeDisabledReason(worktree) + ')'"
+                    (click)="openWorktree(worktree)"
+                  >
+                    <span aria-hidden="true">⌂</span>
+                    <span class="tree-label">{{ worktreeBranchLabel(worktree) }}</span>
+                    @if (openingWorktree() === worktree.path) { <small>opening…</small> }
+                    @else if (worktreeDisabledReason(worktree); as reason) { <small>{{ reason }}</small> }
+                    @else if (worktree.locked) { <small>locked</small> }
+                  </button>
+                  @if (worktreeRemovalDisabledReason(worktree) === null) {
+                    <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Remove worktree ' + worktree.path" [title]="'Remove worktree ' + worktree.path" (click)="removeWorktree(worktree)">
+                      {{ removingWorktree() === worktree.path ? '…' : '×' }}
+                    </button>
+                  }
+                </div>
               </li>
             }
           </ul>
         </details>
+        @if (!currentOnly()) {
         <details>
           <summary><span>Stashes</span><strong>{{ navigation.navigation.stashes.length }}</strong></summary>
           @if (navigation.navigation.stashes.length === 0) { <p class="section-placeholder">No stashes.</p> }
@@ -160,11 +192,12 @@
             }
           </ul>
         </details>
-      }
       <details>
         <summary><span>Pull Requests</span><strong>—</strong></summary>
         <p class="section-placeholder">GitHub integration is not connected yet.</p>
       </details>
+        }
+      }
     </aside>
 
     <div
@@ -180,14 +213,22 @@
       (keydown)="resizeSidebarWithKeyboard($event)"
     ></div>
 
-    <section class="history" aria-labelledby="history-heading" aria-live="polite">
+    <section class="history" aria-labelledby="history-heading">
       @if (fileDiffState().kind !== 'idle') {
         @let diffState = fileDiffState();
         <div class="diff-view">
           <header class="diff-toolbar">
             <button type="button" class="close-diff" aria-label="Close file diff" title="Back to commit history" (click)="closeFileDiff()">×</button>
             <div><p class="eyebrow">file diff</p><h1 id="history-heading" [title]="selectedFilePath() ?? ''">{{ selectedFilePath() }}</h1></div>
-            @if (selectedOid(); as oid) { <code>{{ shortOid(oid) }}</code> }
+            <div class="diff-toolbar-actions">
+              <button
+                type="button"
+                class="diff-mode-toggle"
+                [attr.aria-pressed]="fileDiffDisplayMode() === 'full'"
+                (click)="setFileDiffDisplayMode(fileDiffDisplayMode() === 'full' ? 'contextual' : 'full')"
+              >{{ fileDiffDisplayMode() === 'full' ? 'Show changes only' : 'Show full file' }}</button>
+              @if (selectedOid(); as oid) { <code>{{ shortOid(oid) }}</code> }
+            </div>
           </header>
           @switch (diffState.kind) {
             @case ('loading') {
@@ -201,7 +242,7 @@
               @if (diffState.response.binary || parsed?.hasBinaryFiles) {
                 <div class="diff-state"><span class="binary-icon" aria-hidden="true">01</span><strong>Binary file</strong><p>A textual diff is not available for this file.</p></div>
               } @else if (parsed?.isEmpty) {
-                <div class="diff-state"><strong>No textual changes</strong><p>The commit returned an empty patch for this file.</p></div>
+                <div class="diff-state"><strong>No textual changes</strong><p>{{ historySelection() === 'working-tree' ? 'The working tree returned an empty patch for this file.' : 'The commit returned an empty patch for this file.' }}</p></div>
               } @else {
                 @if (isFileDiffVisuallyTruncated()) {
                   <p class="diff-render-limit" role="status">Showing the first 20,000 diff lines to keep the application responsive.</p>
@@ -217,6 +258,7 @@
                       @case ('binary') { <div class="diff-row metadata"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
                       @case ('no-newline') { <div class="diff-row metadata"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
                       @case ('metadata') { <div class="diff-row metadata"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
+                      @case ('omitted-range') { <div class="diff-row omitted-range"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>⋯ {{ row.omittedLineCount }} unchanged {{ row.omittedLineCount === 1 ? 'line' : 'lines' }} hidden ⋯</code></div> }
                     }
                   }
                 </div>
@@ -229,11 +271,12 @@
       <div class="working-tree">
         <div><p class="eyebrow">working tree</p><h1 id="history-heading">Commit history</h1></div>
         <div class="change-stats" aria-label="Working tree changes">
-          <span><b>{{ summary.total }}</b> changed</span>
-          <span class="added">+{{ summary.added }}</span>
-          <span class="modified">~{{ summary.modified }}</span>
-          <span class="deleted">−{{ summary.deleted }}</span>
-          @if (summary.conflicts > 0) { <span class="conflicts">!{{ summary.conflicts }}</span> }
+          <span><b>{{ summary.counts.total }}</b> changed</span>
+          <span class="added">+{{ summary.counts.added }}</span>
+          <span class="modified">~{{ summary.counts.modified }}</span>
+          <span class="renamed">→{{ summary.counts.renamed }}</span>
+          <span class="deleted">−{{ summary.counts.deleted }}</span>
+          @if (summary.counts.conflicted > 0) { <span class="conflicts">!{{ summary.counts.conflicted }}</span> }
         </div>
       </div>
 
@@ -253,6 +296,25 @@
             </div>
           }
           @case ('ready') {
+            @if (summary.counts.total > 0) {
+              <button
+                type="button"
+                class="working-tree-history-row"
+                role="listitem"
+                [class.selected]="historySelection() === 'working-tree'"
+                [attr.aria-current]="historySelection() === 'working-tree' ? 'true' : null"
+                (click)="selectWorkingTree()"
+              >
+                <span class="working-tree-dot" aria-hidden="true"></span>
+                <span class="working-tree-counts" aria-label="Working tree: {{ summary.counts.added }} added, {{ summary.counts.modified }} modified, {{ summary.counts.renamed }} renamed, {{ summary.counts.deleted }} deleted, {{ summary.counts.conflicted }} conflicted">
+                  @if (summary.counts.added > 0) { <strong class="added">{{ summary.counts.added }} added</strong> }
+                  @if (summary.counts.modified > 0) { <strong class="modified">{{ summary.counts.modified }} modified</strong> }
+                  @if (summary.counts.renamed > 0) { <strong class="renamed">{{ summary.counts.renamed }} renamed</strong> }
+                  @if (summary.counts.deleted > 0) { <strong class="deleted">{{ summary.counts.deleted }} deleted</strong> }
+                  @if (summary.counts.conflicted > 0) { <strong class="conflicts">{{ summary.counts.conflicted }} conflicted</strong> }
+                </span>
+              </button>
+            }
             @if (commits().length === 0) {
               <div class="history-state">
                 <strong>No commits found</strong>
@@ -264,8 +326,8 @@
                   type="button"
                   class="commit-row"
                   role="listitem"
-                  [class.selected]="selectedOid() === commit.oid"
-                  [attr.aria-current]="selectedOid() === commit.oid ? 'true' : null"
+                  [class.selected]="historySelection() === 'commit' && selectedOid() === commit.oid"
+                  [attr.aria-current]="historySelection() === 'commit' && selectedOid() === commit.oid ? 'true' : null"
                   (click)="selectCommit(commit)"
                 >
                   <span class="graph" aria-hidden="true"><i></i></span>
@@ -298,8 +360,85 @@
       }
     </section>
 
-    <aside class="inspector" aria-label="Commit inspector" aria-live="polite">
-      <p class="eyebrow">commit inspector</p>
+    <aside class="inspector" [attr.aria-label]="historySelection() === 'working-tree' ? 'Working tree inspector' : 'Commit inspector'">
+      <header class="inspector-heading">
+        <p class="eyebrow">{{ historySelection() === 'working-tree' ? 'working tree inspector' : 'commit inspector' }}</p>
+      </header>
+      @if (historySelection() === 'working-tree') {
+        @let working = workingTreeSummary();
+        <section class="working-tree-overview" aria-labelledby="working-tree-title">
+          <h2 id="working-tree-title">Working tree</h2>
+          <div class="working-tree-inspector-counts" aria-label="{{ working.counts.total }} changed files">
+            @if (working.counts.added > 0) { <strong class="added">{{ working.counts.added }} added</strong> }
+            @if (working.counts.modified > 0) { <strong class="modified">{{ working.counts.modified }} modified</strong> }
+            @if (working.counts.renamed > 0) { <strong class="renamed">{{ working.counts.renamed }} renamed</strong> }
+            @if (working.counts.deleted > 0) { <strong class="deleted">{{ working.counts.deleted }} deleted</strong> }
+            @if (working.counts.conflicted > 0) { <strong class="conflicts">{{ working.counts.conflicted }} conflicted</strong> }
+          </div>
+        </section>
+        <section class="commit-composer" aria-labelledby="commit-composer-title">
+          <label id="commit-composer-title" for="commit-message">Commit message</label>
+          <textarea
+            id="commit-message"
+            rows="3"
+            placeholder="Summary of the staged changes"
+            [value]="commitMessage()"
+            [disabled]="workspaceActionBusy()"
+            (input)="updateCommitMessage($any($event.target).value)"
+          ></textarea>
+          <button
+            type="button"
+            class="primary-action"
+            [disabled]="commitDisabled()"
+            (click)="createCommit()"
+          >{{ mutationInProgress('commit') ? 'Committing…' : 'Commit staged changes' }}</button>
+          @if (working.counts.conflicted > 0) {
+            <p class="commit-hint conflicts">Resolve all conflicts before committing.</p>
+          } @else if (!workingTreeCapabilities().canCommit) {
+            <p class="commit-hint">Stage at least one change before committing.</p>
+          }
+        </section>
+        @if (workingTreeMutationError()) {
+          <p class="working-tree-action-error" role="alert">{{ workingTreeMutationError() }}</p>
+        }
+        <header class="file-heading">
+          <div><span class="file-heading-label">Files</span><strong>{{ working.counts.total }} changed {{ working.counts.total === 1 ? 'file' : 'files' }}</strong></div>
+        </header>
+        <div class="index-actions" aria-label="Staging actions">
+          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageSelected" [title]="indexActionTitle(workingTreeCapabilities().stageSelectedAmbiguous)" (click)="applyIndexChange('stage', false)">{{ mutationInProgress('stage', 'selected') ? 'Staging…' : 'Stage selected' }}</button>
+          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('stage', true)">{{ mutationInProgress('stage', 'all') ? 'Staging…' : 'Stage all' }}</button>
+          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageSelected" [title]="indexActionTitle(workingTreeCapabilities().unstageSelectedAmbiguous)" (click)="applyIndexChange('unstage', false)">{{ mutationInProgress('unstage', 'selected') ? 'Unstaging…' : 'Unstage selected' }}</button>
+          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('unstage', true)">{{ mutationInProgress('unstage', 'all') ? 'Unstaging…' : 'Unstage all' }}</button>
+        </div>
+        @if (workingTreeCapabilities().conflictedCount > 0) {
+          <p class="commit-hint conflicts">Resolve all conflicts before staging or unstaging changes.</p>
+        }
+        <ul class="changed-files working-tree-files" aria-label="Working tree files">
+          @for (file of working.files; track file.entryKind + ':' + file.path + ':' + (file.oldPath ?? '') + ':' + file.primaryStatus) {
+            <li class="working-tree-file-row">
+              <input
+                type="checkbox"
+                class="working-tree-file-checkbox"
+                [checked]="workingTreeFileSelected(file)"
+                [disabled]="file.primaryStatus === 'conflicted' || workspaceActionBusy()"
+                [attr.aria-label]="'Select ' + file.path + ' for a staging action'"
+                (change)="toggleWorkingTreeFile(file, $any($event.target).checked)"
+              />
+              <button type="button" class="changed-file" [class.selected]="selectedFilePath() === file.path && selectedWorkingTreeEntryKind() === file.entryKind" [attr.aria-pressed]="selectedFilePath() === file.path && selectedWorkingTreeEntryKind() === file.entryKind" [disabled]="file.primaryStatus === 'conflicted'" [title]="file.primaryStatus === 'conflicted' ? 'Conflict diff will be available in the conflict resolver' : 'Open working tree diff for ' + file.path" (click)="openWorkingTreeFileDiff(file)">
+                <span class="file-status" [attr.data-status]="file.primaryStatus" [title]="file.primaryStatus">{{ workingTreeStatusMark(file.primaryStatus) }}</span>
+                <span class="file-path" [title]="file.path">
+                  {{ file.path }}
+                  @if (file.oldPath !== null) { <small>from {{ file.oldPath }}</small> }
+                </span>
+                <span class="working-tree-file-state">
+                  @if (file.staged) { <small class="staged">staged</small> }
+                  @if (file.unstaged) { <small class="unstaged">unstaged</small> }
+                </span>
+              </button>
+            </li>
+          }
+        </ul>
+      } @else {
       @let state = detailState();
       @switch (state.kind) {
         @case ('idle') {
@@ -317,21 +456,43 @@
         @case ('ready') {
           @let detail = state.detail;
           @let fileSummary = selectedFileSummary();
-          <h2>{{ detail.summary || 'Commit without subject' }}</h2>
-          <div class="commit-meta">
-            <code>{{ shortOid(detail.oid) }}</code>
-            <span>{{ detail.author.name }}</span>
-            <small>{{ detail.author.email }}</small>
-            <time [attr.datetime]="detail.author.authoredAt">{{ formatTimestamp(detail.author.authoredAt) }}</time>
-          </div>
+          <section class="commit-overview" aria-labelledby="inspected-commit-title">
+            <h2 id="inspected-commit-title">{{ detail.summary || 'Commit without subject' }}</h2>
+            <dl class="commit-meta">
+              <div class="commit-meta-oid">
+                <dt>Commit</dt>
+                <dd><code>{{ shortOid(detail.oid) }}</code></dd>
+              </div>
+              <div>
+                <dt>Author</dt>
+                <dd>{{ detail.author.name }}</dd>
+              </div>
+              <div>
+                <dt>Email</dt>
+                <dd [title]="detail.author.email">{{ detail.author.email }}</dd>
+              </div>
+              <div>
+                <dt>Authored</dt>
+                <dd><time [attr.datetime]="detail.author.authoredAt">{{ formatTimestamp(detail.author.authoredAt) }}</time></dd>
+              </div>
+            </dl>
+          </section>
           @if (detail.fullMessage && detail.fullMessage !== detail.summary) {
-            <pre class="commit-message">{{ detail.fullMessage }}</pre>
+            <section class="commit-message-block" aria-labelledby="commit-message-heading">
+              <h3 id="commit-message-heading">Message</h3>
+              <pre class="commit-message">{{ detail.fullMessage }}</pre>
+            </section>
           }
-          <div class="file-heading">
-            <strong>{{ fileSummary.files }} changed {{ fileSummary.files === 1 ? 'file' : 'files' }}</strong>
-            <span class="added">+{{ fileSummary.additions }}</span>
-            <span class="deleted">−{{ fileSummary.deletions }}</span>
-          </div>
+          <header class="file-heading">
+            <div>
+              <span class="file-heading-label">Files</span>
+              <strong>{{ fileSummary.files }} changed {{ fileSummary.files === 1 ? 'file' : 'files' }}</strong>
+            </div>
+            <span class="file-summary-stats" aria-label="{{ fileSummary.additions }} additions and {{ fileSummary.deletions }} deletions">
+              <b class="added">+{{ fileSummary.additions }}</b>
+              <b class="deleted">−{{ fileSummary.deletions }}</b>
+            </span>
+          </header>
           @if (detail.files.length === 0) {
             <p class="no-files">No changed files were reported for this commit.</p>
           } @else {
@@ -353,6 +514,7 @@
             </ul>
           }
         }
+      }
       }
     </aside>
   </div>

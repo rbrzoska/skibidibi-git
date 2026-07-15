@@ -38,6 +38,64 @@ export interface StatusEntry {
 export interface RepositoryStatusResponse {
   readonly branch: RepositoryBranchStatus;
   readonly entries: readonly StatusEntry[];
+  readonly indexFingerprint: string;
+  readonly worktreeFingerprint: string;
+}
+
+export type IndexAction = 'stage' | 'unstage';
+
+export interface WorkingTreeEntrySelector {
+  readonly path: string;
+  readonly oldPath: string | null;
+  readonly entryKind: StatusEntry['kind'];
+}
+
+export type ChangeSelection =
+  | { readonly scope: 'all' }
+  | {
+      readonly scope: 'selected';
+      readonly entries: readonly WorkingTreeEntrySelector[];
+    };
+
+export interface ApplyIndexChangeOperation {
+  readonly action: IndexAction;
+  readonly selection: ChangeSelection;
+  readonly expectedHead: string | null;
+  readonly expectedHeadName: string | null;
+  readonly expectedDetached: boolean;
+  readonly expectedUnborn: boolean;
+  readonly expectedIndexFingerprint: string;
+  readonly expectedWorktreeFingerprint: string;
+}
+
+export interface ApplyIndexChangeRequest {
+  readonly repositoryId: string;
+  readonly operation: ApplyIndexChangeOperation;
+}
+
+export interface ApplyIndexChangeResponse {
+  readonly changed: boolean;
+  readonly status: RepositoryStatusResponse;
+}
+
+export interface CreateCommitOperation {
+  readonly message: string;
+  readonly expectedHead: string | null;
+  readonly expectedHeadName: string | null;
+  readonly expectedDetached: boolean;
+  readonly expectedUnborn: boolean;
+  readonly expectedIndexFingerprint: string;
+  readonly expectedWorktreeFingerprint: string;
+}
+
+export interface CreateCommitRequest {
+  readonly repositoryId: string;
+  readonly operation: CreateCommitOperation;
+}
+
+export interface CreateCommitResponse {
+  readonly oid: string;
+  readonly status: RepositoryStatusResponse;
 }
 
 export interface RepositoryHistoryRequest {
@@ -114,13 +172,31 @@ export interface RepositoryFileDiffResponse {
   readonly truncated: boolean;
 }
 
+export interface WorkingTreeFileDiffRequest {
+  readonly repositoryId: string;
+  readonly path: string;
+  readonly oldPath: string | null;
+  readonly entryKind: StatusEntry['kind'];
+}
+
+export interface WorkingTreeFileDiffResponse {
+  readonly path: string;
+  readonly patch: string;
+  readonly binary: boolean;
+  readonly truncated: boolean;
+}
+
 export interface RepositoryNavigationRequest {
   readonly repositoryId: string;
 }
 
 export interface SwitchRepositoryBranchRequest {
   readonly repositoryId: string;
-  readonly fullName: string;
+  readonly operation: {
+    readonly fullName: string;
+    readonly stashOnDirty: boolean;
+    readonly stashMessage: string | null;
+  };
 }
 
 export interface SwitchRepositoryBranchResponse {
@@ -128,6 +204,37 @@ export interface SwitchRepositoryBranchResponse {
   readonly name: string;
   readonly head: string;
   readonly changed: boolean;
+  readonly stashCreated: boolean;
+}
+
+export interface DeleteRepositoryBranchRequest {
+  readonly repositoryId: string;
+  readonly fullName: string;
+  readonly expectedOid: string;
+}
+
+export interface DeleteRepositoryBranchResponse {
+  readonly fullName: string;
+  readonly deleted: boolean;
+}
+
+export interface RemoveRepositoryWorktreeRequest {
+  readonly repositoryId: string;
+  readonly path: string;
+  readonly expectedHead: string | null;
+  readonly branchFullName: string | null;
+}
+
+export interface RemoveRepositoryWorktreeResponse {
+  readonly path: string;
+  readonly branchFullName: string | null;
+  readonly worktreeRemoved: boolean;
+  readonly branchDeleted: boolean;
+  readonly branchDeletionError: string | null;
+}
+
+export interface FetchRepositoryResponse {
+  readonly fetchedAt: number;
 }
 
 export interface RepositoryBranch {
@@ -235,6 +342,18 @@ export interface DesktopIpcContract {
     readonly request: RepositoryFileDiffRequest;
     readonly response: RepositoryFileDiffResponse;
   };
+  readonly repository_working_tree_file_diff: {
+    readonly request: WorkingTreeFileDiffRequest;
+    readonly response: WorkingTreeFileDiffResponse;
+  };
+  readonly repository_apply_index_change: {
+    readonly request: ApplyIndexChangeRequest;
+    readonly response: ApplyIndexChangeResponse;
+  };
+  readonly repository_create_commit: {
+    readonly request: CreateCommitRequest;
+    readonly response: CreateCommitResponse;
+  };
   readonly repository_navigation: {
     readonly request: RepositoryNavigationRequest;
     readonly response: RepositoryNavigationResponse;
@@ -242,6 +361,18 @@ export interface DesktopIpcContract {
   readonly switch_repository_branch: {
     readonly request: SwitchRepositoryBranchRequest;
     readonly response: SwitchRepositoryBranchResponse;
+  };
+  readonly delete_repository_branch: {
+    readonly request: DeleteRepositoryBranchRequest;
+    readonly response: DeleteRepositoryBranchResponse;
+  };
+  readonly remove_repository_worktree: {
+    readonly request: RemoveRepositoryWorktreeRequest;
+    readonly response: RemoveRepositoryWorktreeResponse;
+  };
+  readonly repository_fetch: {
+    readonly request: RepositoryNavigationRequest;
+    readonly response: FetchRepositoryResponse;
   };
   readonly select_repository_directory: {
     readonly request: SelectRepositoryDirectoryRequest;
@@ -313,6 +444,8 @@ export class DesktopIpc implements DesktopIpcClient {
   ): Promise<DesktopIpcContract[C]['response']> {
     if (command === 'repository_status') {
       const response: RepositoryStatusResponse = {
+        indexFingerprint: 'browser-development-index',
+        worktreeFingerprint: 'browser-development-worktree',
         branch: {
           oid: 'a1b2c3d4e5f6',
           head: 'main',
@@ -359,6 +492,24 @@ export class DesktopIpc implements DesktopIpcClient {
       );
     }
 
+    if (command === 'repository_working_tree_file_diff') {
+      return Promise.reject(
+        new Error('Working-tree file diffs are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'repository_apply_index_change') {
+      return Promise.reject(
+        new Error('Staging changes is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'repository_create_commit') {
+      return Promise.reject(
+        new Error('Creating commits is unavailable outside the desktop application.'),
+      );
+    }
+
     if (command === 'repository_navigation') {
       const response: RepositoryNavigationResponse = {
         branches: [],
@@ -371,6 +522,24 @@ export class DesktopIpc implements DesktopIpcClient {
     if (command === 'switch_repository_branch') {
       return Promise.reject(
         new Error('Switching branches is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'delete_repository_branch') {
+      return Promise.reject(
+        new Error('Deleting branches is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'remove_repository_worktree') {
+      return Promise.reject(
+        new Error('Removing worktrees is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'repository_fetch') {
+      return Promise.reject(
+        new Error('Fetching repositories is unavailable outside the desktop application.'),
       );
     }
 

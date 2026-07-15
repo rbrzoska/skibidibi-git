@@ -3,6 +3,8 @@ import { TestBed } from '@angular/core/testing';
 import { DesktopIpc, type RepositoryStatusResponse } from './desktop-ipc';
 
 const repositoryStatusFixture: RepositoryStatusResponse = {
+  indexFingerprint: 'browser-development-index',
+  worktreeFingerprint: 'browser-development-worktree',
   branch: {
     oid: 'a1b2c3d4e5f6',
     head: 'main',
@@ -86,6 +88,55 @@ describe('DesktopIpc', () => {
     ).rejects.toThrow('unavailable outside the desktop application');
   });
 
+  it('does not fabricate working-tree file diffs outside Tauri', async () => {
+    await expect(
+      service.invoke('repository_working_tree_file_diff', {
+        repositoryId: 'example-repository',
+        path: 'src/app.ts',
+        oldPath: null,
+        entryKind: 'ordinary',
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('does not pretend to stage changes outside Tauri', async () => {
+    await expect(
+      service.invoke('repository_apply_index_change', {
+        repositoryId: 'example-repository',
+        operation: {
+          action: 'stage',
+          selection: {
+            scope: 'selected',
+            entries: [{ path: 'src/app.ts', oldPath: null, entryKind: 'ordinary' }],
+          },
+          expectedHead: 'abc123',
+          expectedHeadName: 'main',
+          expectedDetached: false,
+          expectedUnborn: false,
+          expectedIndexFingerprint: 'fixture-index',
+          expectedWorktreeFingerprint: 'fixture-worktree',
+        },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('does not pretend to create commits outside Tauri', async () => {
+    await expect(
+      service.invoke('repository_create_commit', {
+        repositoryId: 'example-repository',
+        operation: {
+          message: 'A real commit',
+          expectedHead: 'abc123',
+          expectedHeadName: 'main',
+          expectedDetached: false,
+          expectedUnborn: false,
+          expectedIndexFingerprint: 'fixture-index',
+          expectedWorktreeFingerprint: 'fixture-worktree',
+        },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
   it('returns honest empty repository navigation outside Tauri', async () => {
     await expect(
       service.invoke('repository_navigation', { repositoryId: 'example-repository' }),
@@ -96,9 +147,30 @@ describe('DesktopIpc', () => {
     await expect(
       service.invoke('switch_repository_branch', {
         repositoryId: 'example-repository',
-        fullName: 'refs/heads/feature',
+        operation: {
+          fullName: 'refs/heads/feature',
+          stashOnDirty: false,
+          stashMessage: null,
+        },
       }),
     ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('does not pretend to delete branches, worktrees, or fetch outside Tauri', async () => {
+    await expect(service.invoke('delete_repository_branch', {
+      repositoryId: 'example-repository',
+      fullName: 'refs/heads/feature',
+      expectedOid: 'abc123',
+    })).rejects.toThrow('unavailable outside the desktop application');
+    await expect(service.invoke('remove_repository_worktree', {
+      repositoryId: 'example-repository',
+      path: '/work/feature',
+      expectedHead: 'abc123',
+      branchFullName: 'refs/heads/feature',
+    })).rejects.toThrow('unavailable outside the desktop application');
+    await expect(service.invoke('repository_fetch', {
+      repositoryId: 'example-repository',
+    })).rejects.toThrow('unavailable outside the desktop application');
   });
 
   it('creates a local remembered-repository DTO in browser development', async () => {

@@ -3,7 +3,7 @@ use std::{path::Path, time::Duration};
 use app_domain::{RepositoryBranch, RepositoryBranchKind, SwitchBranchRequest, SwitchBranchResult};
 use git_core::{
     GitInvocation, GitInvocationPolicy, GitOutput, GitRunError, GitRunner, NavigationParseError,
-    parse_branch_records,
+    StatusParseError, parse_branch_records, parse_porcelain_v2_z,
 };
 use thiserror::Error;
 
@@ -15,6 +15,14 @@ const BRANCH_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const ACTION_STDOUT_LIMIT: usize = 256 * 1024;
 const STDERR_LIMIT: usize = 256 * 1024;
 const BRANCH_FORMAT: &str = "--format=%(refname)%00%(refname:short)%00%(objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(symref)%00";
+const STATUS_ARGUMENTS: &[&str] = &[
+    "status",
+    "--porcelain=v2",
+    "--branch",
+    "-z",
+    "--untracked-files=all",
+];
+const MAX_STASH_MESSAGE_BYTES: usize = 512;
 
 /// Narrow executor boundary that keeps branch discovery read-only and switching explicitly
 /// mutating. Implementations must pass argv directly to Git without a shell.
@@ -26,6 +34,10 @@ pub trait BranchActionGitExecutor: Send + Sync {
         repository: &Path,
         branch_name: &str,
     ) -> Result<GitOutput, GitRunError>;
+
+    fn query_switch_status(&self, repository: &Path) -> Result<GitOutput, GitRunError>;
+
+    fn stash_worktree(&self, repository: &Path, message: &str) -> Result<GitOutput, GitRunError>;
 }
 
 impl BranchActionGitExecutor for GitRunner {
@@ -56,6 +68,27 @@ impl BranchActionGitExecutor for GitRunner {
             .with_timeout(ACTION_TIMEOUT),
         )
     }
+
+    fn query_switch_status(&self, repository: &Path) -> Result<GitOutput, GitRunError> {
+        self.run(
+            repository,
+            GitInvocation::new(GitInvocationPolicy::ReadOnly, STATUS_ARGUMENTS)
+                .with_output_limits(BRANCH_OUTPUT_LIMIT, STDERR_LIMIT)
+                .with_timeout(QUERY_TIMEOUT),
+        )
+    }
+
+    fn stash_worktree(&self, repository: &Path, message: &str) -> Result<GitOutput, GitRunError> {
+        self.run(
+            repository,
+            GitInvocation::new(
+                GitInvocationPolicy::Mutating,
+                ["stash", "push", "--include-untracked", "--message", message],
+            )
+            .with_output_limits(ACTION_STDOUT_LIMIT, STDERR_LIMIT)
+            .with_timeout(ACTION_TIMEOUT),
+        )
+    }
 }
 
 #[derive(Debug, Error)]
@@ -68,10 +101,23 @@ pub enum BranchSwitchError {
     BranchNotFound,
     #[error("symbolic branch refs cannot be checked out by this operation")]
     SymbolicBranchNotAllowed,
+    #[error("the working tree has uncommitted changes")]
+    DirtyWorktree,
+    #[error("the stash message is invalid")]
+    InvalidStashMessage,
+    #[error(
+        "the changes were stashed, but switching branches failed; the stash was kept: {source}"
+    )]
+    SwitchAfterStash {
+        #[source]
+        source: GitRunError,
+    },
     #[error(transparent)]
     Git(#[from] GitRunError),
     #[error(transparent)]
     InvalidOutput(#[from] NavigationParseError),
+    #[error(transparent)]
+    InvalidStatus(#[from] StatusParseError),
 }
 
 impl<E> RepositoryRuntime<E>
@@ -79,7 +125,7 @@ where
     E: BranchActionGitExecutor,
 {
     /// Switches only to a freshly-discovered, exact local branch. It never forces checkout,
-    /// discards changes, contacts a remote, or stashes implicitly.
+    /// discards changes, or contacts a remote. Stashing requires an explicit request.
     pub fn switch_branch(
         &self,
         repository: &Path,
@@ -101,18 +147,64 @@ where
             return Err(BranchSwitchError::SymbolicBranchNotAllowed);
         }
 
-        let result = result_from_branch(branch, !branch.current);
+        let mut result = result_from_branch(branch, !branch.current);
         if branch.current {
             return Ok(result);
         }
 
-        self.executor
-            .switch_existing_local_branch(repository, &branch.name)?;
+        let status_output = self.executor.query_switch_status(repository)?;
+        let status = parse_porcelain_v2_z(&status_output.stdout)?;
+        if !status.entries.is_empty() {
+            if !request.stash_on_dirty {
+                return Err(BranchSwitchError::DirtyWorktree);
+            }
+            let message = request
+                .stash_message
+                .as_deref()
+                .filter(|message| valid_stash_message(message))
+                .ok_or(BranchSwitchError::InvalidStashMessage)?;
+            self.executor.stash_worktree(repository, message)?;
+            result.stash_created = true;
+        }
+
+        let branch_name = branch
+            .full_name
+            .strip_prefix("refs/heads/")
+            .ok_or(BranchSwitchError::InvalidLocalRef)?;
+        if let Err(source) = self
+            .executor
+            .switch_existing_local_branch(repository, branch_name)
+        {
+            if result.stash_created {
+                return Err(BranchSwitchError::SwitchAfterStash { source });
+            }
+            return Err(BranchSwitchError::Git(source));
+        }
         Ok(result)
     }
 }
 
-fn validate_requested_ref(full_name: &str) -> Result<(), BranchSwitchError> {
+impl BranchSwitchError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::DirtyWorktree => "dirtyWorkingTree",
+            Self::InvalidLocalRef | Self::InvalidStashMessage => "invalidRequest",
+            Self::RemoteBranchNotAllowed
+            | Self::BranchNotFound
+            | Self::SymbolicBranchNotAllowed => "branchUnavailable",
+            Self::SwitchAfterStash { .. } => "switchFailedAfterStash",
+            Self::Git(_) | Self::InvalidOutput(_) | Self::InvalidStatus(_) => "gitRejected",
+        }
+    }
+}
+
+fn valid_stash_message(message: &str) -> bool {
+    message.starts_with("WIP ")
+        && message.len() <= MAX_STASH_MESSAGE_BYTES
+        && !message.chars().any(char::is_control)
+}
+
+pub(crate) fn validate_requested_ref(full_name: &str) -> Result<(), BranchSwitchError> {
     if full_name.starts_with("refs/remotes/") {
         return Err(BranchSwitchError::RemoteBranchNotAllowed);
     }
@@ -155,6 +247,7 @@ fn result_from_branch(branch: &RepositoryBranch, changed: bool) -> SwitchBranchR
         name: branch.name.clone(),
         head: branch.oid.clone(),
         changed,
+        stash_created: false,
     }
 }
 
@@ -169,11 +262,14 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum RecordedCall {
         Query,
+        Status,
+        Stash(String),
         Switch(String),
     }
 
     struct RecordingExecutor {
         branch_output: Vec<u8>,
+        status_output: Vec<u8>,
         switch_error: Option<String>,
         calls: Mutex<Vec<RecordedCall>>,
     }
@@ -220,11 +316,38 @@ mod tests {
                 stderr: Vec::new(),
             })
         }
+
+        fn query_switch_status(&self, _repository: &Path) -> Result<GitOutput, GitRunError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(RecordedCall::Status);
+            Ok(GitOutput {
+                stdout: self.status_output.clone(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn stash_worktree(
+            &self,
+            _repository: &Path,
+            message: &str,
+        ) -> Result<GitOutput, GitRunError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(RecordedCall::Stash(message.to_owned()));
+            Ok(GitOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
     }
 
     fn runtime(branch_output: &[u8]) -> RepositoryRuntime<RecordingExecutor> {
         RepositoryRuntime::new(RecordingExecutor {
             branch_output: branch_output.to_vec(),
+            status_output: Vec::new(),
             switch_error: None,
             calls: Mutex::new(Vec::new()),
         })
@@ -233,6 +356,8 @@ mod tests {
     fn request(full_name: &str) -> SwitchBranchRequest {
         SwitchBranchRequest {
             full_name: full_name.to_owned(),
+            stash_on_dirty: false,
+            stash_message: None,
         }
     }
 
@@ -259,6 +384,7 @@ mod tests {
                 .as_slice(),
             &[
                 RecordedCall::Query,
+                RecordedCall::Status,
                 RecordedCall::Switch("rb/safe".to_owned())
             ]
         );
@@ -350,6 +476,7 @@ mod tests {
                 .as_slice(),
             &[
                 RecordedCall::Query,
+                RecordedCall::Status,
                 RecordedCall::Switch(branch_name.to_owned()),
             ]
         );
@@ -383,6 +510,7 @@ mod tests {
     fn propagates_dirty_worktree_switch_failure_without_retry_or_force() {
         let runtime = RepositoryRuntime::new(RecordingExecutor {
             branch_output: b"refs/heads/feature\0feature\0bbbb\0 \0\0\0\0\n".to_vec(),
+            status_output: Vec::new(),
             switch_error: Some(
                 "Your local changes to the following files would be overwritten".to_owned(),
             ),
@@ -407,6 +535,7 @@ mod tests {
                 .as_slice(),
             &[
                 RecordedCall::Query,
+                RecordedCall::Status,
                 RecordedCall::Switch("feature".to_owned())
             ]
         );

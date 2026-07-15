@@ -174,6 +174,11 @@ impl GitRunner {
                 command.env_remove("GIT_OPTIONAL_LOCKS");
             }
         }
+        if invocation.policy == GitInvocationPolicy::Network {
+            command
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GCM_INTERACTIVE", "Never");
+        }
 
         if invocation.stdin.is_some() {
             command.stdin(Stdio::piped());
@@ -318,6 +323,10 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ["for-each-ref", rest @ ..] => allowed_for_each_ref(rest),
         ["log", rest @ ..] => allowed_log(rest),
         ["show", rest @ ..] => allowed_show(rest),
+        ["diff", rest @ ..] => allowed_working_tree_diff(rest),
+        ["hash-object", "-t", "tree", "--stdin"] => true,
+        ["ls-files", "--stage", "-z"] => true,
+        ["merge-base", "--is-ancestor", oid, "HEAD"] => valid_object_id(oid),
         _ => false,
     }
 }
@@ -379,7 +388,7 @@ fn allowed_show(arguments: &[&str]) -> bool {
         "--no-textconv",
         "--no-color",
         "-M",
-        "--unified=80",
+        "--unified=2147483647",
         oid,
         "--",
         pathspecs @ ..,
@@ -404,6 +413,28 @@ fn allowed_show(arguments: &[&str]) -> bool {
         && arguments
             .iter()
             .any(|argument| matches!(*argument, "-s" | "--name-status" | "--numstat"))
+}
+
+fn allowed_working_tree_diff(arguments: &[&str]) -> bool {
+    let arguments = arguments.strip_prefix(&["--cached"]).unwrap_or(arguments);
+    let [
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-M",
+        "--unified=2147483647",
+        base,
+        "--",
+        pathspecs @ ..,
+    ] = arguments
+    else {
+        return false;
+    };
+    (*base == "HEAD" || valid_object_id(base))
+        && matches!(pathspecs.len(), 1 | 2)
+        && pathspecs
+            .iter()
+            .all(|pathspec| valid_literal_pathspec(pathspec))
 }
 
 fn valid_literal_pathspec(value: &str) -> bool {
@@ -562,7 +593,7 @@ mod tests {
                 "--no-textconv",
                 "--no-color",
                 "-M",
-                "--unified=80",
+                "--unified=2147483647",
                 oid,
                 "--",
                 "plain/path.txt",
@@ -574,7 +605,7 @@ mod tests {
                 "--no-textconv",
                 "--no-color",
                 "-M",
-                "--unified=80",
+                "--unified=2147483647",
                 oid,
                 "--",
                 ":(literal)",
@@ -584,7 +615,7 @@ mod tests {
                 "--format=",
                 "--no-ext-diff",
                 "--textconv",
-                "--unified=80",
+                "--unified=2147483647",
                 oid,
                 "--",
                 ":(literal)file.txt",
@@ -648,7 +679,7 @@ mod tests {
                 "--no-textconv",
                 "--no-color",
                 "-M",
-                "--unified=80",
+                "--unified=2147483647",
                 oid,
                 "--",
                 ":(literal)--output=/tmp/unsafe :(glob)*",
@@ -661,6 +692,91 @@ mod tests {
                 .map(OsString::from)
                 .collect::<Vec<_>>();
             validate_read_only_command(&arguments).expect("known read-only query is allowed");
+        }
+    }
+
+    #[test]
+    fn working_tree_diff_allowlist_accepts_only_the_bounded_literal_shape() {
+        let allowed = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-M",
+            "--unified=2147483647",
+            "HEAD",
+            "--",
+            ":(literal)--output=/tmp/pwn :(glob)*",
+        ]
+        .map(OsString::from);
+        validate_read_only_command(&allowed).expect("exact working tree diff is allowed");
+        let cached_allowed = [
+            "diff",
+            "--cached",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-M",
+            "--unified=2147483647",
+            "HEAD",
+            "--",
+            ":(literal)same.txt",
+        ]
+        .map(OsString::from);
+        validate_read_only_command(&cached_allowed)
+            .expect("exact cached collision diff is allowed");
+
+        for rejected in [
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=2147483647",
+                "HEAD",
+                "--",
+                "--output=/tmp/pwn",
+            ],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=3",
+                "HEAD",
+                "--",
+                ":(literal)file.txt",
+            ],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--textconv",
+                "-M",
+                "--unified=2147483647",
+                "HEAD",
+                "--",
+                ":(literal)file.txt",
+            ],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=2147483647",
+                "--cached",
+                "--",
+                ":(literal)file.txt",
+            ],
+        ] {
+            let arguments = rejected.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(matches!(
+                validate_read_only_command(&arguments),
+                Err(GitRunError::ReadOnlyPolicyViolation { .. })
+            ));
         }
     }
 

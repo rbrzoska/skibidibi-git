@@ -43,7 +43,7 @@ impl FileDiffQuery {
             "--no-textconv".to_owned(),
             "--no-color".to_owned(),
             "-M".to_owned(),
-            "--unified=80".to_owned(),
+            "--unified=2147483647".to_owned(),
             self.oid.clone(),
             "--".to_owned(),
         ]
@@ -185,7 +185,7 @@ mod tests {
                 "--no-textconv",
                 "--no-color",
                 "-M",
-                "--unified=80",
+                "--unified=2147483647",
                 OID,
                 "--",
                 ":(literal)--output=/tmp/pwn :(glob)*.rs"

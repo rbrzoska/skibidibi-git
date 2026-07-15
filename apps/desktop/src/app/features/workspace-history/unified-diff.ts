@@ -226,14 +226,24 @@ function unquoteGitPath(value: string): string {
     }
 
     if (escaped >= '0' && escaped <= '7') {
-      let octal = escaped;
-      for (let count = 0; count < 2; count += 1) {
-        const next = value[index + 1];
-        if (next === undefined || next < '0' || next > '7') break;
-        octal += next;
-        index += 1;
+      const bytes: number[] = [];
+      let firstDigit = escaped;
+      while (true) {
+        let octal = firstDigit;
+        for (let count = 0; count < 2; count += 1) {
+          const next = value[index + 1];
+          if (next === undefined || next < '0' || next > '7') break;
+          octal += next;
+          index += 1;
+        }
+        bytes.push(Number.parseInt(octal, 8));
+        if (value[index + 1] !== '\\') break;
+        const nextDigit = value[index + 2];
+        if (nextDigit === undefined || nextDigit < '0' || nextDigit > '7') break;
+        index += 2;
+        firstDigit = nextDigit;
       }
-      result += String.fromCharCode(Number.parseInt(octal, 8));
+      result += new TextDecoder().decode(Uint8Array.from(bytes));
       continue;
     }
 

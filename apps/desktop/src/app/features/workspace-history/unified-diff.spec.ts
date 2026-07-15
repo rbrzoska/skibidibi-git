@@ -213,6 +213,13 @@ describe('parseUnifiedDiff', () => {
         '+++ "b/folder/file\\tname.txt"',
       ].join('\n'),
     );
+    const utf8Quoted = parseUnifiedDiff(
+      [
+        'diff --git "a/za\\305\\274\\303\\263\\305\\202\\304\\207.txt" "b/za\\305\\274\\303\\263\\305\\202\\304\\207.txt"',
+        '--- "a/za\\305\\274\\303\\263\\305\\202\\304\\207.txt"',
+        '+++ "b/za\\305\\274\\303\\263\\305\\202\\304\\207.txt"',
+      ].join('\n'),
+    );
 
     expect(headerless.files[0]).toMatchObject({
       oldPath: 'plain.txt',
@@ -222,6 +229,10 @@ describe('parseUnifiedDiff', () => {
     expect(quoted.files[0]).toMatchObject({
       oldPath: 'folder/file\tname.txt',
       newPath: 'folder/file\tname.txt',
+    });
+    expect(utf8Quoted.files[0]).toMatchObject({
+      oldPath: 'zażółć.txt',
+      newPath: 'zażółć.txt',
     });
   });
 

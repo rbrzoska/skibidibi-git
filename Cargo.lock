@@ -52,6 +52,7 @@ name = "app-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2455,6 +2456,7 @@ version = "0.1.0"
 dependencies = [
  "app-domain",
  "git-core",
+ "same-file",
  "tempfile",
  "thiserror 2.0.18",
 ]

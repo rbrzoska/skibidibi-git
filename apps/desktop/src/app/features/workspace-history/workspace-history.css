@@ -1,9 +1,8 @@
 :host { display: block; min-width: 0; }
-.workspace-grid { --sidebar-width: 18rem; display: grid; grid-template-columns: var(--sidebar-width) .4rem minmax(24rem, 1fr) minmax(17rem, 22rem); min-height: calc(100vh - 6.75rem); }
+.workspace-grid { --sidebar-width: 18rem; display: grid; grid-template-columns: var(--sidebar-width) .4rem minmax(24rem, 1fr) minmax(17rem, 22rem); min-height: 0; overflow: hidden; }
 .workspace-grid.resizing-sidebar { cursor: col-resize; user-select: none; }
-.navigation, .inspector { min-width: 0; padding: .8rem; background: #161b22; }
-.navigation { overflow: auto; }
-.inspector { border-left: 1px solid #30363d; }
+.navigation { min-width: 0; min-height: 0; overflow: auto; padding: .8rem; background: #161b22; }
+.inspector { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: .8rem; background: #161b22; }
 .sidebar-resizer { position: relative; z-index: 3; width: .4rem; border-right: 1px solid #30363d; background: #161b22; cursor: col-resize; touch-action: none; }
 .sidebar-resizer::after { position: absolute; inset: 0 -.2rem; content: ''; }
 .sidebar-resizer:hover, .sidebar-resizer:focus-visible, .resizing-sidebar .sidebar-resizer { outline: 0; background: #388bfd; }
@@ -36,8 +35,6 @@ button.tree-row:disabled { cursor: default; opacity: .72; }
 .remote-row { cursor: default; }
 .worktree-row { grid-template-columns: auto minmax(0, 1fr) auto; }
 .worktree-row .tree-label { grid-column: 2; }
-.stash-row { display: flex; justify-content: space-between; gap: .5rem; overflow: hidden; border-radius: .35rem; padding: .45rem .6rem; white-space: nowrap; }
-.stash-row span { overflow: hidden; text-overflow: ellipsis; }
 
-@media (max-width: 68rem) { .workspace-grid { grid-template-columns: var(--sidebar-width) .4rem minmax(24rem, 1fr); } .inspector { display: none; } }
-@media (max-width: 48rem) { .workspace-bar { grid-template-columns: auto auto minmax(0, 1fr) auto; } .branch-pill { display: none; } .workspace-grid { grid-template-columns: 1fr; } .sidebar-resizer { display: none; } .navigation { border-right: 0; border-bottom: 1px solid #30363d; } .commit-row { grid-template-columns: 2rem minmax(0, 1fr) auto; } .commit-row time { display: none; } }
+@media (max-width: 68rem) { .workspace-grid { grid-template-columns: var(--sidebar-width) .4rem minmax(24rem, 1fr); grid-template-rows: minmax(7rem, 1fr) minmax(27rem, 55%); } .navigation { grid-row: 1 / 3; } .sidebar-resizer { grid-row: 1 / 3; } .history { grid-column: 3; grid-row: 1; } .inspector { display: flex; grid-column: 3; grid-row: 2; border-top: 1px solid #30363d; } }
+@media (max-width: 48rem) { .workspace-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(5rem, 14%) minmax(6rem, 1fr) minmax(27rem, 58%); } .workspace-bar { grid-template-columns: auto auto minmax(0, 1fr) auto; } .branch-pill { display: none; } .sidebar-resizer { display: none; } .navigation { grid-column: 1; grid-row: 1; border-right: 0; border-bottom: 1px solid #30363d; } .history { grid-column: 1; grid-row: 2; } .inspector { grid-column: 1; grid-row: 3; border-left: 0; } .commit-row { grid-template-columns: 2rem minmax(0, 1fr) auto; } .commit-row time { display: none; } }

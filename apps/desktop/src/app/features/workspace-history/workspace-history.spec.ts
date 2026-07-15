@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute, Router, provideRouter } from '@angular/router';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DESKTOP_IPC,
@@ -9,6 +9,7 @@ import {
   type RepositoryCommitSummary,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
+import { branchExpansionStorageKey } from './branch-expansion-state';
 import { WorkspaceHistory } from './workspace-history';
 
 const rememberedRepository = {
@@ -64,6 +65,8 @@ function detailFor(commit: RepositoryCommitSummary): RepositoryCommitDetailRespo
 
 function repositoryStatus() {
   return {
+    indexFingerprint: 'index-before',
+    worktreeFingerprint: 'worktree-before',
     branch: {
       oid: 'abc',
       head: 'main',
@@ -94,7 +97,29 @@ function repositoryStatus() {
   };
 }
 
+function requestedWorkingTreeStatus() {
+  const base = repositoryStatus();
+  return {
+    ...base,
+    entries: [
+      { kind: 'untracked' as const, path: 'added-a.ts', originalPath: null, indexStatus: 'unmodified' as const, worktreeStatus: 'untracked' as const, submodule: null },
+      { kind: 'ordinary' as const, path: 'added-b.ts', originalPath: null, indexStatus: 'added' as const, worktreeStatus: 'unmodified' as const, submodule: null },
+      { kind: 'ordinary' as const, path: 'modified.ts', originalPath: null, indexStatus: 'unmodified' as const, worktreeStatus: 'modified' as const, submodule: null },
+      { kind: 'renamedOrCopied' as const, path: 'renamed.ts', originalPath: 'before.ts', indexStatus: 'renamed' as const, worktreeStatus: 'unmodified' as const, submodule: null },
+      ...['deleted-a.ts', 'deleted-b.ts', 'deleted-c.ts', 'deleted-d.ts'].map((path) => ({ kind: 'ordinary' as const, path, originalPath: null, indexStatus: 'deleted' as const, worktreeStatus: 'unmodified' as const, submodule: null })),
+    ],
+  };
+}
+
 describe('WorkspaceHistory', () => {
+  beforeEach(() => {
+    globalThis.localStorage.removeItem(branchExpansionStorageKey('skibidibi-git', 'local'));
+    globalThis.localStorage.removeItem(branchExpansionStorageKey('skibidibi-git', 'remote'));
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.current-only.skibidibi-git');
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.auto-fetch.skibidibi-git');
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.live-changes.skibidibi-git');
+  });
+
   async function createFixture(
     invokeImplementation: (command: string, request: unknown) => Promise<unknown>,
   ): Promise<{ fixture: ComponentFixture<WorkspaceHistory>; invoke: ReturnType<typeof vi.fn> }> {
@@ -126,6 +151,10 @@ describe('WorkspaceHistory', () => {
     return { fixture, invoke };
   }
 
+  function statusStoreFor(fixture: ComponentFixture<WorkspaceHistory>): RepositoryStatusStore {
+    return fixture.debugElement.injector.get(RepositoryStatusStore);
+  }
+
   function defaultIpc(command: string, request: unknown): Promise<unknown> {
     if (command === 'list_remembered_repositories') {
       return Promise.resolve([rememberedRepository]);
@@ -153,7 +182,22 @@ describe('WorkspaceHistory', () => {
       });
     }
     if (command === 'switch_repository_branch') {
-      return Promise.resolve({ fullName: 'refs/heads/rb/feature', name: 'rb/feature', head: 'def', changed: true });
+      return Promise.resolve({ fullName: 'refs/heads/rb/feature', name: 'rb/feature', head: 'def', changed: true, stashCreated: false });
+    }
+    if (command === 'repository_fetch') {
+      return Promise.resolve({ fetchedAt: '2026-07-15T12:00:00Z' });
+    }
+    if (command === 'delete_repository_branch') {
+      return Promise.resolve({ changed: true });
+    }
+    if (command === 'remove_repository_worktree') {
+      return Promise.resolve({
+        path: '/work/feature-tree',
+        branchFullName: 'refs/heads/rb/feature',
+        worktreeRemoved: true,
+        branchDeleted: true,
+        branchDeletionError: null,
+      });
     }
     if (command === 'repository_commit_detail') {
       const oid = (request as { oid: string }).oid;
@@ -167,6 +211,27 @@ describe('WorkspaceHistory', () => {
         path,
         binary: false,
         patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old line\n+new line`,
+      });
+    }
+    if (command === 'repository_working_tree_file_diff') {
+      const { path } = request as { path: string };
+      return Promise.resolve({
+        path,
+        binary: false,
+        truncated: false,
+        patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old working line\n+new working line`,
+      });
+    }
+    if (command === 'repository_apply_index_change') {
+      return Promise.resolve({
+        changed: true,
+        status: { ...repositoryStatus(), indexFingerprint: 'index-after' },
+      });
+    }
+    if (command === 'repository_create_commit') {
+      return Promise.resolve({
+        oid: 'dddddddddddddddddddddddddddddddddddddddd',
+        status: { ...repositoryStatus(), indexFingerprint: 'index-after-commit', entries: [] },
       });
     }
     return Promise.reject(new Error(`Unexpected command: ${command}`));
@@ -188,7 +253,7 @@ describe('WorkspaceHistory', () => {
 
   it('summarizes working tree changes above commit history', async () => {
     const { fixture } = await createFixture(defaultIpc);
-    const statusStore = TestBed.inject(RepositoryStatusStore);
+    const statusStore = statusStoreFor(fixture);
     statusStore.setRepositoryPath('/work/skibidibi-git');
     statusStore.state.set({ kind: 'ready', status: repositoryStatus() });
     fixture.detectChanges();
@@ -199,6 +264,418 @@ describe('WorkspaceHistory', () => {
     expect(summary.textContent).toContain('~1');
   });
 
+  it('pins the requested working-tree summary first and inspects files without fake commit metadata', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({ kind: 'ready', status: requestedWorkingTreeStatus() });
+    fixture.detectChanges();
+
+    const historyItems = fixture.nativeElement.querySelectorAll(
+      '.commit-list > [role="listitem"]',
+    ) as NodeListOf<HTMLButtonElement>;
+    const workingRow = historyItems[0];
+    expect(workingRow.classList).toContain('working-tree-history-row');
+    expect(workingRow.textContent).toContain('2 added');
+    expect(workingRow.textContent).toContain('1 modified');
+    expect(workingRow.textContent).toContain('1 renamed');
+    expect(workingRow.textContent).toContain('4 deleted');
+    expect(workingRow.querySelector('time')).toBeNull();
+    expect(workingRow.querySelector('code')).toBeNull();
+
+    workingRow.click();
+    fixture.detectChanges();
+    const inspector = fixture.nativeElement.querySelector('.inspector') as HTMLElement;
+    expect(inspector.textContent).toContain('Working tree');
+    expect(inspector.textContent).toContain('8 changed files');
+    expect(inspector.querySelector('.commit-meta')).toBeNull();
+    expect(inspector.querySelector('.commit-message')).toBeNull();
+    expect(inspector.textContent).not.toContain('Ada');
+    expect(inspector.textContent).not.toContain(commits[0].summary);
+
+    (inspector.querySelector('.changed-file') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.diff-table')?.textContent).toContain(
+      'new working line',
+    );
+    expect(invoke).toHaveBeenCalledWith('repository_working_tree_file_diff', {
+      repositoryId: 'skibidibi-git',
+      path: 'renamed.ts',
+      oldPath: 'before.ts',
+      entryKind: 'renamedOrCopied',
+    });
+  });
+
+  it('hides the working-tree row when status becomes clean', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({ kind: 'ready', status: { ...repositoryStatus(), entries: [] } });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
+    expect(fixture.nativeElement.querySelectorAll('.commit-row')).toHaveLength(2);
+  });
+
+  it('keeps staged deletion and untracked replacement diffs distinct at the same path', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({
+      kind: 'ready',
+      status: {
+        ...repositoryStatus(),
+        entries: [
+          { kind: 'ordinary', path: 'same.txt', originalPath: null, indexStatus: 'deleted', worktreeStatus: 'unmodified', submodule: null },
+          { kind: 'untracked', path: 'same.txt', originalPath: null, indexStatus: 'untracked', worktreeStatus: 'untracked', submodule: null },
+        ],
+      },
+    });
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    let files = fixture.nativeElement.querySelectorAll('.working-tree-files .changed-file') as NodeListOf<HTMLButtonElement>;
+    expect(files).toHaveLength(2);
+
+    files[0].click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.close-diff') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    files = fixture.nativeElement.querySelectorAll('.working-tree-files .changed-file') as NodeListOf<HTMLButtonElement>;
+    files[1].click();
+    await fixture.whenStable();
+
+    const requests = invoke.mock.calls
+      .filter(([command]) => command === 'repository_working_tree_file_diff')
+      .map(([, request]) => request);
+    expect(requests).toEqual([
+      { repositoryId: 'skibidibi-git', path: 'same.txt', oldPath: null, entryKind: 'ordinary' },
+      { repositoryId: 'skibidibi-git', path: 'same.txt', oldPath: null, entryKind: 'untracked' },
+    ]);
+  });
+
+  it('keeps conflicted files visible but disables unsupported diff actions', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({
+      kind: 'ready',
+      status: {
+        ...repositoryStatus(),
+        entries: [
+          { kind: 'unmerged', path: 'conflict.txt', originalPath: null, indexStatus: 'unmerged', worktreeStatus: 'unmerged', submodule: null },
+          { kind: 'ordinary', path: 'staged.ts', originalPath: null, indexStatus: 'modified', worktreeStatus: 'unmodified', submodule: null },
+          { kind: 'ordinary', path: 'unstaged.ts', originalPath: null, indexStatus: 'unmodified', worktreeStatus: 'modified', submodule: null },
+        ],
+      },
+    });
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const file = fixture.nativeElement.querySelector('.working-tree-files .changed-file') as HTMLButtonElement;
+    expect(file.disabled).toBe(true);
+    expect(file.title).toContain('conflict resolver');
+    expect((fixture.nativeElement.querySelector('.working-tree-file-checkbox') as HTMLInputElement).disabled).toBe(true);
+    expect((fixture.nativeElement.querySelector('.commit-composer .primary-action') as HTMLButtonElement).disabled).toBe(true);
+    const indexActions = fixture.nativeElement.querySelectorAll(
+      '.index-actions button',
+    ) as NodeListOf<HTMLButtonElement>;
+    expect([...indexActions].every((button) => button.disabled)).toBe(true);
+    expect([...indexActions].every((button) => button.title.includes('Resolve all conflicts'))).toBe(true);
+    expect(fixture.nativeElement.textContent).toContain(
+      'Resolve all conflicts before staging or unstaging changes.',
+    );
+  });
+
+  it('stages selected files once while a mutation is busy and accepts the returned status', async () => {
+    let resolveMutation!: (value: unknown) => void;
+    const mutation = new Promise((resolve) => { resolveMutation = resolve; });
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_apply_index_change' ? mutation : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({ kind: 'ready', status: repositoryStatus() });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const checkbox = fixture.nativeElement.querySelector(
+      '[aria-label="Select new.ts for a staging action"]',
+    ) as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const stageSelected = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.index-actions button')]
+      .find((button) => button.textContent?.includes('Stage selected')) as HTMLButtonElement;
+    stageSelected.click();
+    stageSelected.click();
+    fixture.detectChanges();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_apply_index_change')).toHaveLength(1);
+    expect(stageSelected.textContent).toContain('Staging…');
+    const stageAll = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.index-actions button')]
+      .find((button) => button.textContent?.includes('Stage all')) as HTMLButtonElement;
+    expect(stageAll.textContent).toContain('Stage all');
+    expect((fixture.nativeElement.querySelector('.workspace-bar button') as HTMLButtonElement).disabled).toBe(true);
+    expect((fixture.nativeElement.querySelector('.worktree-row') as HTMLButtonElement).disabled).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('repository_apply_index_change', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        action: 'stage',
+        selection: {
+          scope: 'selected',
+          entries: [{ path: 'new.ts', oldPath: null, entryKind: 'untracked' }],
+        },
+        expectedHead: 'abc',
+        expectedHeadName: 'main',
+        expectedDetached: false,
+        expectedUnborn: false,
+        expectedIndexFingerprint: 'index-before',
+        expectedWorktreeFingerprint: 'worktree-before',
+      },
+    });
+
+    resolveMutation({
+      changed: true,
+      status: {
+        ...repositoryStatus(),
+        indexFingerprint: 'index-staged',
+        entries: [{ kind: 'ordinary', path: 'new.ts', originalPath: null, indexStatus: 'added', worktreeStatus: 'unmodified', submodule: null }],
+      },
+    });
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(statusStore.state().kind).toBe('ready');
+    expect((statusStore.state() as { status: { indexFingerprint: string } }).status.indexFingerprint).toBe('index-staged');
+    expect((fixture.nativeElement.querySelector('.working-tree-file-checkbox') as HTMLInputElement).checked).toBe(false);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history')).toHaveLength(1);
+  });
+
+  it('ignores a pending mutation result after the workspace is destroyed', async () => {
+    let resolveMutation!: (value: unknown) => void;
+    const mutation = new Promise((resolve) => { resolveMutation = resolve; });
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_apply_index_change' ? mutation : defaultIpc(command, request);
+    const { fixture } = await createFixture(ipc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({ kind: 'ready', status: repositoryStatus() });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const checkbox = fixture.nativeElement.querySelector(
+      '[aria-label="Select new.ts for a staging action"]',
+    ) as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const stageSelected = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.index-actions button')]
+      .find((button) => button.textContent?.includes('Stage selected')) as HTMLButtonElement;
+    stageSelected.click();
+    fixture.destroy();
+
+    resolveMutation({
+      changed: true,
+      status: { ...repositoryStatus(), indexFingerprint: 'must-not-be-accepted' },
+    });
+    await mutation;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(statusStore.state()).toEqual({ kind: 'ready', status: repositoryStatus() });
+  });
+
+  it('keeps the commit message and reconciles file selection after commit creation fails', async () => {
+    const stagedStatus = {
+      ...repositoryStatus(),
+      entries: [{ kind: 'ordinary' as const, path: 'app.ts', originalPath: null, indexStatus: 'modified' as const, worktreeStatus: 'unmodified' as const, submodule: null }],
+    };
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_create_commit'
+        ? Promise.reject({ message: 'pre-commit hook rejected the commit' })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    statusStoreFor(fixture).state.set({ kind: 'ready', status: stagedStatus });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const checkbox = fixture.nativeElement.querySelector('.working-tree-file-checkbox') as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    textarea.value = 'Keep this message';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.commit-composer .primary-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('repository_create_commit', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        message: 'Keep this message',
+        expectedHead: 'abc',
+        expectedHeadName: 'main',
+        expectedDetached: false,
+        expectedUnborn: false,
+        expectedIndexFingerprint: 'index-before',
+        expectedWorktreeFingerprint: 'worktree-before',
+      },
+    });
+    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value).toBe('Keep this message');
+    expect((fixture.nativeElement.querySelector('.working-tree-file-checkbox') as HTMLInputElement).checked).toBe(false);
+    expect(fixture.nativeElement.querySelector('[role="alert"]')?.textContent).toContain('pre-commit hook rejected');
+  });
+
+  it('unstages all staged files with the current optimistic state', async () => {
+    const stagedStatus = {
+      ...repositoryStatus(),
+      entries: [{ kind: 'ordinary' as const, path: 'app.ts', originalPath: null, indexStatus: 'modified' as const, worktreeStatus: 'unmodified' as const, submodule: null }],
+    };
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    statusStoreFor(fixture).state.set({ kind: 'ready', status: stagedStatus });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const unstageAll = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.index-actions button')]
+      .find((button) => button.textContent?.includes('Unstage all')) as HTMLButtonElement;
+    unstageAll.click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_apply_index_change', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        action: 'unstage',
+        selection: { scope: 'all' },
+        expectedHead: 'abc',
+        expectedHeadName: 'main',
+        expectedDetached: false,
+        expectedUnborn: false,
+        expectedIndexFingerprint: 'index-before',
+        expectedWorktreeFingerprint: 'worktree-before',
+      },
+    });
+  });
+
+  it('clears composer state and refreshes history and navigation after a successful commit', async () => {
+    const stagedStatus = {
+      ...repositoryStatus(),
+      entries: [{ kind: 'ordinary' as const, path: 'app.ts', originalPath: null, indexStatus: 'modified' as const, worktreeStatus: 'unmodified' as const, submodule: null }],
+    };
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    statusStoreFor(fixture).state.set({ kind: 'ready', status: stagedStatus });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    textarea.value = 'Create the commit';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('.commit-composer .primary-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_create_commit')).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history')).toHaveLength(2);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation')).toHaveLength(2);
+    expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
+  });
+
+  it('keeps duplicate paths independently selectable by entry identity', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    statusStoreFor(fixture).state.set({
+      kind: 'ready',
+      status: {
+        ...repositoryStatus(),
+        entries: [
+          { kind: 'ordinary', path: 'same.txt', originalPath: null, indexStatus: 'deleted', worktreeStatus: 'unmodified', submodule: null },
+          { kind: 'untracked', path: 'same.txt', originalPath: null, indexStatus: 'untracked', worktreeStatus: 'untracked', submodule: null },
+        ],
+      },
+    });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const checkboxes = fixture.nativeElement.querySelectorAll('.working-tree-file-checkbox') as NodeListOf<HTMLInputElement>;
+    checkboxes[1].checked = true;
+    checkboxes[1].dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const stageSelected = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.index-actions button')]
+      .find((button) => button.textContent?.includes('Stage selected')) as HTMLButtonElement;
+    expect(stageSelected.disabled).toBe(true);
+    expect(stageSelected.title).toContain('same path');
+    checkboxes[0].checked = true;
+    checkboxes[0].dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(stageSelected.disabled).toBe(false);
+    stageSelected.click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_apply_index_change', expect.objectContaining({
+      operation: expect.objectContaining({
+        action: 'stage',
+        selection: {
+          scope: 'selected',
+          entries: [{ path: 'same.txt', oldPath: null, entryKind: 'untracked' }],
+        },
+      }),
+    }));
+  });
+
+  it('invalidates an in-flight working-tree diff after staging changes', async () => {
+    let resolveDiff!: (value: unknown) => void;
+    const pendingDiff = new Promise((resolve) => { resolveDiff = resolve; });
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_working_tree_file_diff') {
+        return pendingDiff;
+      }
+      if (command === 'repository_apply_index_change') {
+        return Promise.resolve({
+          changed: true,
+          status: { ...repositoryStatus(), indexFingerprint: 'index-after-stage', entries: [] },
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture } = await createFixture(ipc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({ kind: 'ready', status: repositoryStatus() });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-files .changed-file') as HTMLButtonElement).click();
+
+    const checkbox = fixture.nativeElement.querySelector(
+      '[aria-label="Select new.ts for a staging action"]',
+    ) as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const stageSelected = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.index-actions button')]
+      .find((button) => button.textContent?.includes('Stage selected')) as HTMLButtonElement;
+    stageSelected.click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(
+        (statusStore.state() as { status: { indexFingerprint: string } }).status.indexFingerprint,
+      ).toBe('index-after-stage');
+    });
+
+    expect(fixture.nativeElement.querySelector('.diff-view')).toBeNull();
+    resolveDiff({
+      path: 'new.ts',
+      binary: false,
+      truncated: false,
+      patch: 'diff --git a/new.ts b/new.ts\n@@ -0,0 +1 @@\n+stale content',
+    });
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.diff-view')).toBeNull();
+  });
+
   it('separates local and remote branches and collapses slash-delimited folders', async () => {
     const { fixture } = await createFixture(defaultIpc);
     const element = fixture.nativeElement as HTMLElement;
@@ -207,14 +684,17 @@ describe('WorkspaceHistory', () => {
 
     expect(local.textContent).toContain('main');
     expect(local.textContent).toContain('rb');
-    expect(local.textContent).toContain('feature');
+    expect(local.textContent).not.toContain('feature');
     expect(remote.textContent).toContain('origin');
-    expect(remote.textContent).toContain('main');
+    expect(remote.textContent).not.toContain('main');
     expect(remote.querySelector('button.branch-row')).toBeNull();
 
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
-    expect(local.textContent).not.toContain('feature');
+    expect(local.textContent).toContain('feature');
+    (remote.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(remote.textContent).toContain('main');
   });
 
   it('keeps local and remote folders with the same path independently collapsible', async () => {
@@ -238,9 +718,9 @@ describe('WorkspaceHistory', () => {
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
 
-    expect(local.textContent).not.toContain('local-feature');
-    expect(remote.textContent).toContain('remote-feature');
-    expect(remote.querySelector('.folder-row')?.getAttribute('aria-expanded')).toBe('true');
+    expect(local.textContent).toContain('local-feature');
+    expect(remote.textContent).not.toContain('remote-feature');
+    expect(remote.querySelector('.folder-row')?.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('filters branch trees while retaining matching folders', async () => {
@@ -258,10 +738,33 @@ describe('WorkspaceHistory', () => {
     expect(remote.querySelectorAll('.tree-row')).toHaveLength(0);
   });
 
+  it('persists an expanded folder across navigation refreshes', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    expect(local.textContent).toContain('feature');
+    expect(
+      globalThis.localStorage.getItem(branchExpansionStorageKey('skibidibi-git', 'local')),
+    ).toBe('["rb"]');
+
+    (fixture.nativeElement.querySelector('.workspace-bar button') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(
+      (fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement)
+        .textContent,
+    ).toContain('feature');
+  });
+
   it('confirms and switches a non-current local branch, then refreshes workspace data', async () => {
     const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const { fixture, invoke } = await createFixture(defaultIpc);
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
     const branch = [...local.querySelectorAll<HTMLButtonElement>('button.branch-row')].find(
       (button) => button.title.includes('rb/feature'),
     );
@@ -273,20 +776,31 @@ describe('WorkspaceHistory', () => {
     expect(confirm).toHaveBeenCalledWith('Switch the active worktree to “rb/feature”?');
     expect(invoke).toHaveBeenCalledWith('switch_repository_branch', {
       repositoryId: 'skibidibi-git',
-      fullName: 'refs/heads/rb/feature',
+      operation: {
+        fullName: 'refs/heads/rb/feature',
+        stashOnDirty: false,
+        stashMessage: null,
+      },
     });
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
     confirm.mockRestore();
   });
 
-  it('surfaces a dirty-worktree message returned as a structured Tauri rejection', async () => {
+  it('offers to stash a dirty working tree and retries the branch switch with a WIP message', async () => {
     const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
-    const ipc = (command: string, request: unknown): Promise<unknown> =>
-      command === 'switch_repository_branch'
-        ? Promise.reject({ message: 'Commit or stash your working tree changes before switching.' })
-        : defaultIpc(command, request);
-    const { fixture } = await createFixture(ipc);
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command !== 'switch_repository_branch') {
+        return defaultIpc(command, request);
+      }
+      const operation = (request as { operation: { stashOnDirty: boolean } }).operation;
+      return operation.stashOnDirty
+        ? Promise.resolve({ fullName: 'refs/heads/rb/feature', name: 'rb/feature', head: 'def', changed: true, stashCreated: true })
+        : Promise.reject({ message: 'dirtyWorkingTree: uncommitted changes prevent checkout' });
+    };
+    const { fixture, invoke } = await createFixture(ipc);
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
     const branch = [...local.querySelectorAll<HTMLButtonElement>('button.branch-row')].find(
       (button) => button.title.includes('rb/feature'),
     );
@@ -295,10 +809,118 @@ describe('WorkspaceHistory', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.querySelector('[role="alert"]').textContent).toContain(
-      'Commit or stash your working tree changes before switching.',
-    );
+    const switchCalls = invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch');
+    expect(switchCalls).toHaveLength(2);
+    expect(switchCalls[0][1]).toMatchObject({ operation: { stashOnDirty: false, stashMessage: null } });
+    expect(switchCalls[1][1]).toMatchObject({
+      operation: {
+        fullName: 'refs/heads/rb/feature',
+        stashOnDirty: true,
+      },
+    });
+    expect((switchCalls[1][1] as { operation: { stashMessage: string } }).operation.stashMessage)
+      .toMatch(/^WIP \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} main$/);
+    expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
     confirm.mockRestore();
+  });
+
+  it('persists current-only mode and hides unrelated references while keeping current items expanded', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command !== 'repository_navigation') {
+        return defaultIpc(command, request);
+      }
+      return Promise.resolve({
+        branches: [
+          { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: 'origin/main', ahead: 1, behind: 0, upstreamGone: false, symbolicTarget: null },
+          { kind: 'local', fullName: 'refs/heads/feature', name: 'feature', oid: 'def', current: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          { kind: 'remote', fullName: 'refs/remotes/origin/main', name: 'origin/main', oid: 'abc', current: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+        ],
+        worktrees: [
+          { path: '/work/skibidibi-git', head: 'abc', branch: 'refs/heads/main', detached: false, bare: false, locked: false, lockReason: null, prunable: false, prunableReason: null },
+          { path: '/work/feature-tree', head: 'def', branch: 'refs/heads/feature', detached: false, bare: false, locked: false, lockReason: null, prunable: false, prunableReason: null },
+        ],
+        stashes: [{ oid: 'stash', selector: 'stash@{0}', message: 'WIP', author: 'Ada', authoredAt: '2026-07-15T12:00:00Z' }],
+      });
+    };
+    const { fixture } = await createFixture(ipc);
+    const element = fixture.nativeElement as HTMLElement;
+    const currentOnly = [...element.querySelectorAll<HTMLLabelElement>('.toggle-control')]
+      .find((label) => label.textContent?.includes('Current only'))
+      ?.querySelector('input') as HTMLInputElement;
+
+    currentOnly.click();
+    fixture.detectChanges();
+
+    const navigation = fixture.nativeElement.querySelector('.navigation') as HTMLElement;
+    expect(navigation.textContent).toContain('main');
+    expect(navigation.textContent).not.toContain('feature');
+    expect(navigation.textContent).not.toContain('Remote branches');
+    expect(navigation.textContent).not.toContain('Stashes');
+    expect(navigation.textContent).not.toContain('Pull Requests');
+    expect(navigation.querySelectorAll('.worktree-row')).toHaveLength(1);
+    expect(globalThis.localStorage.getItem('skibidibi-git.workspace.current-only.skibidibi-git')).toBe('true');
+  });
+
+  it('confirms and deletes only a non-current local branch', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    (local.querySelector('[aria-label="Delete local branch rb/feature"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(confirm).toHaveBeenCalledWith('Delete local branch “rb/feature”? This cannot be undone.');
+    expect(invoke).toHaveBeenCalledWith('delete_repository_branch', {
+      repositoryId: 'skibidibi-git',
+      fullName: 'refs/heads/rb/feature',
+      expectedOid: 'def',
+    });
+    confirm.mockRestore();
+  });
+
+  it('warns about the associated branch and unmerged commits before removing a worktree', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { fixture, invoke } = await createFixture(defaultIpc);
+
+    (fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/feature-tree"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(confirm.mock.calls[0][0]).toContain('associated branch “rb/feature” will also be deleted');
+    expect(confirm.mock.calls[0][0]).toContain('Unmerged commits may be lost');
+    expect(invoke).toHaveBeenCalledWith('remove_repository_worktree', {
+      repositoryId: 'skibidibi-git',
+      path: '/work/feature-tree',
+      expectedHead: 'def',
+      branchFullName: 'refs/heads/rb/feature',
+    });
+    confirm.mockRestore();
+  });
+
+  it('runs opt-in auto fetch and live status refreshes and clears their intervals on destroy', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    vi.useFakeTimers();
+    const element = fixture.nativeElement as HTMLElement;
+    const toggles = [...element.querySelectorAll<HTMLLabelElement>('.toggle-control')];
+    const autoFetch = toggles.find((label) => label.textContent?.includes('Auto fetch'))?.querySelector('input') as HTMLInputElement;
+    const liveChanges = toggles.find((label) => label.textContent?.includes('Live changes'))?.querySelector('input') as HTMLInputElement;
+
+    autoFetch.click();
+    liveChanges.click();
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_fetch').length).toBeGreaterThanOrEqual(2);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(2);
+    expect(globalThis.localStorage.getItem('skibidibi-git.workspace.auto-fetch.skibidibi-git')).toBe('true');
+    expect(globalThis.localStorage.getItem('skibidibi-git.workspace.live-changes.skibidibi-git')).toBe('true');
+
+    fixture.destroy();
+    const callsAfterDestroy = invoke.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(invoke.mock.calls).toHaveLength(callsAfterDestroy);
+    vi.useRealTimers();
   });
 
   it('remembers a selected worktree and navigates to its workspace', async () => {
@@ -396,6 +1018,10 @@ describe('WorkspaceHistory', () => {
     expect(inspector.textContent).toContain('1 changed file');
     expect(inspector.textContent).toContain('src/history.ts');
     expect(inspector.textContent).toContain('+12');
+    expect(inspector.querySelector('.commit-meta')?.textContent).toContain('Author');
+    expect(inspector.querySelector('.commit-meta')?.textContent).toContain('Email');
+    expect(inspector.querySelector('.commit-meta')?.textContent).toContain('Authored');
+    expect(inspector.querySelector('.file-summary-stats')?.textContent).toContain('−3');
     expect(invoke).toHaveBeenCalledWith('repository_commit_detail', {
       repositoryId: 'skibidibi-git',
       oid: commits[0].oid,
@@ -474,7 +1100,10 @@ describe('WorkspaceHistory', () => {
       });
     };
     const { fixture } = await createFixture(ipc);
-    const localRows = fixture.nativeElement.querySelectorAll('[aria-label="Local branches"] .branch-row') as NodeListOf<HTMLElement>;
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const localRows = local.querySelectorAll('.branch-row') as NodeListOf<HTMLElement>;
     const worktreeRows = fixture.nativeElement.querySelectorAll('.worktree-row') as NodeListOf<HTMLButtonElement>;
 
     expect(localRows[0].textContent).toContain('main');
@@ -492,7 +1121,9 @@ describe('WorkspaceHistory', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    (fixture.nativeElement.querySelector('.changed-file') as HTMLButtonElement).click();
+    const changedFile = fixture.nativeElement.querySelector('.changed-file') as HTMLButtonElement;
+    changedFile.focus();
+    changedFile.click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -501,18 +1132,72 @@ describe('WorkspaceHistory', () => {
     expect(fixture.nativeElement.querySelector('.commit-list')).toBeNull();
 
     (fixture.nativeElement.querySelector('.close-diff') as HTMLButtonElement).click();
+    await Promise.resolve();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelectorAll('.commit-row')).toHaveLength(2);
     expect(fixture.nativeElement.querySelector('.inspector').textContent).toContain('Add repository history');
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_commit_detail')).toHaveLength(1);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_file_diff')).toHaveLength(1);
+    expect(globalThis.document.activeElement).toBe(changedFile);
     expect(invoke).toHaveBeenCalledWith('repository_file_diff', {
       repositoryId: 'skibidibi-git',
       oid: commits[0].oid,
       path: 'src/history.ts',
       oldPath: null,
     });
+  });
+
+  it('shows contextual change sections by default and toggles the full diff without IPC', async () => {
+    const patch = [
+      'diff --git a/src/history.ts b/src/history.ts',
+      '--- a/src/history.ts',
+      '+++ b/src/history.ts',
+      '@@ -1,13 +1,13 @@',
+      '-first old',
+      '+first new',
+      ' context-1',
+      ' context-2',
+      ' context-3',
+      ' hidden-middle',
+      ' context-5',
+      ' context-6',
+      ' context-7',
+      '-second old',
+      '+second new',
+    ].join('\n');
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_file_diff'
+        ? Promise.resolve({
+            oid: commits[0].oid,
+            path: 'src/history.ts',
+            patch,
+            binary: false,
+            truncated: false,
+          })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.changed-file') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const contextual = fixture.nativeElement.querySelector('.diff-table') as HTMLElement;
+    expect(contextual.textContent).toContain('1 unchanged line hidden');
+    expect(contextual.textContent).not.toContain('hidden-middle');
+
+    (fixture.nativeElement.querySelector('.diff-mode-toggle') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement.querySelector('.diff-table') as HTMLElement).textContent).toContain(
+      'hidden-middle',
+    );
+    expect(fixture.nativeElement.querySelector('.diff-mode-toggle')?.textContent).toContain(
+      'Show changes only',
+    );
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_file_diff')).toHaveLength(1);
   });
 
   it('ignores a stale file diff after another file is selected', async () => {

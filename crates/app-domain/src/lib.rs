@@ -1,15 +1,26 @@
 mod branch_actions;
 mod file_diff;
 mod history;
+mod maintenance;
+mod mutations;
 mod navigation;
 mod repository;
 mod status;
+mod working_tree;
 
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use file_diff::{FileDiff, FileDiffRequest};
 pub use history::{
     ChangedFileStatus, ChangedFileSummary, CommitAuthor, CommitDetails, CommitHistoryPage,
     CommitListItem,
+};
+pub use maintenance::{
+    DeleteBranchRequest, DeleteBranchResult, FetchRepositoryResult, RemoveWorktreeRequest,
+    RemoveWorktreeResult,
+};
+pub use mutations::{
+    ApplyIndexChangeRequest, ApplyIndexChangeResult, ChangeSelection, CreateCommitRequest,
+    CreateCommitResult, IndexAction, WorkingTreeEntrySelector,
 };
 pub use navigation::{
     RepositoryBranch, RepositoryBranchKind, RepositoryNavigation, RepositoryStash,
@@ -21,3 +32,4 @@ pub use repository::{
     RepositoryProvider, RepositoryTransport,
 };
 pub use status::{BranchStatus, RepositoryStatus, StatusCode, StatusEntry, StatusEntryKind};
+pub use working_tree::{WorkingTreeFileDiff, WorkingTreeFileDiffRequest};

@@ -9,6 +9,8 @@ import {
 import { RepositoryStatusStore } from './repository-status';
 
 const status: RepositoryStatusResponse = {
+  indexFingerprint: 'fixture-index',
+  worktreeFingerprint: 'fixture-worktree',
   branch: {
     oid: 'f00ba4',
     head: 'feature/status',
@@ -99,6 +101,54 @@ describe('RepositoryStatusStore', () => {
     });
   });
 
+  it('keeps the last ready state when a silent live refresh fails', async () => {
+    const ipc: DesktopIpcClient = {
+      invoke: vi.fn().mockRejectedValue(new Error('temporary status failure')),
+    };
+    TestBed.configureTestingModule({
+      providers: [RepositoryStatusStore, { provide: DESKTOP_IPC, useValue: ipc }],
+    });
+    const store = TestBed.inject(RepositoryStatusStore);
+    store.setRepositoryPath('/work/skibidibi-git');
+    store.state.set({ kind: 'ready', status });
+
+    await store.refresh({ silent: true });
+
+    expect(store.state()).toEqual({ kind: 'ready', status });
+    expect(store.backgroundError()).toContain('may be stale');
+  });
+
+  it('does not let a silent refresh replace an active foreground refresh', async () => {
+    let resolveSilent: ((value: RepositoryStatusResponse) => void) | undefined;
+    const silent = new Promise<RepositoryStatusResponse>((resolve) => {
+      resolveSilent = resolve;
+    });
+    const newest: RepositoryStatusResponse = {
+      ...status,
+      worktreeFingerprint: 'foreground-result',
+    };
+    const stale: RepositoryStatusResponse = {
+      ...status,
+      worktreeFingerprint: 'silent-result',
+    };
+    const ipc: DesktopIpcClient = {
+      invoke: vi.fn().mockReturnValueOnce(silent).mockResolvedValueOnce(newest),
+    };
+    TestBed.configureTestingModule({
+      providers: [RepositoryStatusStore, { provide: DESKTOP_IPC, useValue: ipc }],
+    });
+    const store = TestBed.inject(RepositoryStatusStore);
+    store.setRepositoryPath('/work/skibidibi-git');
+    store.state.set({ kind: 'ready', status });
+
+    const backgroundRefresh = store.refresh({ silent: true });
+    await store.refresh();
+    resolveSilent?.(stale);
+    await backgroundRefresh;
+
+    expect(store.state()).toEqual({ kind: 'ready', status: newest });
+  });
+
   it('keeps the newest result when refresh requests finish out of order', async () => {
     let resolveFirst: ((value: RepositoryStatusResponse) => void) | undefined;
     const first = new Promise<RepositoryStatusResponse>((resolve) => {
@@ -123,5 +173,31 @@ describe('RepositoryStatusStore', () => {
     await olderRefresh;
 
     expect(store.state()).toEqual({ kind: 'ready', status: newest });
+  });
+
+  it('does not let a pending refresh overwrite an accepted mutation result', async () => {
+    let resolveRefresh: ((value: RepositoryStatusResponse) => void) | undefined;
+    const pendingRefresh = new Promise<RepositoryStatusResponse>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const ipc: DesktopIpcClient = {
+      invoke: vi.fn().mockReturnValue(pendingRefresh),
+    };
+    TestBed.configureTestingModule({
+      providers: [RepositoryStatusStore, { provide: DESKTOP_IPC, useValue: ipc }],
+    });
+    const store = TestBed.inject(RepositoryStatusStore);
+    store.setRepositoryPath('/work/skibidibi-git');
+    const refresh = store.refresh();
+    const mutationStatus: RepositoryStatusResponse = {
+      ...status,
+      indexFingerprint: 'after-mutation',
+    };
+
+    store.acceptMutationResult(mutationStatus);
+    resolveRefresh?.(status);
+    await refresh;
+
+    expect(store.state()).toEqual({ kind: 'ready', status: mutationStatus });
   });
 });

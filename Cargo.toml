@@ -21,6 +21,7 @@ app-store = { path = "crates/app-store" }
 git-core = { path = "crates/git-core" }
 repo-runtime = { path = "crates/repo-runtime" }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+same-file = "1.0.6"
 serde = { version = "1", features = ["derive"] }
 tauri = "2"
 tauri-build = "2"

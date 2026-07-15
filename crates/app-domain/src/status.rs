@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct RepositoryStatus {
     pub branch: BranchStatus,
     pub entries: Vec<StatusEntry>,
+    #[serde(default)]
+    pub index_fingerprint: String,
+    #[serde(default)]
+    pub worktree_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

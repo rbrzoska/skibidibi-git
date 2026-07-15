@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 app-domain.workspace = true
 git-core.workspace = true
+same-file.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

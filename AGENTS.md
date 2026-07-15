@@ -28,6 +28,8 @@ This file is the canonical instruction set for AI contributors. Keep `CLAUDE.md`
 - Work only in the assigned worktree. Inspect `git status` first and preserve unrelated changes.
 - Claim files before editing them. One agent owns a file at a time; coordinate handoffs before overlapping edits.
 - Keep commits focused and do not include caches, local settings, generated output, or another agent's work.
+- Optimize model cost by default: reserve the strongest/Sol profile for security-sensitive Git execution, cross-platform process behavior, contract arbitration, and final blocker review. Delegate bounded Angular presentation, pure reducers/parsers, fixtures, documentation, and focused regression tests to cheaper profiles whenever file ownership can remain disjoint.
+- Split parallel work only after DTOs and file ownership are frozen. Prefer several small independently verifiable tasks over one broad agent task, and always run an integrated review/test pass before handoff.
 
 ## Definition of done
 
