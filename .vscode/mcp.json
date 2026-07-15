@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "angular-cli": {
+      "type": "stdio",
+      "command": "pnpm",
+      "args": ["exec", "ng", "mcp"]
+    }
+  }
+}

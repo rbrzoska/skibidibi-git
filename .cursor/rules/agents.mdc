@@ -1,0 +1,6 @@
+---
+description: Canonical repository AI instructions
+alwaysApply: true
+---
+
+Follow [AGENTS.md](../../AGENTS.md). This rule intentionally contains no duplicated policy.
