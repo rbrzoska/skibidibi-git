@@ -196,6 +196,39 @@ export interface RepositoryFileDiffResponse {
   readonly truncated: boolean;
 }
 
+export type StashFileSource = 'tracked' | 'untracked';
+
+export interface StashChangedFile extends CommitChangedFile {
+  readonly source: StashFileSource;
+}
+
+export interface RepositoryStashDetailRequest {
+  readonly repositoryId: string;
+  readonly oid: string;
+}
+
+export interface RepositoryStashDetailResponse {
+  readonly oid: string;
+  readonly files: readonly StashChangedFile[];
+}
+
+export interface RepositoryStashFileDiffRequest {
+  readonly repositoryId: string;
+  readonly oid: string;
+  readonly source: StashFileSource;
+  readonly path: string;
+  readonly oldPath: string | null;
+}
+
+export interface RepositoryStashFileDiffResponse {
+  readonly oid: string;
+  readonly source: StashFileSource;
+  readonly path: string;
+  readonly patch: string;
+  readonly binary: boolean;
+  readonly truncated: boolean;
+}
+
 export interface WorkingTreeFileDiffRequest {
   readonly repositoryId: string;
   readonly path: string;
@@ -361,6 +394,139 @@ export interface DropRepositoryStashResponse {
   readonly mutationMayHaveOccurred: boolean;
 }
 
+export type PullStrategy = 'ffIfPossible' | 'ffOnly' | 'rebase';
+export type PullOperationState = 'succeeded' | 'conflicted' | 'failed';
+
+export interface PullRepositoryRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly strategy: PullStrategy;
+    readonly autoStash: { readonly message: string } | null;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface PullRepositoryResponse {
+  readonly state: PullOperationState;
+  readonly headBefore: string;
+  readonly headAfter: string | null;
+  readonly status: RepositoryStatusResponse | null;
+  readonly autoStash: AutoStashOutcome;
+  readonly errorMessage: string | null;
+}
+
+export type PushReadiness = 'noUpstream' | 'upToDate' | 'ready' | 'behind' | 'diverged';
+
+export interface PushAnalysisResponse {
+  readonly branch: string;
+  readonly head: string;
+  readonly upstream: string | null;
+  readonly remote: string | null;
+  readonly remoteRef: string | null;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly readiness: PushReadiness;
+}
+
+export type PushTarget =
+  | { readonly kind: 'configured'; readonly expectedUpstream: string }
+  | { readonly kind: 'setUpstream'; readonly remote: string; readonly remoteBranch: string };
+
+export interface PushRepositoryRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly target: PushTarget;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface PushRepositoryResponse {
+  readonly pushed: boolean;
+  readonly analysis: PushAnalysisResponse;
+  readonly status: RepositoryStatusResponse;
+}
+
+export interface SetRepositoryUpstreamRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly remoteFullName: string;
+    readonly expectedOid: string;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface SetRepositoryUpstreamResponse {
+  readonly upstream: string;
+  readonly status: RepositoryStatusResponse;
+}
+
+export interface ConflictStageIdentity {
+  readonly oid: string;
+  readonly mode: string;
+}
+
+export interface ConflictFileSummary {
+  readonly path: string;
+  readonly base: ConflictStageIdentity | null;
+  readonly ours: ConflictStageIdentity | null;
+  readonly theirs: ConflictStageIdentity | null;
+}
+
+export interface ConflictListResponse {
+  readonly files: readonly ConflictFileSummary[];
+  readonly status: RepositoryStatusResponse;
+}
+
+export interface ConflictFileDetailRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly path: string;
+    readonly expectedBase: ConflictStageIdentity | null;
+    readonly expectedOurs: ConflictStageIdentity | null;
+    readonly expectedTheirs: ConflictStageIdentity | null;
+  };
+}
+
+export interface ConflictVersion {
+  readonly identity: ConflictStageIdentity | null;
+  readonly content: string | null;
+  readonly binary: boolean;
+}
+
+export interface ConflictFileDetailResponse {
+  readonly path: string;
+  readonly base: ConflictVersion;
+  readonly ours: ConflictVersion;
+  readonly theirs: ConflictVersion;
+  readonly workingContent: string | null;
+  readonly workingBinary: boolean;
+}
+
+export type ConflictResolution =
+  | { readonly kind: 'content'; readonly content: string }
+  | { readonly kind: 'ours' }
+  | { readonly kind: 'theirs' }
+  | { readonly kind: 'delete' };
+
+export interface ResolveConflictRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly path: string;
+    readonly expectedBase: ConflictStageIdentity | null;
+    readonly expectedOurs: ConflictStageIdentity | null;
+    readonly expectedTheirs: ConflictStageIdentity | null;
+    readonly resolution: ConflictResolution;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface ResolveConflictResponse {
+  readonly resolved: boolean;
+  readonly status: RepositoryStatusResponse | null;
+  readonly errorMessage: string | null;
+  readonly mutationMayHaveOccurred: boolean;
+}
+
 export interface DeleteRepositoryBranchRequest {
   readonly repositoryId: string;
   readonly fullName: string;
@@ -496,6 +662,14 @@ export interface DesktopIpcContract {
     readonly request: RepositoryFileDiffRequest;
     readonly response: RepositoryFileDiffResponse;
   };
+  readonly repository_stash_detail: {
+    readonly request: RepositoryStashDetailRequest;
+    readonly response: RepositoryStashDetailResponse;
+  };
+  readonly repository_stash_file_diff: {
+    readonly request: RepositoryStashFileDiffRequest;
+    readonly response: RepositoryStashFileDiffResponse;
+  };
   readonly repository_working_tree_file_diff: {
     readonly request: WorkingTreeFileDiffRequest;
     readonly response: WorkingTreeFileDiffResponse;
@@ -539,6 +713,34 @@ export interface DesktopIpcContract {
   readonly repository_drop_stash: {
     readonly request: DropRepositoryStashRequest;
     readonly response: DropRepositoryStashResponse;
+  };
+  readonly repository_push_analysis: {
+    readonly request: RepositoryNavigationRequest;
+    readonly response: PushAnalysisResponse;
+  };
+  readonly repository_pull: {
+    readonly request: PullRepositoryRequest;
+    readonly response: PullRepositoryResponse;
+  };
+  readonly repository_push: {
+    readonly request: PushRepositoryRequest;
+    readonly response: PushRepositoryResponse;
+  };
+  readonly repository_set_upstream: {
+    readonly request: SetRepositoryUpstreamRequest;
+    readonly response: SetRepositoryUpstreamResponse;
+  };
+  readonly repository_conflicts: {
+    readonly request: RepositoryNavigationRequest;
+    readonly response: ConflictListResponse;
+  };
+  readonly repository_conflict_detail: {
+    readonly request: ConflictFileDetailRequest;
+    readonly response: ConflictFileDetailResponse;
+  };
+  readonly repository_resolve_conflict: {
+    readonly request: ResolveConflictRequest;
+    readonly response: ResolveConflictResponse;
   };
   readonly delete_repository_branch: {
     readonly request: DeleteRepositoryBranchRequest;
@@ -667,6 +869,39 @@ export class DesktopIpc implements DesktopIpcClient {
     if (command === 'repository_file_diff') {
       return Promise.reject(
         new Error('File diffs are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'repository_stash_detail') {
+      return Promise.reject(
+        new Error('Stash details are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'repository_stash_file_diff') {
+      return Promise.reject(
+        new Error('Stash file diffs are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (
+      command === 'repository_push_analysis' ||
+      command === 'repository_pull' ||
+      command === 'repository_push' ||
+      command === 'repository_set_upstream'
+    ) {
+      return Promise.reject(
+        new Error('Network operations are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (
+      command === 'repository_conflicts' ||
+      command === 'repository_conflict_detail' ||
+      command === 'repository_resolve_conflict'
+    ) {
+      return Promise.reject(
+        new Error('Conflict resolution is unavailable outside the desktop application.'),
       );
     }
 

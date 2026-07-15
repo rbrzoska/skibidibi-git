@@ -67,7 +67,7 @@ button {
   font: inherit;
 }
 
-.workspace .workspace-bar { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto; align-items: center; gap: .75rem; min-height: 3.5rem; border-bottom: 1px solid #30363d; padding: .55rem .8rem; background: #161b22; }
+.workspace .workspace-bar { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto auto; align-items: center; gap: .75rem; min-height: 3.5rem; border-bottom: 1px solid #30363d; padding: .55rem .8rem; background: #161b22; }
 .workspace .back { color: #8b949e; font-size: 1.8rem; text-decoration: none; }
 .workspace .repo-icon { padding: .55rem; border-radius: .45rem; background: #6e40c9; font-size: .65rem; font-weight: 800; }
 .workspace .workspace-identity { display: grid; min-width: 0; }
@@ -75,9 +75,15 @@ button {
 .workspace .workspace-identity small { color: #8b949e; font-size: .7rem; }
 .workspace .branch-pill { border: 1px solid #30363d; border-radius: 999px; padding: .35rem .65rem; color: #c9d1d9; background: #21262d; font-size: .75rem; }
 .workspace .workspace-bar button { border: 1px solid #388bfd; border-radius: .45rem; padding: .45rem .8rem; color: #fff; background: #1f6feb; }
+.workspace .network-actions { display: inline-flex; align-items: stretch; gap: .25rem; }
+.workspace .network-actions label { display: grid; gap: .05rem; color: #8b949e; font-size: .55rem; }
+.workspace .network-actions select { min-width: 7rem; border: 1px solid #30363d; border-radius: .35rem; padding: .18rem .3rem; color: #c9d1d9; background: #0d1117; font-size: .65rem; }
+.workspace .network-actions button { padding: .35rem .55rem; }
+.workspace .workspace-bar button:disabled { cursor: not-allowed; opacity: .5; }
 @media (max-width: 48rem) {
   .workspace .workspace-bar { grid-template-columns: auto minmax(0, 1fr) repeat(3, auto); gap: .4rem; }
   .workspace .workspace-bar .repo-icon { display: none; }
+  .workspace .network-actions { grid-column: 1 / -1; }
 }
 .workspace .working-tree { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 5rem; border-bottom: 1px solid #30363d; padding: .85rem 1rem; background: rgb(13 17 23 / 95%); backdrop-filter: blur(10px); }
 .workspace .eyebrow { margin: 0; color: #8b949e; font-size: .65rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -111,6 +117,10 @@ button {
 .workspace .working-tree-overview { display: grid; gap: .55rem; border-bottom: 1px solid #30363d; padding: .85rem 0 1rem; }
 .workspace .working-tree-overview h2 { margin: 0; color: #f0f6fc; font-size: 1rem; }
 .workspace .commit-overview h2 { margin: 0; color: #f0f6fc; font-size: 1rem; line-height: 1.4; }
+.workspace .commit-overview-title { display: flex; align-items: start; justify-content: space-between; gap: .6rem; }
+.workspace .create-branch-from-commit { flex: 0 0 auto; border: 1px solid #388bfd; border-radius: .35rem; padding: .32rem .5rem; color: #fff; background: #1f6feb; font-size: .65rem; cursor: pointer; }
+.workspace .create-branch-from-commit:hover:not(:disabled), .workspace .create-branch-from-commit:focus-visible { outline: 0; border-color: #79c0ff; background: #388bfd; }
+.workspace .create-branch-from-commit:disabled { cursor: not-allowed; opacity: .5; }
 .workspace .commit-meta { display: grid; gap: .5rem; margin: 0; }
 .workspace .commit-meta > div { display: grid; grid-template-columns: 3.7rem minmax(0, 1fr); align-items: baseline; gap: .6rem; min-width: 0; }
 .workspace .commit-meta dt { color: #6e7681; font-size: .62rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
@@ -168,6 +178,34 @@ button {
 .workspace .commit-composer-actions button:not(.primary-action):hover:not(:disabled) { border-color: #58a6ff; color: #f0f6fc; }
 .workspace .commit-composer-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .workspace .commit-hint { color: #8b949e; font-size: .65rem; }
+.workspace .conflict-resolver { flex: 0 1 55%; min-height: 12rem; overflow: auto; border-bottom: 1px solid #30363d; padding: .7rem 0; }
+.workspace .conflict-resolver > header { display: flex; align-items: start; justify-content: space-between; gap: .5rem; margin-bottom: .5rem; }
+.workspace .conflict-resolver h3, .workspace .conflict-resolver h4 { margin: 0; }
+.workspace .conflict-resolver h3 { color: #f0f6fc; font-size: .82rem; }
+.workspace .conflict-resolver header small, .workspace .conflict-placeholder { color: #8b949e; font-size: .65rem; }
+.workspace .conflict-resolver header button, .workspace .conflict-actions button, .workspace .conflict-files button { border: 1px solid #30363d; border-radius: .3rem; padding: .3rem .45rem; color: #c9d1d9; background: #21262d; font-size: .62rem; cursor: pointer; }
+.workspace .conflict-layout { display: grid; grid-template-columns: minmax(7rem, .7fr) minmax(0, 2fr); gap: .55rem; min-height: 0; }
+.workspace .conflict-files { display: grid; align-content: start; gap: .2rem; margin: 0; padding: 0; list-style: none; }
+.workspace .conflict-files button { width: 100%; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.workspace .conflict-files button.selected { border-color: #58a6ff; background: #162334; }
+.workspace .conflict-detail { display: grid; gap: .45rem; min-width: 0; }
+.workspace .conflict-detail > strong, .workspace .conflict-detail > label { overflow-wrap: anywhere; color: #c9d1d9; font-size: .68rem; }
+.workspace .conflict-versions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .3rem; }
+.workspace .conflict-versions section { min-width: 0; border: 1px solid #30363d; border-radius: .3rem; background: #0d1117; }
+.workspace .conflict-versions h4 { border-bottom: 1px solid #30363d; padding: .25rem .35rem; color: #8b949e; font-size: .58rem; text-transform: uppercase; }
+.workspace .conflict-versions pre { max-height: 7rem; margin: 0; overflow: auto; padding: .35rem; color: #b1bac4; font: .58rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace .conflict-detail textarea { width: 100%; resize: vertical; border: 1px solid #30363d; border-radius: .35rem; padding: .45rem; color: #e6edf3; background: #0d1117; font: .62rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.workspace .conflict-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .25rem; }
+.workspace .conflict-actions button.primary { border-color: #2ea043; background: #238636; color: #fff; }
+.workspace .conflict-actions button.danger { color: #ff7b72; }
+.workspace .conflict-resolver button:disabled { cursor: not-allowed; opacity: .45; }
+.workspace .conflict-feedback { border: 1px solid #30363d; border-radius: .3rem; padding: .4rem .5rem; font-size: .65rem; overflow-wrap: anywhere; }
+.workspace .conflict-feedback.error { border-color: #f8514966; color: #ff7b72; background: #f8514914; }
+.workspace .conflict-feedback.notice { border-color: #2ea04366; color: #7ee787; background: #23863614; }
+@media (max-width: 68rem) {
+  .workspace .conflict-layout { grid-template-columns: 1fr; }
+  .workspace .conflict-files { grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); }
+}
 .workspace .working-tree-action-error { margin: .65rem 0 0; border: 1px solid #f8514966; border-radius: .4rem; padding: .5rem .6rem; color: #ff7b72; background: #f8514914; font-size: .7rem; overflow-wrap: anywhere; }
 .workspace .index-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; margin-bottom: .5rem; }
 .workspace .index-actions button { border: 1px solid #30363d; border-radius: .35rem; padding: .38rem .45rem; color: #c9d1d9; background: #21262d; font-size: .65rem; cursor: pointer; }
@@ -186,6 +224,7 @@ button {
 .workspace .navigation-inline-form button:hover:not(:disabled), .workspace .stash-create-form button:hover:not(:disabled), .workspace .stash-actions button:hover:not(:disabled), .workspace .reference-action:hover:not(:disabled) { border-color: #58a6ff; color: #fff; }
 .workspace .navigation-inline-form button:disabled, .workspace .stash-create-form button:disabled, .workspace .stash-actions button:disabled, .workspace .reference-action:disabled { cursor: not-allowed; opacity: .45; }
 .workspace .reference-action { align-self: center; margin-right: .2rem; padding: .15rem .4rem; font-size: .8rem; }
+.workspace .reference-actions { display: inline-flex; align-items: center; }
 .workspace .stash-create-form { grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
 .workspace .stash-create-form label { display: inline-flex; align-items: center; gap: .2rem; color: #8b949e; white-space: nowrap; }
 .workspace .stash-list { display: grid; gap: .15rem; }
@@ -196,9 +235,12 @@ button {
 .workspace .delete-reference { display: grid; place-items: center; width: 1.55rem; height: 1.55rem; border: 0; border-radius: .3rem; padding: 0; color: #8b949e; background: transparent; font-size: 1rem; cursor: pointer; }
 .workspace .delete-reference:hover:not(:disabled), .workspace .delete-reference:focus-visible { outline: 0; color: #ff7b72; background: #f8514924; }
 .workspace .delete-reference:disabled { cursor: not-allowed; opacity: .45; }
-.workspace .stash-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .25rem .5rem; overflow: hidden; border-radius: .35rem; padding: .45rem .6rem; white-space: nowrap; }
-.workspace .stash-row span { overflow: hidden; text-overflow: ellipsis; }
+.workspace .stash-row { display: grid; gap: .25rem; overflow: hidden; border-radius: .35rem; white-space: nowrap; }
+.workspace .stash-inspect { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .5rem; min-width: 0; width: 100%; border: 1px solid transparent; border-radius: .35rem; padding: .4rem .5rem; color: #b1bac4; background: transparent; text-align: left; cursor: pointer; }
+.workspace .stash-inspect:hover, .workspace .stash-inspect:focus-visible, .workspace .stash-inspect.selected { outline: 0; border-color: #24496f; color: #fff; background: #162334; }
+.workspace .stash-inspect span, .workspace .stash-inspect small { overflow: hidden; text-overflow: ellipsis; }
 .workspace .stash-row .stash-actions { grid-column: 1 / -1; overflow: visible; }
+.workspace .stash-source { border: 1px solid #30363d; border-radius: 999px; padding: .08rem .28rem; color: #8b949e; font-size: .55rem; text-transform: uppercase; }
 .workspace .history { min-width: 0; overflow: auto; background: #0d1117; }
 .workspace .diff-view { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: calc(100vh - 6.75rem); }
 .workspace .diff-toolbar { position: sticky; z-index: 2; top: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-width: 0; border-bottom: 1px solid #30363d; padding: .65rem .75rem; background: rgb(13 17 23 / 96%); backdrop-filter: blur(10px); }

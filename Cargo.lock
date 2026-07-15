@@ -1098,6 +1098,7 @@ name = "git-core"
 version = "0.1.0"
 dependencies = [
  "app-domain",
+ "libc",
  "tempfile",
  "thiserror 2.0.18",
 ]

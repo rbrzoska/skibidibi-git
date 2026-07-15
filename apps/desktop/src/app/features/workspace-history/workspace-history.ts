@@ -12,15 +12,24 @@ import {
   DESKTOP_IPC,
   type CommitChangedFile,
   type ChangeSelection,
+  type ConflictFileDetailResponse,
+  type ConflictFileSummary,
+  type ConflictResolution,
   type IndexAction,
+  type PullRepositoryResponse,
+  type PullStrategy,
+  type PushAnalysisResponse,
   type RepositoryCommitDetailResponse,
   type RepositoryFileDiffResponse,
   type RepositoryCommitSummary,
   type RepositoryBranch,
   type RepositoryNavigationResponse,
+  type RepositoryStashDetailResponse,
   type RepositoryStatusResponse,
   type RepositoryStash,
   type RepositoryWorktree,
+  type StashChangedFile,
+  type StashFileSource,
   type SwitchRepositoryBranchResponse,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
@@ -55,18 +64,37 @@ import {
 
 type HistoryPhase = 'idle' | 'loading' | 'ready' | 'error';
 type FileDiffDisplayMode = 'contextual' | 'full';
-type HistorySelection = 'none' | 'working-tree' | 'commit';
+type HistorySelection = 'none' | 'working-tree' | 'commit' | 'stash';
 type WorkingTreeMutation =
   | { readonly action: IndexAction; readonly scope: 'selected' | 'all' }
   | { readonly action: 'commit' | 'amend'; readonly scope: null };
 type BranchCreationTarget =
   | { readonly kind: 'current'; readonly label: string }
+  | { readonly kind: 'commit'; readonly oid: string; readonly label: string }
   | { readonly kind: 'remote'; readonly branch: RepositoryBranch };
 type DetailState =
   | { readonly kind: 'idle' }
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly detail: RepositoryCommitDetailResponse }
   | { readonly kind: 'error'; readonly message: string };
+type StashDetailState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'ready'; readonly detail: RepositoryStashDetailResponse }
+  | { readonly kind: 'error'; readonly message: string };
+type PushAnalysisState =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'ready'; readonly analysis: PushAnalysisResponse }
+  | { readonly kind: 'error'; readonly message: string };
+type ConflictListState =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'ready'; readonly files: readonly ConflictFileSummary[] }
+  | { readonly kind: 'error'; readonly message: string };
+type ConflictDetailState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading'; readonly path: string }
+  | { readonly kind: 'ready'; readonly detail: ConflictFileDetailResponse }
+  | { readonly kind: 'error'; readonly path: string; readonly message: string };
 type NavigationState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly navigation: RepositoryNavigationResponse }
@@ -112,6 +140,9 @@ export class WorkspaceHistory implements OnDestroy {
   private navigationRequestGeneration = 0;
   private fileDiffRequestGeneration = 0;
   private mutationRequestGeneration = 0;
+  private pushAnalysisRequestGeneration = 0;
+  private conflictListRequestGeneration = 0;
+  private conflictDetailRequestGeneration = 0;
   private destroyed = false;
   private fileDiffReturnFocus: HTMLElement | null = null;
   private activeResizePointer: number | null = null;
@@ -137,6 +168,8 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly selectedOid = signal<string | null>(null);
   protected readonly historySelection = signal<HistorySelection>('none');
   protected readonly detailState = signal<DetailState>({ kind: 'idle' });
+  protected readonly stashDetailState = signal<StashDetailState>({ kind: 'idle' });
+  protected readonly selectedStash = signal<RepositoryStash | null>(null);
   protected readonly navigationState = signal<NavigationState>({ kind: 'loading' });
   protected readonly navigationFilter = signal('');
   protected readonly expandedLocalBranchFolders = signal<ReadonlySet<string>>(new Set());
@@ -160,8 +193,21 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly stashMessage = signal('');
   protected readonly stashIncludeUntracked = signal(true);
   protected readonly stashMutation = signal<string | null>(null);
+  protected readonly pullStrategy = signal<PullStrategy>('ffIfPossible');
+  protected readonly networkMutation = signal<'pull' | 'push' | 'setUpstream' | null>(null);
+  protected readonly networkNotice = signal('');
+  protected readonly networkError = signal('');
+  protected readonly pushAnalysisState = signal<PushAnalysisState>({ kind: 'loading' });
+  protected readonly conflictListState = signal<ConflictListState>({ kind: 'loading' });
+  protected readonly selectedConflict = signal<ConflictFileSummary | null>(null);
+  protected readonly conflictDetailState = signal<ConflictDetailState>({ kind: 'idle' });
+  protected readonly conflictResult = signal('');
+  protected readonly conflictMutation = signal(false);
+  protected readonly conflictNotice = signal('');
+  protected readonly conflictError = signal('');
   protected readonly selectedFilePath = signal<string | null>(null);
   protected readonly selectedWorkingTreeEntryKind = signal<WorkingTreeFile['entryKind'] | null>(null);
+  protected readonly selectedStashFileSource = signal<StashFileSource | null>(null);
   protected readonly fileDiffState = signal<FileDiffState>({ kind: 'idle' });
   protected readonly fileDiffDisplayMode = signal<FileDiffDisplayMode>('contextual');
   protected readonly selectedWorkingTreeFiles = signal<ReadonlySet<string>>(new Set());
@@ -179,8 +225,33 @@ export class WorkspaceHistory implements OnDestroy {
       this.deletingBranch() !== null ||
       this.removingWorktree() !== null ||
       this.creatingBranch() ||
-      this.stashMutation() !== null,
+      this.stashMutation() !== null ||
+      this.networkMutation() !== null ||
+      this.conflictMutation(),
   );
+  protected readonly pushDisabledReason = computed(() => {
+    const state = this.pushAnalysisState();
+    if (state.kind !== 'ready') {
+      return state.kind === 'loading' ? 'Push analysis is loading.' : state.message;
+    }
+    switch (state.analysis.readiness) {
+      case 'ready':
+        return null;
+      case 'noUpstream':
+        return null;
+      case 'upToDate':
+        return 'The configured upstream is already up to date.';
+      case 'behind':
+        return 'Pull before pushing because the local branch is behind.';
+      case 'diverged':
+        return 'Pull and reconcile the diverged branch before pushing.';
+    }
+  });
+  protected readonly selectedConflictIsBinary = computed(() => {
+    const state = this.conflictDetailState();
+    return state.kind === 'ready' &&
+      (state.detail.workingBinary || state.detail.base.binary || state.detail.ours.binary || state.detail.theirs.binary);
+  });
   protected readonly parsedFileDiff = computed(() => {
     const state = this.fileDiffState();
     return state.kind === 'ready' ? parseUnifiedDiff(state.response.patch) : null;
@@ -304,11 +375,11 @@ export class WorkspaceHistory implements OnDestroy {
   });
 
   protected readonly selectedFileSummary = computed(() => {
-    const state = this.detailState();
-    if (state.kind !== 'ready') {
+    const files = this.selectedDetailFiles();
+    if (files === null) {
       return { files: 0, additions: 0, deletions: 0 };
     }
-    return state.detail.files.reduce(
+    return files.reduce(
       (summary, file) => ({
         files: summary.files + 1,
         additions: summary.additions + (file.additions ?? 0),
@@ -332,6 +403,9 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.navigationRequestGeneration;
     ++this.fileDiffRequestGeneration;
     ++this.mutationRequestGeneration;
+    ++this.pushAnalysisRequestGeneration;
+    ++this.conflictListRequestGeneration;
+    ++this.conflictDetailRequestGeneration;
     this.clearAutoFetchTimer();
     this.clearLiveChangesTimer();
     this.stopSidebarResize();
@@ -388,6 +462,382 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  protected setPullStrategy(strategy: PullStrategy): void {
+    this.pullStrategy.set(strategy);
+  }
+
+  protected async pullRepository(): Promise<void> {
+    const status = this.statusStore.state();
+    if (status.kind !== 'ready' || status.status.branch.oid === null || this.workspaceActionBusy()) {
+      return;
+    }
+    this.networkMutation.set('pull');
+    this.networkNotice.set('');
+    this.networkError.set('');
+    try {
+      let result: PullRepositoryResponse;
+      try {
+        result = await this.invokePull(status.status, null);
+      } catch (error) {
+        const message = this.errorMessage(error, 'Pull failed.');
+        if (
+          status.status.entries.length === 0 ||
+          !this.pullFailureNeedsCleanTree(message) ||
+          !globalThis.confirm('Pull requires a clean working tree. Stash local changes automatically and retry?')
+        ) {
+          throw error;
+        }
+        result = await this.invokePull(status.status, {
+          message: buildWipStashMessage(status.status.branch.head ?? 'detached HEAD'),
+        });
+      }
+      if (
+        result.state === 'failed' &&
+        status.status.entries.length > 0 &&
+        this.pullFailureNeedsCleanTree(result.errorMessage)
+      ) {
+        if (!globalThis.confirm('Pull requires a clean working tree. Stash local changes automatically and retry?')) {
+          this.networkError.set(result.errorMessage ?? 'Pull failed.');
+          return;
+        }
+        result = await this.invokePull(status.status, {
+          message: buildWipStashMessage(status.status.branch.head ?? 'detached HEAD'),
+        });
+      }
+      const autoStash = this.autoStashSummary(result.autoStash);
+      if (result.state === 'succeeded') {
+        this.networkNotice.set(`Pull succeeded.${autoStash}`);
+      } else if (result.state === 'conflicted') {
+        this.networkError.set(`Pull stopped with conflicts. ${result.errorMessage ?? 'Resolve the unmerged files before continuing.'}${autoStash}`);
+      } else {
+        this.networkError.set(`${result.errorMessage ?? 'Pull failed.'}${autoStash}`);
+      }
+      await this.refreshAfterNetworkMutation();
+    } catch (error) {
+      this.networkError.set(this.errorMessage(error, 'Pull failed.'));
+      await this.refreshAfterNetworkMutation();
+    } finally {
+      if (!this.destroyed) {
+        this.networkMutation.set(null);
+      }
+    }
+  }
+
+  protected async pushRepository(): Promise<void> {
+    const status = this.statusStore.state();
+    const analysis = this.pushAnalysisState();
+    if (
+      status.kind !== 'ready' ||
+      analysis.kind !== 'ready' ||
+      this.workspaceActionBusy() ||
+      this.pushDisabledReason() !== null
+    ) {
+      return;
+    }
+    const target = analysis.analysis.readiness === 'noUpstream'
+      ? { kind: 'setUpstream' as const, remote: 'origin', remoteBranch: analysis.analysis.branch }
+      : analysis.analysis.upstream === null
+        ? null
+        : { kind: 'configured' as const, expectedUpstream: analysis.analysis.upstream };
+    if (target === null) {
+      return;
+    }
+    if (
+      target.kind === 'setUpstream' &&
+      !globalThis.confirm(`Push “${analysis.analysis.branch}” to origin/${analysis.analysis.branch} and set it as upstream?`)
+    ) {
+      return;
+    }
+    this.networkMutation.set('push');
+    this.networkNotice.set('');
+    this.networkError.set('');
+    try {
+      const result = await this.ipc.invoke('repository_push', {
+        repositoryId: this.repositoryId,
+        operation: { target, precondition: this.repositoryStatePrecondition(status.status) },
+      });
+      this.networkNotice.set(result.pushed ? 'Push succeeded.' : 'The upstream was already up to date.');
+      await this.refreshAfterNetworkMutation();
+    } catch (error) {
+      this.networkError.set(this.errorMessage(error, 'Push failed.'));
+      await this.loadPushAnalysis();
+    } finally {
+      if (!this.destroyed) {
+        this.networkMutation.set(null);
+      }
+    }
+  }
+
+  protected canSetNaturalUpstream(branch: RepositoryBranch): boolean {
+    const status = this.statusStore.state();
+    if (
+      branch.kind !== 'remote' ||
+      branch.symbolicTarget !== null ||
+      status.kind !== 'ready' ||
+      status.status.branch.upstream !== null ||
+      status.status.branch.head === null
+    ) {
+      return false;
+    }
+    const separator = branch.name.indexOf('/');
+    return separator > 0 && branch.name.slice(separator + 1) === status.status.branch.head;
+  }
+
+  protected async setNaturalUpstream(branch: RepositoryBranch): Promise<void> {
+    const status = this.statusStore.state();
+    if (status.kind !== 'ready' || !this.canSetNaturalUpstream(branch) || this.workspaceActionBusy()) {
+      return;
+    }
+    if (!globalThis.confirm(`Set ${branch.name} as the upstream for ${status.status.branch.head}?`)) {
+      return;
+    }
+    this.networkMutation.set('setUpstream');
+    this.networkNotice.set('');
+    this.networkError.set('');
+    try {
+      const result = await this.ipc.invoke('repository_set_upstream', {
+        repositoryId: this.repositoryId,
+        operation: {
+          remoteFullName: branch.fullName,
+          expectedOid: branch.oid,
+          precondition: this.repositoryStatePrecondition(status.status),
+        },
+      });
+      this.networkNotice.set(`Upstream set to ${result.upstream}.`);
+      await this.refreshAfterNetworkMutation();
+    } catch (error) {
+      this.networkError.set(this.errorMessage(error, 'The upstream could not be set.'));
+      await this.loadPushAnalysis();
+    } finally {
+      if (!this.destroyed) {
+        this.networkMutation.set(null);
+      }
+    }
+  }
+
+  private invokePull(status: RepositoryStatusResponse, autoStash: { readonly message: string } | null) {
+    return this.ipc.invoke('repository_pull', {
+      repositoryId: this.repositoryId,
+      operation: {
+        strategy: this.pullStrategy(),
+        autoStash,
+        precondition: this.repositoryStatePrecondition(status),
+      },
+    });
+  }
+
+  private pullFailureNeedsCleanTree(message: string | null): boolean {
+    return /dirtyWorkingTree|clean working tree|local changes|dirty|would be overwritten/i.test(message ?? '');
+  }
+
+  private autoStashSummary(outcome: PullRepositoryResponse['autoStash']): string {
+    if (outcome.create === 'notRequested' || outcome.create === 'notNeeded') {
+      return '';
+    }
+    const stash = outcome.stash?.selector ? ` ${outcome.stash.selector}` : '';
+    return ` Auto-stash:${stash} create=${outcome.create}, restore=${outcome.restore}, cleanup=${outcome.cleanup}.`;
+  }
+
+  private async loadPushAnalysis(): Promise<void> {
+    const generation = ++this.pushAnalysisRequestGeneration;
+    this.pushAnalysisState.set({ kind: 'loading' });
+    try {
+      const analysis = await this.ipc.invoke('repository_push_analysis', { repositoryId: this.repositoryId });
+      if (generation === this.pushAnalysisRequestGeneration && !this.destroyed) {
+        this.pushAnalysisState.set({ kind: 'ready', analysis });
+      }
+    } catch (error) {
+      if (generation === this.pushAnalysisRequestGeneration && !this.destroyed) {
+        this.pushAnalysisState.set({ kind: 'error', message: this.errorMessage(error, 'Push analysis failed.') });
+      }
+    }
+  }
+
+  private async refreshAfterNetworkMutation(): Promise<void> {
+    await Promise.all([
+      this.statusStore.refresh(),
+      this.reloadHistory(),
+      this.loadNavigation(),
+      this.loadPushAnalysis(),
+      this.loadConflicts(),
+    ]);
+    this.selectWorkingTreeIfConflicted();
+  }
+
+  protected async loadConflicts(): Promise<void> {
+    const generation = ++this.conflictListRequestGeneration;
+    this.conflictListState.set({ kind: 'loading' });
+    try {
+      const response = await this.ipc.invoke('repository_conflicts', { repositoryId: this.repositoryId });
+      if (generation !== this.conflictListRequestGeneration || this.destroyed) {
+        return;
+      }
+      this.conflictListState.set({ kind: 'ready', files: response.files });
+      const selected = this.selectedConflict();
+      if (selected === null) {
+        return;
+      }
+      const current = response.files.find((file) => file.path === selected.path);
+      if (current === undefined || this.conflictIdentityKey(current) !== this.conflictIdentityKey(selected)) {
+        this.clearConflictSelection();
+      } else {
+        this.selectedConflict.set(current);
+      }
+    } catch (error) {
+      if (generation === this.conflictListRequestGeneration && !this.destroyed) {
+        this.conflictListState.set({ kind: 'error', message: this.errorMessage(error, 'Conflicts could not be loaded.') });
+      }
+    }
+  }
+
+  protected async selectConflict(file: ConflictFileSummary): Promise<void> {
+    if (this.conflictMutation()) {
+      return;
+    }
+    const generation = ++this.conflictDetailRequestGeneration;
+    this.selectedConflict.set(file);
+    this.conflictDetailState.set({ kind: 'loading', path: file.path });
+    this.conflictResult.set('');
+    this.conflictError.set('');
+    try {
+      const detail = await this.ipc.invoke('repository_conflict_detail', {
+        repositoryId: this.repositoryId,
+        operation: {
+          path: file.path,
+          expectedBase: file.base,
+          expectedOurs: file.ours,
+          expectedTheirs: file.theirs,
+        },
+      });
+      const selected = this.selectedConflict();
+      if (
+        generation !== this.conflictDetailRequestGeneration ||
+        this.destroyed ||
+        selected === null ||
+        this.conflictIdentityKey(selected) !== this.conflictIdentityKey(file)
+      ) {
+        return;
+      }
+      this.conflictDetailState.set({ kind: 'ready', detail });
+      this.conflictResult.set(detail.workingContent ?? detail.ours.content ?? detail.theirs.content ?? '');
+    } catch (error) {
+      if (generation === this.conflictDetailRequestGeneration && !this.destroyed) {
+        this.conflictDetailState.set({
+          kind: 'error',
+          path: file.path,
+          message: this.errorMessage(error, 'Conflict details could not be loaded.'),
+        });
+      }
+    }
+  }
+
+  protected updateConflictResult(content: string): void {
+    this.conflictResult.set(content);
+  }
+
+  protected async resolveConflict(resolution: ConflictResolution): Promise<void> {
+    const status = this.statusStore.state();
+    const selected = this.selectedConflict();
+    const detail = this.conflictDetailState();
+    if (
+      status.kind !== 'ready' ||
+      selected === null ||
+      detail.kind !== 'ready' ||
+      detail.detail.path !== selected.path ||
+      this.workspaceActionBusy() ||
+      (resolution.kind === 'content' && this.selectedConflictIsBinary())
+    ) {
+      return;
+    }
+    if (
+      resolution.kind === 'content' &&
+      this.conflictResultNeedsConfirmation(detail.detail) &&
+      !globalThis.confirm(
+        'The resolved content is unchanged or still contains conflict markers. Stage it as resolved anyway?',
+      )
+    ) {
+      return;
+    }
+    this.conflictMutation.set(true);
+    this.conflictNotice.set('');
+    this.conflictError.set('');
+    try {
+      const result = await this.ipc.invoke('repository_resolve_conflict', {
+        repositoryId: this.repositoryId,
+        operation: {
+          path: selected.path,
+          expectedBase: selected.base,
+          expectedOurs: selected.ours,
+          expectedTheirs: selected.theirs,
+          resolution,
+          precondition: this.repositoryStatePrecondition(status.status),
+        },
+      });
+      if (result.resolved) {
+        this.conflictNotice.set(`Resolved ${selected.path}.`);
+      } else {
+        this.conflictError.set(
+          `${result.errorMessage ?? `Could not resolve ${selected.path}.`}${result.mutationMayHaveOccurred ? ' The working tree was refreshed because the mutation may have occurred.' : ''}`,
+        );
+      }
+    } catch (error) {
+      this.conflictError.set(this.errorMessage(error, `Could not resolve ${selected.path}.`));
+    } finally {
+      await this.refreshAfterConflictMutation();
+      if (!this.destroyed) {
+        this.conflictMutation.set(false);
+      }
+    }
+  }
+
+  protected conflictVersionText(content: string | null, binary: boolean): string {
+    if (binary) {
+      return 'Binary version';
+    }
+    return content ?? 'Version not present';
+  }
+
+  protected conflictResultNeedsConfirmation(detail: ConflictFileDetailResponse): boolean {
+    const initial = detail.workingContent ?? detail.ours.content ?? detail.theirs.content ?? '';
+    return (
+      this.conflictResult() === initial ||
+      /^(?:<{7}|={7}|>{7})(?: |$)/m.test(this.conflictResult())
+    );
+  }
+
+  private conflictIdentityKey(file: ConflictFileSummary): string {
+    const stage = (identity: ConflictFileSummary['base']) => identity === null ? '-' : `${identity.oid}:${identity.mode}`;
+    return `${file.path}\u0000${stage(file.base)}\u0000${stage(file.ours)}\u0000${stage(file.theirs)}`;
+  }
+
+  private clearConflictSelection(): void {
+    ++this.conflictDetailRequestGeneration;
+    this.selectedConflict.set(null);
+    this.conflictDetailState.set({ kind: 'idle' });
+    this.conflictResult.set('');
+  }
+
+  private async refreshAfterConflictMutation(): Promise<void> {
+    await Promise.all([
+      this.statusStore.refresh(),
+      this.reloadHistory(),
+      this.loadNavigation(),
+      this.loadPushAnalysis(),
+      this.loadConflicts(),
+    ]);
+    this.selectWorkingTreeIfConflicted();
+  }
+
+  private selectWorkingTreeIfConflicted(): void {
+    const state = this.statusStore.state();
+    if (
+      state.kind === 'ready' &&
+      state.status.entries.some((entry) => entry.kind === 'unmerged')
+    ) {
+      this.selectWorkingTree();
+    }
+  }
+
   protected async refreshWorkspace(): Promise<void> {
     if (this.workspaceActionBusy()) {
       return;
@@ -399,6 +849,8 @@ export class WorkspaceHistory implements OnDestroy {
         this.statusStore.refresh(),
         this.reloadHistory(),
         this.loadNavigation(),
+        this.loadPushAnalysis(),
+        this.loadConflicts(),
       ]);
     } finally {
       if (!this.destroyed) {
@@ -436,6 +888,18 @@ export class WorkspaceHistory implements OnDestroy {
     this.focusAfterRender('new-branch-name');
   }
 
+  protected startBranchFromCommit(detail: RepositoryCommitDetailResponse, trigger: HTMLElement): void {
+    if (this.historySelection() !== 'commit' || this.selectedOid() !== detail.oid || this.workspaceActionBusy()) {
+      return;
+    }
+    this.branchCreationTarget.set({ kind: 'commit', oid: detail.oid, label: this.shortOid(detail.oid) });
+    this.branchCreationReturnFocus = trigger;
+    this.newBranchName.set('');
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.focusAfterRender('new-branch-name');
+  }
+
   protected updateNewBranchName(name: string): void {
     this.newBranchName.set(name);
   }
@@ -463,9 +927,11 @@ export class WorkspaceHistory implements OnDestroy {
           fullName: target.branch.fullName,
           expectedOid: target.branch.oid,
         }
-      : state.status.branch.oid === null
-        ? null
-        : { kind: 'current' as const, expectedOid: state.status.branch.oid };
+      : target.kind === 'commit'
+        ? { kind: 'commit' as const, oid: target.oid }
+        : state.status.branch.oid === null
+          ? null
+          : { kind: 'current' as const, expectedOid: state.status.branch.oid };
     if (source === null) {
       return;
     }
@@ -931,6 +1397,7 @@ export class WorkspaceHistory implements OnDestroy {
       });
       if (generation === this.navigationRequestGeneration) {
         this.navigationState.set({ kind: 'ready', navigation });
+        this.reconcileSelectedStash(navigation.stashes);
         const localTree = buildBranchTree(
           navigation.branches.filter((branch) => branch.kind === 'local' && !branch.current),
         );
@@ -972,8 +1439,11 @@ export class WorkspaceHistory implements OnDestroy {
     this.selectedOid.set(null);
     this.historySelection.set('none');
     this.detailState.set({ kind: 'idle' });
+    this.stashDetailState.set({ kind: 'idle' });
+    this.selectedStash.set(null);
     this.selectedFilePath.set(null);
     this.selectedWorkingTreeEntryKind.set(null);
+    this.selectedStashFileSource.set(null);
     this.fileDiffState.set({ kind: 'idle' });
     this.historyError.set('');
     this.historyPhase.set('loading');
@@ -1046,6 +1516,8 @@ export class WorkspaceHistory implements OnDestroy {
     this.selectedWorkingTreeEntryKind.set(null);
     this.fileDiffState.set({ kind: 'idle' });
     this.detailState.set({ kind: 'loading' });
+    this.stashDetailState.set({ kind: 'idle' });
+    this.selectedStash.set(null);
     try {
       const detail = await this.ipc.invoke('repository_commit_detail', {
         repositoryId: this.repositoryId,
@@ -1067,14 +1539,64 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  protected async selectStash(stash: RepositoryStash): Promise<void> {
+    if (
+      this.historySelection() === 'stash' &&
+      this.selectedOid() === stash.oid &&
+      this.stashDetailState().kind === 'ready'
+    ) {
+      return;
+    }
+
+    const generation = ++this.detailRequestGeneration;
+    ++this.fileDiffRequestGeneration;
+    this.historySelection.set('stash');
+    this.selectedOid.set(stash.oid);
+    this.selectedStash.set(stash);
+    this.detailState.set({ kind: 'idle' });
+    this.stashDetailState.set({ kind: 'loading' });
+    this.selectedFilePath.set(null);
+    this.selectedWorkingTreeEntryKind.set(null);
+    this.selectedStashFileSource.set(null);
+    this.fileDiffState.set({ kind: 'idle' });
+    this.fileDiffDisplayMode.set('contextual');
+    try {
+      const detail = await this.ipc.invoke('repository_stash_detail', {
+        repositoryId: this.repositoryId,
+        oid: stash.oid,
+      });
+      if (
+        generation === this.detailRequestGeneration &&
+        this.historySelection() === 'stash' &&
+        this.selectedOid() === stash.oid
+      ) {
+        this.stashDetailState.set({ kind: 'ready', detail });
+      }
+    } catch (error) {
+      if (
+        generation === this.detailRequestGeneration &&
+        this.historySelection() === 'stash' &&
+        this.selectedOid() === stash.oid
+      ) {
+        this.stashDetailState.set({
+          kind: 'error',
+          message: this.errorMessage(error, 'Stash details could not be loaded. Select the stash to retry.'),
+        });
+      }
+    }
+  }
+
   protected selectWorkingTree(): void {
     ++this.detailRequestGeneration;
     ++this.fileDiffRequestGeneration;
     this.historySelection.set('working-tree');
     this.selectedOid.set(null);
     this.detailState.set({ kind: 'idle' });
+    this.stashDetailState.set({ kind: 'idle' });
+    this.selectedStash.set(null);
     this.selectedFilePath.set(null);
     this.selectedWorkingTreeEntryKind.set(null);
+    this.selectedStashFileSource.set(null);
     this.fileDiffState.set({ kind: 'idle' });
     this.fileDiffDisplayMode.set('contextual');
   }
@@ -1476,13 +1998,26 @@ export class WorkspaceHistory implements OnDestroy {
     await this.loadWorkingTreeFileDiff(file.path, file.oldPath, file.entryKind);
   }
 
+  protected async openStashFileDiff(file: StashChangedFile): Promise<void> {
+    this.fileDiffReturnFocus =
+      globalThis.document?.activeElement instanceof HTMLElement
+        ? globalThis.document.activeElement
+        : null;
+    await this.loadStashFileDiff(file.path, file.oldPath, file.source);
+  }
+
   protected async retryFileDiff(path: string, oldPath: string | null): Promise<void> {
     if (this.historySelection() === 'working-tree') {
       const entryKind = this.selectedWorkingTreeEntryKind();
       if (entryKind !== null) {
         await this.loadWorkingTreeFileDiff(path, oldPath, entryKind);
       }
-    } else {
+    } else if (this.historySelection() === 'stash') {
+      const source = this.selectedStashFileSource();
+      if (source !== null) {
+        await this.loadStashFileDiff(path, oldPath, source);
+      }
+    } else if (this.historySelection() === 'commit') {
       await this.loadFileDiff(path, oldPath);
     }
   }
@@ -1533,7 +2068,7 @@ export class WorkspaceHistory implements OnDestroy {
 
   private async loadFileDiff(path: string, oldPath: string | null): Promise<void> {
     const oid = this.selectedOid();
-    if (oid === null) {
+    if (oid === null || this.historySelection() !== 'commit') {
       return;
     }
 
@@ -1567,6 +2102,57 @@ export class WorkspaceHistory implements OnDestroy {
           path,
           oldPath,
           message: this.errorMessage(error, 'The file diff could not be loaded.'),
+        });
+      }
+    }
+  }
+
+  private async loadStashFileDiff(
+    path: string,
+    oldPath: string | null,
+    source: StashFileSource,
+  ): Promise<void> {
+    const oid = this.selectedOid();
+    if (oid === null || this.historySelection() !== 'stash') {
+      return;
+    }
+
+    const generation = ++this.fileDiffRequestGeneration;
+    this.selectedFilePath.set(path);
+    this.selectedWorkingTreeEntryKind.set(null);
+    this.selectedStashFileSource.set(source);
+    this.fileDiffDisplayMode.set('contextual');
+    this.fileDiffState.set({ kind: 'loading', path, oldPath });
+    try {
+      const response = await this.ipc.invoke('repository_stash_file_diff', {
+        repositoryId: this.repositoryId,
+        oid,
+        source,
+        path,
+        oldPath,
+      });
+      if (
+        generation === this.fileDiffRequestGeneration &&
+        this.historySelection() === 'stash' &&
+        this.selectedOid() === oid &&
+        this.selectedFilePath() === path &&
+        this.selectedStashFileSource() === source
+      ) {
+        this.fileDiffState.set({ kind: 'ready', response });
+      }
+    } catch (error) {
+      if (
+        generation === this.fileDiffRequestGeneration &&
+        this.historySelection() === 'stash' &&
+        this.selectedOid() === oid &&
+        this.selectedFilePath() === path &&
+        this.selectedStashFileSource() === source
+      ) {
+        this.fileDiffState.set({
+          kind: 'error',
+          path,
+          oldPath,
+          message: this.errorMessage(error, 'The stash file diff could not be loaded.'),
         });
       }
     }
@@ -1613,6 +2199,37 @@ export class WorkspaceHistory implements OnDestroy {
       unknown: '?',
     };
     return marks[file.status];
+  }
+
+  private selectedDetailFiles(): readonly CommitChangedFile[] | null {
+    if (this.historySelection() === 'stash') {
+      const state = this.stashDetailState();
+      return state.kind === 'ready' ? state.detail.files : null;
+    }
+    const state = this.detailState();
+    return state.kind === 'ready' ? state.detail.files : null;
+  }
+
+  private reconcileSelectedStash(stashes: readonly RepositoryStash[]): void {
+    if (this.historySelection() !== 'stash') {
+      return;
+    }
+    const selected = stashes.find((stash) => stash.oid === this.selectedOid());
+    if (selected !== undefined) {
+      this.selectedStash.set(selected);
+      return;
+    }
+    ++this.detailRequestGeneration;
+    ++this.fileDiffRequestGeneration;
+    this.historySelection.set('none');
+    this.selectedOid.set(null);
+    this.selectedStash.set(null);
+    this.stashDetailState.set({ kind: 'idle' });
+    this.selectedFilePath.set(null);
+    this.selectedStashFileSource.set(null);
+    this.fileDiffState.set({ kind: 'idle' });
+    this.fileDiffDisplayMode.set('contextual');
+    this.fileDiffReturnFocus = null;
   }
 
   protected workingTreeStatusMark(status: WorkingTreePrimaryStatus): string {
@@ -1838,6 +2455,8 @@ export class WorkspaceHistory implements OnDestroy {
       this.statusStore.refresh(),
       this.reloadHistory(),
       this.loadNavigation(),
+      this.loadPushAnalysis(),
+      this.loadConflicts(),
     ]);
   }
 }

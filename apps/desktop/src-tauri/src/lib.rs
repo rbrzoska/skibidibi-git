@@ -7,20 +7,24 @@ use std::{
 
 use app_domain::{
     AmendCommitRequest, AmendCommitResult, ApplyIndexChangeRequest, ApplyIndexChangeResult,
-    ApplyStashRequest, ApplyStashResult, CommitDetails, CommitHistoryPage, CreateBranchRequest,
-    CreateBranchResult, CreateCommitRequest, CreateCommitResult, DeleteBranchRequest,
-    DeleteBranchResult, DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff,
-    IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState, PopStashRequest,
-    PopStashResult, PushStashRequest, PushStashResult, RememberRepositoryInput,
-    RememberedRepository, RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability,
-    RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider, RepositoryStatus,
-    RepositoryTransport, SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff,
+    ApplyStashRequest, ApplyStashResult, CommitDetails, CommitHistoryPage, ConflictFileDetail,
+    ConflictFileDetailRequest, ConflictListResult, CreateBranchRequest, CreateBranchResult,
+    CreateCommitRequest, CreateCommitResult, DeleteBranchRequest, DeleteBranchResult,
+    DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff, IntegrationHealth,
+    IntegrationHealthIssue, IntegrationHealthState, PopStashRequest, PopStashResult, PullRequest,
+    PullResult, PushAnalysis, PushRequest, PushResult, PushStashRequest, PushStashResult,
+    RememberRepositoryInput, RememberedRepository, RemoveWorktreeRequest, RemoveWorktreeResult,
+    RepositoryAvailability, RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider,
+    RepositoryStatus, RepositoryTransport, ResolveConflictRequest, ResolveConflictResult,
+    SetUpstreamRequest, SetUpstreamResult, StashDetails, StashFileDiff, StashFileDiffRequest,
+    StashFileSource, SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff,
 };
 use app_store::{CatalogError, RepositoryCatalog};
 use repo_runtime::{
-    BranchCreationError, BranchSwitchError, FileDiffRuntimeError, HistoryRuntimeError,
-    MaintenanceError, MutationRuntimeError, NavigationRuntimeError, RepositoryRuntime,
-    RepositoryRuntimeError, StashActionError, WorkingTreeDiffRuntimeError,
+    BranchCreationError, BranchSwitchError, ConflictResolutionError, FileDiffRuntimeError,
+    HistoryRuntimeError, MaintenanceError, MutationRuntimeError, NavigationRuntimeError,
+    NetworkOperationError, RepositoryRuntime, RepositoryRuntimeError, StashActionError,
+    StashInspectionError, WorkingTreeDiffRuntimeError,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -126,6 +130,30 @@ impl From<StashActionError> for CommandError {
     fn from(error: StashActionError) -> Self {
         Self {
             message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<NetworkOperationError> for CommandError {
+    fn from(error: NetworkOperationError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<ConflictResolutionError> for CommandError {
+    fn from(error: ConflictResolutionError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<StashInspectionError> for CommandError {
+    fn from(error: StashInspectionError) -> Self {
+        Self {
+            message: error.to_string(),
         }
     }
 }
@@ -352,6 +380,202 @@ async fn repository_file_diff(
     .await
     .map_err(|error| CommandError {
         message: format!("file diff task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_stash_detail(
+    repository_id: String,
+    oid: String,
+    state: State<'_, AppState>,
+) -> Result<StashDetails, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .stash_details(&repository_path, &oid)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("stash detail task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_stash_file_diff(
+    repository_id: String,
+    oid: String,
+    source: StashFileSource,
+    path: String,
+    old_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<StashFileDiff, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .stash_file_diff(
+                &repository_path,
+                &StashFileDiffRequest {
+                    oid,
+                    source,
+                    path,
+                    old_path,
+                },
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("stash file diff task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_push_analysis(
+    repository_id: String,
+    state: State<'_, AppState>,
+) -> Result<PushAnalysis, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .push_analysis(&repository_path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("push analysis task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_pull(
+    repository_id: String,
+    operation: PullRequest,
+    state: State<'_, AppState>,
+) -> Result<PullResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .pull_repository(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("pull task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_push(
+    repository_id: String,
+    operation: PushRequest,
+    state: State<'_, AppState>,
+) -> Result<PushResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .push_repository(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("push task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_set_upstream(
+    repository_id: String,
+    operation: SetUpstreamRequest,
+    state: State<'_, AppState>,
+) -> Result<SetUpstreamResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .set_repository_upstream(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("set-upstream task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_conflicts(
+    repository_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConflictListResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .conflicts(&repository_path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("conflict list task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_conflict_detail(
+    repository_id: String,
+    operation: ConflictFileDetailRequest,
+    state: State<'_, AppState>,
+) -> Result<ConflictFileDetail, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .conflict_detail(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("conflict detail task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_resolve_conflict(
+    repository_id: String,
+    operation: ResolveConflictRequest,
+    state: State<'_, AppState>,
+) -> Result<ResolveConflictResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .resolve_conflict(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("conflict resolution task failed: {error}"),
     })?
 }
 
@@ -833,6 +1057,15 @@ pub fn run() {
             repository_history,
             repository_commit_detail,
             repository_file_diff,
+            repository_stash_detail,
+            repository_stash_file_diff,
+            repository_push_analysis,
+            repository_pull,
+            repository_push,
+            repository_set_upstream,
+            repository_conflicts,
+            repository_conflict_detail,
+            repository_resolve_conflict,
             repository_working_tree_file_diff,
             repository_apply_index_change,
             repository_create_commit,

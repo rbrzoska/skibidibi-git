@@ -15,6 +15,30 @@
       title="Replace the current HEAD commit"
       (click)="startAmend($any($event.currentTarget))"
     >Amend HEAD</button>
+    <div class="network-actions" aria-label="Remote synchronization">
+      <label>
+        <span>Pull strategy</span>
+        <select
+          aria-label="Pull strategy"
+          [value]="pullStrategy()"
+          [disabled]="workspaceActionBusy()"
+          (change)="setPullStrategy($any($event.target).value)"
+        >
+          <option value="ffIfPossible">FF if possible</option>
+          <option value="ffOnly">FF only</option>
+          <option value="rebase">Rebase</option>
+        </select>
+      </label>
+      <button type="button" [disabled]="workspaceActionBusy()" (click)="pullRepository()">
+        {{ networkMutation() === 'pull' ? 'Pulling…' : 'Pull' }}
+      </button>
+      <button
+        type="button"
+        [disabled]="workspaceActionBusy() || pushDisabledReason() !== null"
+        [title]="pushDisabledReason() ?? 'Push to the configured upstream'"
+        (click)="pushRepository()"
+      >{{ networkMutation() === 'push' ? 'Pushing…' : 'Push' }}</button>
+    </div>
     <button type="button" [disabled]="workspaceActionBusy()" (click)="refreshWorkspace()">
       {{ refreshingWorkspace() ? 'Refreshing…' : 'Refresh' }}
     </button>
@@ -54,6 +78,12 @@
       }
       @if (navigationActionNotice()) {
         <p class="navigation-action-notice" role="status">{{ navigationActionNotice() }}</p>
+      }
+      @if (networkError()) {
+        <p class="navigation-action-error" role="alert">{{ networkError() }}</p>
+      }
+      @if (networkNotice()) {
+        <p class="navigation-action-notice" role="status">{{ networkNotice() }}</p>
       }
       @if (branchCreationTarget(); as target) {
         <form class="navigation-inline-form" (submit)="$event.preventDefault(); createBranch()">
@@ -176,7 +206,12 @@
                         @if (node.branch.behind > 0) { <small class="behind-token">↓{{ node.branch.behind }}</small> }
                       </span>
                     </div>
-                    <button type="button" class="reference-action" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Create local branch from ' + node.branch.name" title="Create local tracking branch" (click)="startBranchFromRemote(node.branch, $any($event.currentTarget))">+</button>
+                    <span class="reference-actions">
+                      @if (canSetNaturalUpstream(node.branch)) {
+                        <button type="button" class="reference-action" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Set ' + node.branch.name + ' as upstream'" title="Set as upstream" (click)="setNaturalUpstream(node.branch)">⇧</button>
+                      }
+                      <button type="button" class="reference-action" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Create local branch from ' + node.branch.name" title="Create local tracking branch" (click)="startBranchFromRemote(node.branch, $any($event.currentTarget))">+</button>
+                    </span>
                   </div>
                 }
               </li>
@@ -233,8 +268,17 @@
           <ul class="stash-list">
             @for (stash of navigation.navigation.stashes; track stash.oid) {
               <li class="stash-row" [title]="stash.message">
-                <span>{{ stash.selector }} · {{ stash.message }}</span>
-                <small>{{ formatTimestamp(stash.authoredAt) }}</small>
+                <button
+                  type="button"
+                  class="stash-inspect"
+                  [class.selected]="historySelection() === 'stash' && selectedOid() === stash.oid"
+                  [attr.aria-current]="historySelection() === 'stash' && selectedOid() === stash.oid ? 'true' : null"
+                  [attr.aria-label]="'Inspect ' + stash.selector"
+                  (click)="selectStash(stash)"
+                >
+                  <span>{{ stash.selector }} · {{ stash.message }}</span>
+                  <small>{{ formatTimestamp(stash.authoredAt) }}</small>
+                </button>
                 <span class="stash-actions">
                   <button type="button" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Apply ' + stash.selector" (click)="applyStash(stash)">{{ stashMutation() === 'apply:' + stash.oid ? 'Applying…' : 'Apply' }}</button>
                   <button type="button" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Pop ' + stash.selector" (click)="popStash(stash)">{{ stashMutation() === 'pop:' + stash.oid ? 'Popping…' : 'Pop' }}</button>
@@ -294,7 +338,7 @@
               @if (diffState.response.binary || parsed?.hasBinaryFiles) {
                 <div class="diff-state"><span class="binary-icon" aria-hidden="true">01</span><strong>Binary file</strong><p>A textual diff is not available for this file.</p></div>
               } @else if (parsed?.isEmpty) {
-                <div class="diff-state"><strong>No textual changes</strong><p>{{ historySelection() === 'working-tree' ? 'The working tree returned an empty patch for this file.' : 'The commit returned an empty patch for this file.' }}</p></div>
+                <div class="diff-state"><strong>No textual changes</strong><p>{{ historySelection() === 'working-tree' ? 'The working tree returned an empty patch for this file.' : historySelection() === 'stash' ? 'The stash returned an empty patch for this file.' : 'The commit returned an empty patch for this file.' }}</p></div>
               } @else {
                 @if (isFileDiffVisuallyTruncated()) {
                   <p class="diff-render-limit" role="status">Showing the first 20,000 diff lines to keep the application responsive.</p>
@@ -412,9 +456,9 @@
       }
     </section>
 
-    <aside class="inspector" [attr.aria-label]="historySelection() === 'working-tree' ? 'Working tree inspector' : 'Commit inspector'">
+    <aside class="inspector" [attr.aria-label]="historySelection() === 'working-tree' ? 'Working tree inspector' : historySelection() === 'stash' ? 'Stash inspector' : 'Commit inspector'">
       <header class="inspector-heading">
-        <p class="eyebrow">{{ historySelection() === 'working-tree' ? 'working tree inspector' : 'commit inspector' }}</p>
+        <p class="eyebrow">{{ historySelection() === 'working-tree' ? 'working tree inspector' : historySelection() === 'stash' ? 'stash inspector' : 'commit inspector' }}</p>
       </header>
       @if (historySelection() === 'working-tree') {
         @let working = workingTreeSummary();
@@ -428,6 +472,83 @@
             @if (working.counts.conflicted > 0) { <strong class="conflicts">{{ working.counts.conflicted }} conflicted</strong> }
           </div>
         </section>
+        @if (working.counts.conflicted > 0) {
+          <section class="conflict-resolver" aria-labelledby="conflict-resolver-title">
+            <header>
+              <div>
+                <h3 id="conflict-resolver-title">Conflict resolver</h3>
+                <small>Select a file and produce its final working-tree version.</small>
+              </div>
+              <button type="button" [disabled]="workspaceActionBusy()" (click)="loadConflicts()">Refresh</button>
+            </header>
+            @if (conflictError()) { <p class="conflict-feedback error" role="alert">{{ conflictError() }}</p> }
+            @if (conflictNotice()) { <p class="conflict-feedback notice" role="status">{{ conflictNotice() }}</p> }
+            @let conflicts = conflictListState();
+            @if (conflicts.kind === 'loading') {
+              <p class="conflict-placeholder">Loading conflicts…</p>
+            } @else if (conflicts.kind === 'error') {
+              <p class="conflict-feedback error" role="alert">{{ conflicts.message }}</p>
+            } @else if (conflicts.files.length === 0) {
+              <p class="conflict-placeholder">No unmerged files remain. Refreshing the working tree may clear this view.</p>
+            } @else {
+              <div class="conflict-layout">
+                <ul class="conflict-files" aria-label="Conflicted files">
+                  @for (file of conflicts.files; track file.path + ':' + (file.base?.oid ?? '-') + ':' + (file.ours?.oid ?? '-') + ':' + (file.theirs?.oid ?? '-')) {
+                    <li>
+                      <button
+                        type="button"
+                        [class.selected]="selectedConflict()?.path === file.path"
+                        [disabled]="conflictMutation()"
+                        (click)="selectConflict(file)"
+                      >{{ file.path }}</button>
+                    </li>
+                  }
+                </ul>
+                @let conflictDetail = conflictDetailState();
+                <div class="conflict-detail">
+                  @if (conflictDetail.kind === 'idle') {
+                    <p class="conflict-placeholder">Choose a conflicted file.</p>
+                  } @else if (conflictDetail.kind === 'loading') {
+                    <p class="conflict-placeholder">Loading {{ conflictDetail.path }}…</p>
+                  } @else if (conflictDetail.kind === 'error') {
+                    <p class="conflict-feedback error" role="alert">{{ conflictDetail.message }}</p>
+                  } @else {
+                    <strong>{{ conflictDetail.detail.path }}</strong>
+                    <div class="conflict-versions" aria-label="Conflict versions">
+                      <section><h4>Base</h4><pre>{{ conflictVersionText(conflictDetail.detail.base.content, conflictDetail.detail.base.binary) }}</pre></section>
+                      <section><h4>Ours</h4><pre>{{ conflictVersionText(conflictDetail.detail.ours.content, conflictDetail.detail.ours.binary) }}</pre></section>
+                      <section><h4>Theirs</h4><pre>{{ conflictVersionText(conflictDetail.detail.theirs.content, conflictDetail.detail.theirs.binary) }}</pre></section>
+                    </div>
+                    @if (selectedConflictIsBinary()) {
+                      <p class="conflict-placeholder">Binary conflict: choose one side or delete the file.</p>
+                    } @else {
+                      <label for="conflict-result">Resolved content</label>
+                      <textarea
+                        id="conflict-result"
+                        aria-label="Resolved content"
+                        rows="8"
+                        [value]="conflictResult()"
+                        [disabled]="conflictMutation()"
+                        (input)="updateConflictResult($any($event.target).value)"
+                      ></textarea>
+                      @if (conflictResultNeedsConfirmation(conflictDetail.detail)) {
+                        <p class="conflict-placeholder">Review the result: unchanged content or conflict markers require confirmation before staging.</p>
+                      }
+                    }
+                    <div class="conflict-actions">
+                      <button type="button" [disabled]="conflictMutation() || conflictDetail.detail.ours.identity === null" (click)="resolveConflict({ kind: 'ours' })">Use ours</button>
+                      <button type="button" [disabled]="conflictMutation() || conflictDetail.detail.theirs.identity === null" (click)="resolveConflict({ kind: 'theirs' })">Use theirs</button>
+                      <button type="button" class="danger" [disabled]="conflictMutation()" (click)="resolveConflict({ kind: 'delete' })">Delete</button>
+                      @if (!selectedConflictIsBinary()) {
+                        <button type="button" class="primary" [disabled]="conflictMutation()" (click)="resolveConflict({ kind: 'content', content: conflictResult() })">Resolve with edited content</button>
+                      }
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+          </section>
+        }
         <section class="commit-composer" aria-labelledby="commit-composer-title">
           <label id="commit-composer-title" for="commit-message">
             {{ amendMode() ? 'Amend HEAD' : 'Commit message' }}
@@ -512,6 +633,58 @@
             </li>
           }
         </ul>
+      } @else if (historySelection() === 'stash') {
+        @let stashState = stashDetailState();
+        @switch (stashState.kind) {
+          @case ('idle') {
+            <h2>No stash selected</h2>
+            <div class="placeholder"><span aria-hidden="true">⌁</span><strong>Stash details</strong><p>Select a stash to inspect its changed files.</p></div>
+          }
+          @case ('loading') {
+            <h2>Loading stash…</h2>
+            <div class="placeholder"><span class="spinner" aria-hidden="true"></span><p>Reading the immutable stash snapshot.</p></div>
+          }
+          @case ('error') {
+            <h2>Details unavailable</h2>
+            <div class="placeholder error-state"><strong>Could not inspect stash</strong><p>{{ stashState.message }}</p></div>
+          }
+          @case ('ready') {
+            @let stash = selectedStash();
+            @let detail = stashState.detail;
+            @let fileSummary = selectedFileSummary();
+            <section class="commit-overview stash-overview" aria-labelledby="inspected-stash-title">
+              <h2 id="inspected-stash-title">{{ stash?.message || 'Saved work' }}</h2>
+              <dl class="commit-meta">
+                <div><dt>Stash</dt><dd>{{ stash?.selector ?? 'stash' }}</dd></div>
+                <div class="commit-meta-oid"><dt>Object</dt><dd><code>{{ shortOid(detail.oid) }}</code></dd></div>
+                <div><dt>Author</dt><dd>{{ stash?.author ?? 'Unknown' }}</dd></div>
+                @if (stash !== null) { <div><dt>Saved</dt><dd><time [attr.datetime]="stash.authoredAt">{{ formatTimestamp(stash.authoredAt) }}</time></dd></div> }
+              </dl>
+            </section>
+            <header class="file-heading">
+              <div><span class="file-heading-label">Files</span><strong>{{ fileSummary.files }} changed {{ fileSummary.files === 1 ? 'file' : 'files' }}</strong></div>
+              <span class="file-summary-stats" aria-label="{{ fileSummary.additions }} additions and {{ fileSummary.deletions }} deletions"><b class="added">+{{ fileSummary.additions }}</b><b class="deleted">−{{ fileSummary.deletions }}</b></span>
+            </header>
+            @if (detail.files.length === 0) {
+              <p class="no-files">No changed files were reported for this stash.</p>
+            } @else {
+              <ul class="changed-files" aria-label="Stash changed files">
+                @for (file of detail.files; track file.source + ':' + file.path + ':' + (file.oldPath ?? '')) {
+                  <li>
+                    <button type="button" class="changed-file" [class.selected]="selectedFilePath() === file.path && selectedStashFileSource() === file.source" [attr.aria-pressed]="selectedFilePath() === file.path && selectedStashFileSource() === file.source" [title]="'Open stash diff for ' + file.path" (click)="openStashFileDiff(file)">
+                      <span class="file-status" [attr.data-status]="file.status" [title]="fileStatusLabel(file)">{{ fileStatusMark(file) }}</span>
+                      <span class="file-path" [title]="file.path">
+                        {{ file.path }}
+                        @if (file.oldPath !== null) { <small>from {{ file.oldPath }}</small> }
+                      </span>
+                      <span class="file-stats"><small class="stash-source">{{ file.source }}</small>@if (file.binary) { binary } @else { <b>+{{ file.additions ?? 0 }}</b><i>−{{ file.deletions ?? 0 }}</i> }</span>
+                    </button>
+                  </li>
+                }
+              </ul>
+            }
+          }
+        }
       } @else {
       @let state = detailState();
       @switch (state.kind) {
@@ -531,7 +704,10 @@
           @let detail = state.detail;
           @let fileSummary = selectedFileSummary();
           <section class="commit-overview" aria-labelledby="inspected-commit-title">
-            <h2 id="inspected-commit-title">{{ detail.summary || 'Commit without subject' }}</h2>
+            <div class="commit-overview-title">
+              <h2 id="inspected-commit-title">{{ detail.summary || 'Commit without subject' }}</h2>
+              <button type="button" class="create-branch-from-commit" [disabled]="workspaceActionBusy()" (click)="startBranchFromCommit(detail, $any($event.currentTarget))">New branch here</button>
+            </div>
             <dl class="commit-meta">
               <div class="commit-meta-oid">
                 <dt>Commit</dt>

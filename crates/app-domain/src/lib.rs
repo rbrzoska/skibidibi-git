@@ -1,17 +1,25 @@
 mod branch_actions;
 mod branch_creation;
+mod conflict_resolution;
 mod file_diff;
 mod history;
 mod maintenance;
 mod mutations;
 mod navigation;
+mod network_operations;
 mod repository;
 mod stash_actions;
+mod stash_inspection;
 mod status;
 mod working_tree;
 
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use branch_creation::{BranchCreationSource, CreateBranchRequest, CreateBranchResult};
+pub use conflict_resolution::{
+    ConflictFileDetail, ConflictFileDetailRequest, ConflictFileSummary, ConflictListResult,
+    ConflictResolution, ConflictStageIdentity, ConflictVersion, ResolveConflictRequest,
+    ResolveConflictResult,
+};
 pub use file_diff::{FileDiff, FileDiffRequest};
 pub use history::{
     ChangedFileStatus, ChangedFileSummary, CommitAuthor, CommitDetails, CommitHistoryPage,
@@ -30,6 +38,10 @@ pub use navigation::{
     RepositoryBranch, RepositoryBranchKind, RepositoryNavigation, RepositoryStash,
     RepositoryWorktree,
 };
+pub use network_operations::{
+    PullOperationState, PullRequest, PullResult, PullStrategy, PushAnalysis, PushReadiness,
+    PushRequest, PushResult, PushTarget, SetUpstreamRequest, SetUpstreamResult,
+};
 pub use repository::{
     HostedRepositoryIdentity, IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState,
     RememberRepositoryInput, RememberedRepository, RepositoryAvailability, RepositoryHealthUpdate,
@@ -40,6 +52,9 @@ pub use stash_actions::{
     DropStashRequest, DropStashResult, PopStashRequest, PopStashResult, PushStashRequest,
     PushStashResult, RepositoryStatePrecondition, StashCleanupState, StashIdentity, StashPushState,
     StashRestoreState,
+};
+pub use stash_inspection::{
+    StashChangedFile, StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource,
 };
 pub use status::{BranchStatus, RepositoryStatus, StatusCode, StatusEntry, StatusEntryKind};
 pub use working_tree::{WorkingTreeFileDiff, WorkingTreeFileDiffRequest};

@@ -122,6 +122,38 @@ function navigationWithStash() {
   };
 }
 
+const textConflict = {
+  path: 'src/conflicted.ts',
+  base: { oid: 'base-oid', mode: '100644' },
+  ours: { oid: 'ours-oid', mode: '100644' },
+  theirs: { oid: 'theirs-oid', mode: '100644' },
+};
+
+function conflictedStatus() {
+  return {
+    ...repositoryStatus(),
+    entries: [{
+      kind: 'unmerged' as const,
+      path: textConflict.path,
+      originalPath: null,
+      indexStatus: 'unmerged' as const,
+      worktreeStatus: 'unmerged' as const,
+      submodule: null,
+    }],
+  };
+}
+
+function conflictDetail(binary = false) {
+  return {
+    path: textConflict.path,
+    base: { identity: textConflict.base, content: binary ? null : 'base\n', binary },
+    ours: { identity: textConflict.ours, content: binary ? null : 'ours\n', binary },
+    theirs: { identity: textConflict.theirs, content: binary ? null : 'theirs\n', binary },
+    workingContent: binary ? null : 'ours\n<<<<<<<\ntheirs\n',
+    workingBinary: binary,
+  };
+}
+
 describe('WorkspaceHistory', () => {
   beforeEach(() => {
     globalThis.localStorage.removeItem(branchExpansionStorageKey('skibidibi-git', 'local'));
@@ -215,6 +247,38 @@ describe('WorkspaceHistory', () => {
     if (command === 'repository_fetch') {
       return Promise.resolve({ fetchedAt: '2026-07-15T12:00:00Z' });
     }
+    if (command === 'repository_push_analysis') {
+      return Promise.resolve({ branch: 'main', head: 'abc', upstream: 'origin/main', remote: 'origin', remoteRef: 'refs/heads/main', ahead: 1, behind: 0, readiness: 'ready' });
+    }
+    if (command === 'repository_pull') {
+      const autoStash = (request as { operation: { autoStash: { message: string } | null } }).operation.autoStash;
+      return Promise.resolve({
+        state: 'succeeded',
+        headBefore: 'abc',
+        headAfter: 'def',
+        status: { ...repositoryStatus(), branch: { ...repositoryStatus().branch, oid: 'def' } },
+        autoStash: autoStash === null
+          ? { create: 'notRequested', stash: null, restore: 'notRequired', cleanup: 'notRequired', createError: null, restoreError: null, cleanupError: null }
+          : { create: 'created', stash: { oid: 'stash-auto', selector: 'stash@{0}' }, restore: 'applied', cleanup: 'dropped', createError: null, restoreError: null, cleanupError: null },
+        errorMessage: null,
+      });
+    }
+    if (command === 'repository_push') {
+      return Promise.resolve({
+        pushed: true,
+        analysis: { branch: 'main', head: 'abc', upstream: 'origin/main', remote: 'origin', remoteRef: 'refs/heads/main', ahead: 0, behind: 0, readiness: 'upToDate' },
+        status: repositoryStatus(),
+      });
+    }
+    if (command === 'repository_set_upstream') {
+      return Promise.resolve({ upstream: 'origin/main', status: repositoryStatus() });
+    }
+    if (command === 'repository_conflicts') {
+      return Promise.resolve({ files: [], status: repositoryStatus() });
+    }
+    if (command === 'repository_resolve_conflict') {
+      return Promise.resolve({ resolved: true, status: repositoryStatus(), errorMessage: null, mutationMayHaveOccurred: false });
+    }
     if (command === 'create_repository_branch') {
       const operation = (request as { operation: { name: string; source: { kind: string } } }).operation;
       return Promise.resolve({
@@ -289,6 +353,43 @@ describe('WorkspaceHistory', () => {
         patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old line\n+new line`,
       });
     }
+    if (command === 'repository_stash_detail') {
+      const { oid } = request as { oid: string };
+      return Promise.resolve({
+        oid,
+        files: [
+          {
+            source: 'tracked',
+            path: 'new name.txt',
+            oldPath: 'old name.txt',
+            status: 'renamed',
+            additions: 2,
+            deletions: 1,
+            binary: false,
+          },
+          {
+            source: 'untracked',
+            path: 'snapshot.bin',
+            oldPath: null,
+            status: 'added',
+            additions: null,
+            deletions: null,
+            binary: true,
+          },
+        ],
+      });
+    }
+    if (command === 'repository_stash_file_diff') {
+      const { oid, source, path } = request as { oid: string; source: string; path: string };
+      return Promise.resolve({
+        oid,
+        source,
+        path,
+        binary: false,
+        truncated: false,
+        patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old stash line\n+new stash line`,
+      });
+    }
     if (command === 'repository_working_tree_file_diff') {
       const { path } = request as { path: string };
       return Promise.resolve({
@@ -342,6 +443,139 @@ describe('WorkspaceHistory', () => {
     expect(element.querySelectorAll('.commit-row .graph')).toHaveLength(2);
     expect(element.textContent).toContain('Add repository history');
     expect(element.textContent).not.toContain('History backend is next');
+  });
+
+  it('inspects a stash by immutable OID, opens its rename diff, and returns to the stash context', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_navigation'
+        ? Promise.resolve(navigationWithStash())
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const inspect = fixture.nativeElement.querySelector('[aria-label="Inspect stash@{0}"]') as HTMLButtonElement;
+    inspect.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const inspector = fixture.nativeElement.querySelector('.inspector') as HTMLElement;
+    expect(inspector.getAttribute('aria-label')).toBe('Stash inspector');
+    expect(inspector.textContent).toContain('Saved work');
+    expect(inspector.textContent).toContain('new name.txt');
+    expect(inspector.textContent).toContain('untracked');
+    expect(invoke).toHaveBeenCalledWith('repository_stash_detail', {
+      repositoryId: 'skibidibi-git',
+      oid: 'stash-oid',
+    });
+
+    const changedFile = inspector.querySelector('.changed-file') as HTMLButtonElement;
+    changedFile.focus();
+    changedFile.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.diff-table')?.textContent).toContain('new stash line');
+    expect(invoke).toHaveBeenCalledWith('repository_stash_file_diff', {
+      repositoryId: 'skibidibi-git',
+      oid: 'stash-oid',
+      source: 'tracked',
+      path: 'new name.txt',
+      oldPath: 'old name.txt',
+    });
+
+    (fixture.nativeElement.querySelector('.close-diff') as HTMLButtonElement).click();
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect((fixture.nativeElement.querySelector('.inspector') as HTMLElement).getAttribute('aria-label')).toBe(
+      'Stash inspector',
+    );
+    expect(fixture.nativeElement.querySelector('.stash-overview')?.textContent).toContain('Saved work');
+    expect(globalThis.document.activeElement).toBe(changedFile);
+  });
+
+  it('ignores stale stash detail and diff responses after selecting another stash OID', async () => {
+    const stashes = [
+      { oid: 'stash-first', selector: 'stash@{0}', message: 'First stash', author: 'Ada', authoredAt: '2026-07-15T12:00:00Z' },
+      { oid: 'stash-second', selector: 'stash@{1}', message: 'Second stash', author: 'Grace', authoredAt: '2026-07-14T12:00:00Z' },
+    ];
+    let resolveFirstDetail!: (value: unknown) => void;
+    let resolveFirstDiff!: (value: unknown) => void;
+    const firstDetail = new Promise((resolve) => { resolveFirstDetail = resolve; });
+    const firstDiff = new Promise((resolve) => { resolveFirstDiff = resolve; });
+    const stashFile = {
+      source: 'tracked', path: 'first.txt', oldPath: null, status: 'modified', additions: 1, deletions: 1, binary: false,
+    };
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve({ ...navigationWithStash(), stashes });
+      }
+      if (command === 'repository_stash_detail') {
+        const oid = (request as { oid: string }).oid;
+        return oid === stashes[0].oid
+          ? firstDetail
+          : Promise.resolve({ oid, files: [{ ...stashFile, path: 'second.txt' }] });
+      }
+      if (command === 'repository_stash_file_diff') {
+        return firstDiff;
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture } = await createFixture(ipc);
+    const inspect = fixture.nativeElement.querySelectorAll('.stash-inspect') as NodeListOf<HTMLButtonElement>;
+    inspect[0].click();
+    inspect[1].click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.stash-overview')?.textContent).toContain('Second stash');
+    });
+    resolveFirstDetail({ oid: stashes[0].oid, files: [stashFile] });
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.stash-overview')?.textContent).toContain('Second stash');
+    expect(fixture.nativeElement.querySelector('.changed-files')?.textContent).toContain('second.txt');
+
+    inspect[0].click();
+    resolveFirstDetail({ oid: stashes[0].oid, files: [stashFile] });
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.changed-file')).toBeTruthy();
+    });
+    (fixture.nativeElement.querySelector('.changed-file') as HTMLButtonElement).click();
+    inspect[1].click();
+    resolveFirstDiff({
+      oid: stashes[0].oid,
+      source: 'tracked',
+      path: 'first.txt',
+      binary: false,
+      truncated: false,
+      patch: 'diff --git a/first.txt b/first.txt\n--- a/first.txt\n+++ b/first.txt\n@@ -1 +1 @@\n-stale\n+stale diff',
+    });
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.diff-view')).toBeNull();
+  });
+
+  it('invalidates a selected stash when a mutation refresh no longer reports its OID', async () => {
+    let navigationCalls = 0;
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        navigationCalls += 1;
+        return Promise.resolve(navigationCalls === 1 ? navigationWithStash() : { ...navigationWithStash(), stashes: [] });
+      }
+      return defaultIpc(command, request);
+    };
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { fixture } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.stash-inspect') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[aria-label="Drop stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.stash-overview')).toBeNull();
+    expect((fixture.nativeElement.querySelector('.inspector') as HTMLElement).getAttribute('aria-label')).toBe(
+      'Commit inspector',
+    );
+    expect(fixture.nativeElement.querySelector('.selected.stash-inspect')).toBeNull();
+    confirm.mockRestore();
   });
 
   it('summarizes working tree changes above commit history', async () => {
@@ -1066,6 +1300,38 @@ describe('WorkspaceHistory', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
     expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('Created local branch');
     await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(newBranch));
+  });
+
+  it('creates a branch from the exact selected commit and returns focus to its inspector action', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const trigger = fixture.nativeElement.querySelector('.create-branch-from-commit') as HTMLButtonElement;
+    trigger.click();
+    fixture.detectChanges();
+    const input = fixture.nativeElement.querySelector('#new-branch-name') as HTMLInputElement;
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(input));
+    expect(fixture.nativeElement.querySelector('.navigation-inline-form')?.textContent).toContain(
+      commits[0].oid.slice(0, 7),
+    );
+    input.value = 'feature/from-selected';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.navigation-inline-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('create_repository_branch', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        name: 'feature/from-selected',
+        source: { kind: 'commit', oid: commits[0].oid },
+      },
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch')).toHaveLength(0);
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(trigger));
   });
 
   it('returns focus after cancelling branch creation and closes a remote form in current-only mode', async () => {
@@ -1991,5 +2257,197 @@ describe('WorkspaceHistory', () => {
     expect(fixture.nativeElement.querySelectorAll('.commit-row')).toHaveLength(0);
     expect(fixture.nativeElement.textContent).toContain('History unavailable');
     expect(fixture.nativeElement.textContent).toContain('Try again');
+  });
+
+  it('retries a dirty pull with the selected strategy and a dated auto-stash message', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    let pulls = 0;
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_pull' && ++pulls === 1) {
+        return Promise.reject(new Error('Pull requires a clean working tree'));
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const strategy = fixture.nativeElement.querySelector('[aria-label="Pull strategy"]') as HTMLSelectElement;
+    strategy.value = 'rebase';
+    strategy.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const pull = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
+      .find((button) => button.textContent?.trim() === 'Pull')!;
+    pull.click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.textContent).toContain('Pull succeeded.');
+    });
+
+    const calls = invoke.mock.calls.filter(([command]) => command === 'repository_pull');
+    expect(calls).toHaveLength(2);
+    expect(calls[0][1].operation).toMatchObject({ strategy: 'rebase', autoStash: null });
+    expect(calls[1][1].operation.strategy).toBe('rebase');
+    expect(calls[1][1].operation.autoStash.message).toMatch(/^WIP \d{4}-\d{2}-\d{2}T.* main$/);
+    expect(fixture.nativeElement.textContent).toContain('create=created, restore=applied, cleanup=dropped');
+    expect(confirm).toHaveBeenCalledOnce();
+  });
+
+  it('does not offer auto-stash for an unrelated pull failure', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_pull'
+        ? Promise.reject(new Error('authentication failed'))
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    confirm.mockClear();
+    const pull = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
+      .find((button) => button.textContent?.trim() === 'Pull')!;
+    pull.click();
+
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.textContent).toContain('authentication failed');
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_pull')).toHaveLength(1);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('blocks unsafe push analysis and confirms origin setup when no upstream exists', async () => {
+    let readiness: 'behind' | 'noUpstream' = 'behind';
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        const status = repositoryStatus();
+        return Promise.resolve({ ...status, branch: { ...status.branch, upstream: readiness === 'noUpstream' ? null : 'origin/main' } });
+      }
+      if (command === 'repository_push_analysis') {
+        return Promise.resolve({ branch: 'main', head: 'abc', upstream: readiness === 'noUpstream' ? null : 'origin/main', remote: readiness === 'noUpstream' ? null : 'origin', remoteRef: readiness === 'noUpstream' ? null : 'refs/heads/main', ahead: 1, behind: readiness === 'behind' ? 1 : 0, readiness });
+      }
+      return defaultIpc(command, request);
+    };
+    let created = await createFixture(ipc);
+    let push = [...(created.fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
+      .find((button) => button.textContent?.trim() === 'Push')!;
+    expect(push.disabled).toBe(true);
+    expect(push.title).toContain('behind');
+    expect(created.invoke.mock.calls.some(([command]) => command === 'repository_push')).toBe(false);
+    created.fixture.destroy();
+    TestBed.resetTestingModule();
+
+    readiness = 'noUpstream';
+    created = await createFixture(ipc);
+    push = [...(created.fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
+      .find((button) => button.textContent?.trim() === 'Push')!;
+    push.click();
+    await vi.waitFor(() => expect(created.invoke.mock.calls.some(([command]) => command === 'repository_push')).toBe(true));
+    const pushCall = created.invoke.mock.calls.find(([command]) => command === 'repository_push')!;
+    expect(pushCall[1].operation.target).toEqual({ kind: 'setUpstream', remote: 'origin', remoteBranch: 'main' });
+    expect(confirm).toHaveBeenCalledWith('Push “main” to origin/main and set it as upstream?');
+  });
+
+  it('loads exact conflict stages and resolves edited content with repository preconditions', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        return Promise.resolve(conflictedStatus());
+      }
+      if (command === 'repository_conflicts') {
+        return Promise.resolve({ files: [textConflict], status: conflictedStatus() });
+      }
+      if (command === 'repository_conflict_detail') {
+        return Promise.resolve(conflictDetail());
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.conflict-files button') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('repository_conflict_detail', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        path: textConflict.path,
+        expectedBase: textConflict.base,
+        expectedOurs: textConflict.ours,
+        expectedTheirs: textConflict.theirs,
+      },
+    });
+    const result = fixture.nativeElement.querySelector('[aria-label="Resolved content"]') as HTMLTextAreaElement;
+    expect(result.value).toContain('<<<<<<<');
+    result.value = 'final content\n';
+    result.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    const resolve = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.conflict-actions button')]
+      .find((button) => button.textContent?.includes('edited content'))!;
+    resolve.click();
+    await vi.waitFor(() => expect(invoke.mock.calls.some(([command]) => command === 'repository_resolve_conflict')).toBe(true));
+    const resolveCall = invoke.mock.calls.find(([command]) => command === 'repository_resolve_conflict')!;
+    expect(resolveCall[1].operation).toMatchObject({
+      path: textConflict.path,
+      expectedBase: textConflict.base,
+      expectedOurs: textConflict.ours,
+      expectedTheirs: textConflict.theirs,
+      resolution: { kind: 'content', content: 'final content\n' },
+      precondition: { expectedHead: 'abc', expectedIndexFingerprint: 'index-before', expectedWorktreeFingerprint: 'worktree-before' },
+    });
+  });
+
+  it('requires confirmation before staging unchanged conflict markers', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        return Promise.resolve(conflictedStatus());
+      }
+      if (command === 'repository_conflicts') {
+        return Promise.resolve({ files: [textConflict], status: conflictedStatus() });
+      }
+      if (command === 'repository_conflict_detail') {
+        return Promise.resolve(conflictDetail());
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    confirm.mockClear();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.conflict-files button') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const resolve = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.conflict-actions button')]
+      .find((button) => button.textContent?.includes('edited content'))!;
+    resolve.click();
+
+    expect(confirm).toHaveBeenCalledWith(
+      'The resolved content is unchanged or still contains conflict markers. Stage it as resolved anyway?',
+    );
+    expect(invoke.mock.calls.some(([command]) => command === 'repository_resolve_conflict')).toBe(false);
+  });
+
+  it('offers only side selection or deletion for a binary conflict', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        return Promise.resolve(conflictedStatus());
+      }
+      if (command === 'repository_conflicts') {
+        return Promise.resolve({ files: [textConflict], status: conflictedStatus() });
+      }
+      if (command === 'repository_conflict_detail') {
+        return Promise.resolve(conflictDetail(true));
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.conflict-files button') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const actions = fixture.nativeElement.querySelector('.conflict-actions') as HTMLElement;
+    expect(fixture.nativeElement.querySelector('[aria-label="Resolved content"]')).toBeNull();
+    expect(actions.textContent).toContain('Use ours');
+    expect(actions.textContent).toContain('Use theirs');
+    expect(actions.textContent).toContain('Delete');
+    expect(actions.textContent).not.toContain('edited content');
   });
 });

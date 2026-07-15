@@ -123,9 +123,8 @@ pub trait GitExecutor: Send + Sync {
 ///
 /// A future cancellation token can be added alongside the timeout in `run`; process waiting is
 /// deliberately centralized there. Cancellation is not coupled to an async runtime in this crate.
-/// Killing an entire descendant process tree is intentionally not attempted without a
-/// platform-specific process-group abstraction. Git itself is always killed and reaped; callers
-/// should avoid commands which spawn long-lived detached descendants.
+/// Git starts in an isolated process group where the platform supports it so timeout and output
+/// limits can terminate helpers which inherited Git's output pipes.
 #[derive(Debug, Clone)]
 pub struct GitRunner {
     executable: PathBuf,
@@ -186,6 +185,8 @@ impl GitRunner {
             command.stdin(Stdio::null());
         }
 
+        configure_process_tree(&mut command);
+
         let mut child = command.spawn().map_err(GitRunError::Spawn)?;
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -212,21 +213,20 @@ impl GitRunner {
             invocation.stdout_limit,
             invocation.stderr_limit,
         );
-        let reap_result = if completion.is_err() {
-            // Always terminate and reap before joining workers so their pipe handles close.
-            let _ = child.kill();
-            child.wait().map(|_| ()).map_err(GitRunError::Io)
-        } else {
-            Ok(())
-        };
+        if let Err(error) = completion {
+            // Kill descendants before reaping Git. A platform fallback may still fail, so do not
+            // synchronously join pipe readers on this error path: inherited helper handles must
+            // never defeat the caller's timeout.
+            terminate_process_tree(&mut child);
+            child.wait().map_err(GitRunError::Io)?;
+            return Err(error);
+        }
 
-        // Never return while a worker belonging to this invocation is still detached.
         let stdin_result = stdin_writer.map(join_io_thread).transpose();
         let stdout_result = join_io_thread(stdout_reader);
         let stderr_result = join_io_thread(stderr_reader);
 
-        reap_result?;
-        let status = completion?;
+        let status = completion.expect("checked successful completion");
         stdin_result?;
         let stdout = stdout_result?;
         let stderr = stderr_result?;
@@ -278,6 +278,52 @@ impl GitRunner {
     }
 }
 
+#[cfg(unix)]
+fn configure_process_tree(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_process_tree(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_process_tree(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_process_tree(child: &mut std::process::Child) {
+    let process_group = -(child.id() as i32);
+    // SAFETY: the child was spawned as leader of a fresh process group. SIGKILL is used only after
+    // the bounded invocation has already timed out or exceeded its output limit.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(child: &mut std::process::Child) {
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let _ = Command::new(system_root.join("System32").join("taskkill.exe"))
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
 impl GitExecutor for GitRunner {
     fn execute(&self, repository: &Path, arguments: &[&str]) -> Result<GitOutput, GitRunError> {
         self.execute_os(repository, arguments)
@@ -326,6 +372,7 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ["diff", rest @ ..] => allowed_working_tree_diff(rest),
         ["hash-object", "-t", "tree", "--stdin"] => true,
         ["ls-files", "--stage", "-z"] => true,
+        ["cat-file", "blob", oid] => valid_object_id(oid),
         ["merge-base", "--is-ancestor", oid, "HEAD"] => valid_object_id(oid),
         _ => false,
     }
@@ -350,14 +397,25 @@ fn allowed_for_each_ref(arguments: &[&str]) -> bool {
         && arguments.iter().all(|argument| {
             argument.starts_with("--format=")
                 || argument.strip_prefix("--count=").is_some_and(ascii_digits)
-                || matches!(*argument, "refs/heads" | "refs/remotes" | "refs/stash")
+                || allowed_ref_filter(argument)
         })
         && arguments
             .iter()
             .any(|argument| argument.starts_with("--format="))
         && arguments
             .iter()
-            .any(|argument| matches!(*argument, "refs/heads" | "refs/remotes" | "refs/stash"))
+            .any(|argument| allowed_ref_filter(argument))
+}
+
+fn allowed_ref_filter(value: &str) -> bool {
+    matches!(value, "refs/heads" | "refs/remotes" | "refs/stash")
+        || value.strip_prefix("refs/heads/").is_some_and(|branch| {
+            !branch.is_empty()
+                && !branch.starts_with('-')
+                && !branch.chars().any(char::is_control)
+                && !branch.contains("..")
+                && !branch.contains("@{")
+        })
 }
 
 fn allowed_log(arguments: &[&str]) -> bool {
@@ -382,6 +440,41 @@ fn allowed_log(arguments: &[&str]) -> bool {
 }
 
 fn allowed_show(arguments: &[&str]) -> bool {
+    if let [
+        "--format=",
+        "--first-parent",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-status" | "--numstat",
+        "-z",
+        "-M",
+        oid,
+        "--",
+    ] = arguments
+    {
+        return valid_object_id(oid);
+    }
+
+    if let [
+        "--format=",
+        "--first-parent",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "-M",
+        "--unified=2147483647",
+        oid,
+        "--",
+        pathspecs @ ..,
+    ] = arguments
+    {
+        return valid_object_id(oid)
+            && matches!(pathspecs.len(), 1 | 2)
+            && pathspecs
+                .iter()
+                .all(|pathspec| valid_literal_pathspec(pathspec));
+    }
+
     if let [
         "--format=",
         "--no-ext-diff",
@@ -711,6 +804,97 @@ mod tests {
     }
 
     #[test]
+    fn stash_inspection_allowlist_accepts_only_fixed_first_parent_shapes() {
+        let oid = "0123456789012345678901234567890123456789";
+        let allowed = [
+            vec![
+                "show",
+                "--format=",
+                "--first-parent",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--name-status",
+                "-z",
+                "-M",
+                oid,
+                "--",
+            ],
+            vec![
+                "show",
+                "--format=",
+                "--first-parent",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-M",
+                "--unified=2147483647",
+                oid,
+                "--",
+                ":(literal)old name.txt",
+                ":(literal)new name.txt",
+            ],
+        ];
+        for arguments in allowed {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            validate_read_only_command(&arguments).expect("fixed stash query is read-only");
+        }
+
+        let forbidden = [
+            vec![
+                "show",
+                "--format=",
+                "--first-parent",
+                "--no-ext-diff",
+                "--no-color",
+                "-M",
+                "--unified=2147483647",
+                oid,
+                "--",
+                ":(literal)file.txt",
+            ],
+            vec![
+                "show",
+                "--format=",
+                "--first-parent",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-M",
+                "--unified=2147483647",
+                "abc",
+                "--",
+                ":(literal)file.txt",
+            ],
+            vec![
+                "show",
+                "--format=",
+                "--first-parent",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "-M",
+                "--unified=2147483647",
+                oid,
+                "--",
+                "file.txt",
+            ],
+        ];
+        for arguments in forbidden {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                validate_read_only_command(&arguments),
+                Err(GitRunError::ReadOnlyPolicyViolation { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn working_tree_diff_allowlist_accepts_only_the_bounded_literal_shape() {
         let allowed = [
             "diff",
@@ -921,6 +1105,23 @@ mod tests {
                         .with_timeout(timeout),
                 )
                 .expect_err("command times out");
+
+            assert!(matches!(error, GitRunError::TimedOut { timeout: value } if value == timeout));
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
+
+        #[test]
+        fn timeout_is_not_held_open_by_a_descendant_inheriting_output_pipes() {
+            let (_directory, runner) = executable_script("#!/bin/sh\nsleep 30 &\nwait\n");
+            let timeout = Duration::from_millis(30);
+            let started = Instant::now();
+            let error = runner
+                .run(
+                    Path::new("."),
+                    GitInvocation::new(GitInvocationPolicy::Network, ["fetch"])
+                        .with_timeout(timeout),
+                )
+                .expect_err("the process group times out");
 
             assert!(matches!(error, GitRunError::TimedOut { timeout: value } if value == timeout));
             assert!(started.elapsed() < Duration::from_secs(1));

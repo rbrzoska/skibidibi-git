@@ -88,6 +88,26 @@ describe('DesktopIpc', () => {
     ).rejects.toThrow('unavailable outside the desktop application');
   });
 
+  it('does not fabricate stash details or stash file diffs outside Tauri', async () => {
+    const oid = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    await expect(
+      service.invoke('repository_stash_detail', {
+        repositoryId: 'example-repository',
+        oid,
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+
+    await expect(
+      service.invoke('repository_stash_file_diff', {
+        repositoryId: 'example-repository',
+        oid,
+        source: 'tracked',
+        path: 'new name.txt',
+        oldPath: 'old name.txt',
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
   it('does not fabricate working-tree file diffs outside Tauri', async () => {
     await expect(
       service.invoke('repository_working_tree_file_diff', {
@@ -227,6 +247,44 @@ describe('DesktopIpc', () => {
       service.invoke('repository_drop_stash', {
         repositoryId: 'example-repository',
         operation: { stash },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('does not fabricate network operations or conflict resolution outside Tauri', async () => {
+    const repositoryId = 'example-repository';
+    const precondition = {
+      expectedHead: '0123456789012345678901234567890123456789',
+      expectedHeadName: 'main',
+      expectedDetached: false,
+      expectedUnborn: false,
+      expectedIndexFingerprint: 'fixture-index',
+      expectedWorktreeFingerprint: 'fixture-worktree',
+    };
+
+    await expect(
+      service.invoke('repository_push_analysis', { repositoryId }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+    await expect(
+      service.invoke('repository_pull', {
+        repositoryId,
+        operation: { strategy: 'ffOnly', autoStash: null, precondition },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+    await expect(
+      service.invoke('repository_conflicts', { repositoryId }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+    await expect(
+      service.invoke('repository_resolve_conflict', {
+        repositoryId,
+        operation: {
+          path: 'conflicted.txt',
+          expectedBase: null,
+          expectedOurs: { oid: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', mode: '100644' },
+          expectedTheirs: { oid: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', mode: '100644' },
+          resolution: { kind: 'ours' },
+          precondition,
+        },
       }),
     ).rejects.toThrow('unavailable outside the desktop application');
   });
