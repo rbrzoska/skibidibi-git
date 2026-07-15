@@ -98,6 +98,30 @@ export interface CreateCommitResponse {
   readonly status: RepositoryStatusResponse;
 }
 
+export interface AmendCommitOperation {
+  readonly message: string | null;
+  readonly confirmUpstreamRewrite: boolean;
+  readonly expectedHead: string | null;
+  readonly expectedHeadName: string | null;
+  readonly expectedDetached: boolean;
+  readonly expectedUnborn: boolean;
+  readonly expectedIndexFingerprint: string;
+  readonly expectedWorktreeFingerprint: string;
+}
+
+export interface AmendCommitRequest {
+  readonly repositoryId: string;
+  readonly operation: AmendCommitOperation;
+}
+
+export interface AmendCommitResponse {
+  readonly previousOid: string;
+  readonly oid: string | null;
+  readonly status: RepositoryStatusResponse | null;
+  readonly state: 'succeeded' | 'outcomeUnknown';
+  readonly errorMessage: string | null;
+}
+
 export interface RepositoryHistoryRequest {
   readonly repositoryId: string;
   readonly cursor: string | null;
@@ -194,6 +218,7 @@ export interface SwitchRepositoryBranchRequest {
   readonly repositoryId: string;
   readonly operation: {
     readonly fullName: string;
+    readonly expectedOid: string;
     readonly stashOnDirty: boolean;
     readonly stashMessage: string | null;
   };
@@ -205,6 +230,135 @@ export interface SwitchRepositoryBranchResponse {
   readonly head: string;
   readonly changed: boolean;
   readonly stashCreated: boolean;
+  readonly operationSucceeded: boolean;
+  readonly operationError: string | null;
+  readonly autoStash: AutoStashOutcome;
+}
+
+export type BranchCreationSource =
+  | { readonly kind: 'current'; readonly expectedOid: string }
+  | { readonly kind: 'commit'; readonly oid: string }
+  | {
+      readonly kind: 'remoteTracking';
+      readonly fullName: string;
+      readonly expectedOid: string;
+    };
+
+export interface CreateRepositoryBranchRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly name: string;
+    readonly source: BranchCreationSource;
+  };
+}
+
+export interface CreateRepositoryBranchResponse {
+  readonly fullName: string;
+  readonly name: string;
+  readonly head: string;
+  readonly upstream: string | null;
+}
+
+export interface RepositoryStatePrecondition {
+  readonly expectedHead: string | null;
+  readonly expectedHeadName: string | null;
+  readonly expectedDetached: boolean;
+  readonly expectedUnborn: boolean;
+  readonly expectedIndexFingerprint: string;
+  readonly expectedWorktreeFingerprint: string;
+}
+
+export interface StashIdentity {
+  readonly oid: string;
+  readonly selector: string;
+}
+
+export type StashPushState = 'noChanges' | 'created' | 'failed' | 'partial';
+export type AutoStashCreateState =
+  | 'notRequested'
+  | 'notNeeded'
+  | 'created'
+  | 'failed'
+  | 'partial';
+export type StashRestoreState =
+  | 'notRequired'
+  | 'applied'
+  | 'conflicted'
+  | 'failed'
+  | 'skippedUnsafe';
+export type StashCleanupState = 'notRequired' | 'dropped' | 'retained' | 'failed';
+
+export interface AutoStashOutcome {
+  readonly create: AutoStashCreateState;
+  readonly stash: StashIdentity | null;
+  readonly restore: StashRestoreState;
+  readonly cleanup: StashCleanupState;
+  readonly createError: string | null;
+  readonly restoreError: string | null;
+  readonly cleanupError: string | null;
+}
+
+export interface PushRepositoryStashRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly message: string;
+    readonly includeUntracked: boolean;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface PushRepositoryStashResponse {
+  readonly state: StashPushState;
+  readonly stash: StashIdentity | null;
+  readonly status: RepositoryStatusResponse | null;
+  readonly errorMessage: string | null;
+  readonly mutationOid: string | null;
+  readonly mutationMayHaveOccurred: boolean;
+}
+
+export interface ApplyRepositoryStashRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly stash: StashIdentity;
+    readonly restoreIndex: boolean;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface ApplyRepositoryStashResponse {
+  readonly stash: StashIdentity;
+  readonly restore: StashRestoreState;
+  readonly cleanup: StashCleanupState;
+  readonly status: RepositoryStatusResponse | null;
+  readonly errorMessage: string | null;
+  readonly mutationMayHaveOccurred: boolean;
+}
+
+export interface PopRepositoryStashRequest {
+  readonly repositoryId: string;
+  readonly operation: ApplyRepositoryStashRequest['operation'];
+}
+
+export interface PopRepositoryStashResponse {
+  readonly stash: StashIdentity;
+  readonly restore: StashRestoreState;
+  readonly cleanup: StashCleanupState;
+  readonly status: RepositoryStatusResponse | null;
+  readonly restoreError: string | null;
+  readonly cleanupError: string | null;
+  readonly mutationMayHaveOccurred: boolean;
+}
+
+export interface DropRepositoryStashRequest {
+  readonly repositoryId: string;
+  readonly operation: { readonly stash: StashIdentity };
+}
+
+export interface DropRepositoryStashResponse {
+  readonly stash: StashIdentity;
+  readonly cleanup: StashCleanupState;
+  readonly errorMessage: string | null;
+  readonly mutationMayHaveOccurred: boolean;
 }
 
 export interface DeleteRepositoryBranchRequest {
@@ -354,6 +508,10 @@ export interface DesktopIpcContract {
     readonly request: CreateCommitRequest;
     readonly response: CreateCommitResponse;
   };
+  readonly repository_amend_commit: {
+    readonly request: AmendCommitRequest;
+    readonly response: AmendCommitResponse;
+  };
   readonly repository_navigation: {
     readonly request: RepositoryNavigationRequest;
     readonly response: RepositoryNavigationResponse;
@@ -361,6 +519,26 @@ export interface DesktopIpcContract {
   readonly switch_repository_branch: {
     readonly request: SwitchRepositoryBranchRequest;
     readonly response: SwitchRepositoryBranchResponse;
+  };
+  readonly create_repository_branch: {
+    readonly request: CreateRepositoryBranchRequest;
+    readonly response: CreateRepositoryBranchResponse;
+  };
+  readonly repository_push_stash: {
+    readonly request: PushRepositoryStashRequest;
+    readonly response: PushRepositoryStashResponse;
+  };
+  readonly repository_apply_stash: {
+    readonly request: ApplyRepositoryStashRequest;
+    readonly response: ApplyRepositoryStashResponse;
+  };
+  readonly repository_pop_stash: {
+    readonly request: PopRepositoryStashRequest;
+    readonly response: PopRepositoryStashResponse;
+  };
+  readonly repository_drop_stash: {
+    readonly request: DropRepositoryStashRequest;
+    readonly response: DropRepositoryStashResponse;
   };
   readonly delete_repository_branch: {
     readonly request: DeleteRepositoryBranchRequest;
@@ -510,6 +688,12 @@ export class DesktopIpc implements DesktopIpcClient {
       );
     }
 
+    if (command === 'repository_amend_commit') {
+      return Promise.reject(
+        new Error('Amending commits is unavailable outside the desktop application.'),
+      );
+    }
+
     if (command === 'repository_navigation') {
       const response: RepositoryNavigationResponse = {
         branches: [],
@@ -522,6 +706,23 @@ export class DesktopIpc implements DesktopIpcClient {
     if (command === 'switch_repository_branch') {
       return Promise.reject(
         new Error('Switching branches is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'create_repository_branch') {
+      return Promise.reject(
+        new Error('Creating branches is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (
+      command === 'repository_push_stash' ||
+      command === 'repository_apply_stash' ||
+      command === 'repository_pop_stash' ||
+      command === 'repository_drop_stash'
+    ) {
+      return Promise.reject(
+        new Error('Stash mutations are unavailable outside the desktop application.'),
       );
     }
 

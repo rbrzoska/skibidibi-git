@@ -67,7 +67,7 @@ button {
   font: inherit;
 }
 
-.workspace .workspace-bar { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; align-items: center; gap: .75rem; min-height: 3.5rem; border-bottom: 1px solid #30363d; padding: .55rem .8rem; background: #161b22; }
+.workspace .workspace-bar { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto; align-items: center; gap: .75rem; min-height: 3.5rem; border-bottom: 1px solid #30363d; padding: .55rem .8rem; background: #161b22; }
 .workspace .back { color: #8b949e; font-size: 1.8rem; text-decoration: none; }
 .workspace .repo-icon { padding: .55rem; border-radius: .45rem; background: #6e40c9; font-size: .65rem; font-weight: 800; }
 .workspace .workspace-identity { display: grid; min-width: 0; }
@@ -75,6 +75,10 @@ button {
 .workspace .workspace-identity small { color: #8b949e; font-size: .7rem; }
 .workspace .branch-pill { border: 1px solid #30363d; border-radius: 999px; padding: .35rem .65rem; color: #c9d1d9; background: #21262d; font-size: .75rem; }
 .workspace .workspace-bar button { border: 1px solid #388bfd; border-radius: .45rem; padding: .45rem .8rem; color: #fff; background: #1f6feb; }
+@media (max-width: 48rem) {
+  .workspace .workspace-bar { grid-template-columns: auto minmax(0, 1fr) repeat(3, auto); gap: .4rem; }
+  .workspace .workspace-bar .repo-icon { display: none; }
+}
 .workspace .working-tree { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 5rem; border-bottom: 1px solid #30363d; padding: .85rem 1rem; background: rgb(13 17 23 / 95%); backdrop-filter: blur(10px); }
 .workspace .eyebrow { margin: 0; color: #8b949e; font-size: .65rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .workspace h1, .workspace h2, .workspace p { margin: 0; }
@@ -159,6 +163,10 @@ button {
 .workspace .commit-composer .primary-action { justify-self: end; border: 1px solid #2ea043; border-radius: .4rem; padding: .42rem .7rem; color: #fff; background: #238636; font-size: .72rem; font-weight: 700; cursor: pointer; }
 .workspace .commit-composer .primary-action:hover:not(:disabled), .workspace .commit-composer .primary-action:focus-visible { outline: 0; border-color: #56d364; background: #2ea043; }
 .workspace .commit-composer .primary-action:disabled { cursor: not-allowed; opacity: .5; }
+.workspace .commit-composer-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
+.workspace .commit-composer-actions button:not(.primary-action) { border: 1px solid #30363d; border-radius: .4rem; padding: .42rem .7rem; color: #c9d1d9; background: #161b22; font-size: .72rem; cursor: pointer; }
+.workspace .commit-composer-actions button:not(.primary-action):hover:not(:disabled) { border-color: #58a6ff; color: #f0f6fc; }
+.workspace .commit-composer-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .workspace .commit-hint { color: #8b949e; font-size: .65rem; }
 .workspace .working-tree-action-error { margin: .65rem 0 0; border: 1px solid #f8514966; border-radius: .4rem; padding: .5rem .6rem; color: #ff7b72; background: #f8514914; font-size: .7rem; overflow-wrap: anywhere; }
 .workspace .index-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; margin-bottom: .5rem; }
@@ -169,14 +177,28 @@ button {
 .workspace .working-tree-file-checkbox { width: .9rem; height: .9rem; margin: 0; accent-color: #1f6feb; cursor: pointer; }
 .workspace .working-tree-file-checkbox:disabled { cursor: not-allowed; opacity: .5; }
 .workspace .navigation-toggles { display: flex; flex-wrap: wrap; gap: .35rem .65rem; border-bottom: 1px solid #30363d; padding: .65rem .15rem; }
+.workspace .navigation-action-notice { margin: .45rem .15rem 0; border: 1px solid #2ea04366; border-radius: .35rem; padding: .45rem .55rem; color: #7ee787; background: #23863614; font-size: .66rem; overflow-wrap: anywhere; }
+.workspace .navigation-inline-form, .workspace .stash-create-form { display: grid; gap: .35rem; margin: .45rem .15rem; border: 1px solid #30363d; border-radius: .4rem; padding: .5rem; background: #161b22; font-size: .65rem; }
+.workspace .navigation-inline-form label { overflow: hidden; color: #b1bac4; text-overflow: ellipsis; white-space: nowrap; }
+.workspace .navigation-inline-form input, .workspace .stash-create-form > input { min-width: 0; border: 1px solid #30363d; border-radius: .3rem; padding: .35rem .4rem; color: #e6edf3; background: #0d1117; font-size: .68rem; }
+.workspace .navigation-inline-form > div, .workspace .stash-actions { display: flex; justify-content: flex-end; gap: .25rem; }
+.workspace .navigation-inline-form button, .workspace .stash-create-form button, .workspace .stash-actions button, .workspace .reference-action { border: 1px solid #30363d; border-radius: .3rem; padding: .25rem .4rem; color: #c9d1d9; background: #21262d; font-size: .62rem; cursor: pointer; }
+.workspace .navigation-inline-form button:hover:not(:disabled), .workspace .stash-create-form button:hover:not(:disabled), .workspace .stash-actions button:hover:not(:disabled), .workspace .reference-action:hover:not(:disabled) { border-color: #58a6ff; color: #fff; }
+.workspace .navigation-inline-form button:disabled, .workspace .stash-create-form button:disabled, .workspace .stash-actions button:disabled, .workspace .reference-action:disabled { cursor: not-allowed; opacity: .45; }
+.workspace .reference-action { align-self: center; margin-right: .2rem; padding: .15rem .4rem; font-size: .8rem; }
+.workspace .stash-create-form { grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
+.workspace .stash-create-form label { display: inline-flex; align-items: center; gap: .2rem; color: #8b949e; white-space: nowrap; }
+.workspace .stash-list { display: grid; gap: .15rem; }
+.workspace .stash-actions button.danger:hover:not(:disabled) { border-color: #f85149; color: #ff7b72; }
 .workspace .toggle-control { display: inline-flex; align-items: center; gap: .3rem; color: #b1bac4; font-size: .68rem; cursor: pointer; }
 .workspace .toggle-control input { width: .85rem; height: .85rem; margin: 0; accent-color: #1f6feb; }
 .workspace .tree-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-width: 0; }
 .workspace .delete-reference { display: grid; place-items: center; width: 1.55rem; height: 1.55rem; border: 0; border-radius: .3rem; padding: 0; color: #8b949e; background: transparent; font-size: 1rem; cursor: pointer; }
 .workspace .delete-reference:hover:not(:disabled), .workspace .delete-reference:focus-visible { outline: 0; color: #ff7b72; background: #f8514924; }
 .workspace .delete-reference:disabled { cursor: not-allowed; opacity: .45; }
-.workspace .stash-row { display: flex; justify-content: space-between; gap: .5rem; overflow: hidden; border-radius: .35rem; padding: .45rem .6rem; white-space: nowrap; }
+.workspace .stash-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .25rem .5rem; overflow: hidden; border-radius: .35rem; padding: .45rem .6rem; white-space: nowrap; }
 .workspace .stash-row span { overflow: hidden; text-overflow: ellipsis; }
+.workspace .stash-row .stash-actions { grid-column: 1 / -1; overflow: visible; }
 .workspace .history { min-width: 0; overflow: auto; background: #0d1117; }
 .workspace .diff-view { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: calc(100vh - 6.75rem); }
 .workspace .diff-toolbar { position: sticky; z-index: 2; top: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-width: 0; border-bottom: 1px solid #30363d; padding: .65rem .75rem; background: rgb(13 17 23 / 96%); backdrop-filter: blur(10px); }

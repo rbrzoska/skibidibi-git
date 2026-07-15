@@ -111,6 +111,17 @@ function requestedWorkingTreeStatus() {
   };
 }
 
+function navigationWithStash() {
+  return {
+    branches: [
+      { kind: 'local' as const, fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: 'origin/main', ahead: 1, behind: 0, upstreamGone: false, symbolicTarget: null },
+      { kind: 'remote' as const, fullName: 'refs/remotes/origin/main', name: 'origin/main', oid: 'remote-abc', current: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+    ],
+    worktrees: [],
+    stashes: [{ oid: 'stash-oid', selector: 'stash@{0}', message: 'Saved work', author: 'Ada', authoredAt: '2026-07-15T12:00:00Z' }],
+  };
+}
+
 describe('WorkspaceHistory', () => {
   beforeEach(() => {
     globalThis.localStorage.removeItem(branchExpansionStorageKey('skibidibi-git', 'local'));
@@ -182,10 +193,75 @@ describe('WorkspaceHistory', () => {
       });
     }
     if (command === 'switch_repository_branch') {
-      return Promise.resolve({ fullName: 'refs/heads/rb/feature', name: 'rb/feature', head: 'def', changed: true, stashCreated: false });
+      return Promise.resolve({
+        fullName: 'refs/heads/rb/feature',
+        name: 'rb/feature',
+        head: 'def',
+        changed: true,
+        stashCreated: false,
+        operationSucceeded: true,
+        operationError: null,
+        autoStash: {
+          create: 'notRequested',
+          stash: null,
+          restore: 'notRequired',
+          cleanup: 'notRequired',
+          createError: null,
+          restoreError: null,
+          cleanupError: null,
+        },
+      });
     }
     if (command === 'repository_fetch') {
       return Promise.resolve({ fetchedAt: '2026-07-15T12:00:00Z' });
+    }
+    if (command === 'create_repository_branch') {
+      const operation = (request as { operation: { name: string; source: { kind: string } } }).operation;
+      return Promise.resolve({
+        fullName: `refs/heads/${operation.name}`,
+        name: operation.name,
+        head: 'abc',
+        upstream: operation.source.kind === 'remoteTracking' ? 'origin/main' : null,
+      });
+    }
+    if (command === 'repository_push_stash') {
+      return Promise.resolve({
+        state: 'created',
+        stash: { oid: 'stash-new', selector: 'stash@{0}' },
+        status: { ...repositoryStatus(), entries: [] },
+        errorMessage: null,
+        mutationOid: 'stash-new',
+        mutationMayHaveOccurred: false,
+      });
+    }
+    if (command === 'repository_apply_stash') {
+      return Promise.resolve({
+        stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+        restore: 'applied',
+        cleanup: 'notRequired',
+        status: repositoryStatus(),
+        errorMessage: null,
+        mutationMayHaveOccurred: false,
+      });
+    }
+    if (command === 'repository_pop_stash') {
+      return Promise.resolve({
+        stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+        restore: 'applied',
+        cleanup: 'dropped',
+        status: repositoryStatus(),
+        restoreError: null,
+        cleanupError: null,
+        mutationMayHaveOccurred: false,
+      });
+    }
+    if (command === 'repository_drop_stash') {
+      return Promise.resolve({
+        stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+        cleanup: 'dropped',
+        errorMessage: null,
+        mutationMayHaveOccurred: false,
+      });
     }
     if (command === 'delete_repository_branch') {
       return Promise.resolve({ changed: true });
@@ -232,6 +308,23 @@ describe('WorkspaceHistory', () => {
       return Promise.resolve({
         oid: 'dddddddddddddddddddddddddddddddddddddddd',
         status: { ...repositoryStatus(), indexFingerprint: 'index-after-commit', entries: [] },
+      });
+    }
+    if (command === 'repository_amend_commit') {
+      return Promise.resolve({
+        previousOid: 'abc',
+        oid: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+        state: 'succeeded',
+        errorMessage: null,
+        status: {
+          ...repositoryStatus(),
+          branch: {
+            ...repositoryStatus().branch,
+            oid: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          },
+          indexFingerprint: 'index-after-amend',
+          entries: [],
+        },
       });
     }
     return Promise.reject(new Error(`Unexpected command: ${command}`));
@@ -584,6 +677,163 @@ describe('WorkspaceHistory', () => {
     expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
   });
 
+  it('opens amend mode from the workspace toolbar when the working tree is clean', async () => {
+    const cleanStatus = { ...repositoryStatus(), entries: [] };
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_status'
+        ? Promise.resolve(cleanStatus)
+        : defaultIpc(command, request);
+    const { fixture } = await createFixture(ipc);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
+    const trigger = fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement;
+    trigger.click();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.inspector')?.textContent).toContain('Amend HEAD');
+    expect(fixture.nativeElement.querySelector('.commit-composer')).toBeTruthy();
+    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('commit-message'));
+    const cancel = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
+      .find((button) => button.textContent?.includes('Cancel')) as HTMLButtonElement;
+    cancel.click();
+    fixture.detectChanges();
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(trigger));
+  });
+
+  it('amends HEAD with a new message and every optimistic status fingerprint', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    textarea.value = 'Replacement message';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
+      .find((button) => button.textContent?.includes('new message')) as HTMLButtonElement;
+    amend.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('repository_amend_commit', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        message: 'Replacement message',
+        confirmUpstreamRewrite: false,
+        expectedHead: 'abc',
+        expectedHeadName: 'main',
+        expectedDetached: false,
+        expectedUnborn: false,
+        expectedIndexFingerprint: 'index-before',
+        expectedWorktreeFingerprint: 'worktree-before',
+      },
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history')).toHaveLength(2);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation')).toHaveLength(2);
+    expect(fixture.nativeElement.querySelector('.commit-composer')).toBeNull();
+  });
+
+  it('confirms an upstream rewrite, supports no-edit amend, and blocks duplicate submission', async () => {
+    let resolveAmend!: (value: unknown) => void;
+    const pendingAmend = new Promise((resolve) => { resolveAmend = resolve; });
+    const publishedStatus = {
+      ...repositoryStatus(),
+      branch: { ...repositoryStatus().branch, ahead: 0 },
+    };
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        return Promise.resolve(publishedStatus);
+      }
+      if (command === 'repository_amend_commit') {
+        return pendingAmend;
+      }
+      return defaultIpc(command, request);
+    };
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const keepMessage = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
+      .find((button) => button.textContent?.includes('keep message')) as HTMLButtonElement;
+    keepMessage.click();
+    fixture.detectChanges();
+    keepMessage.click();
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_amend_commit')).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledWith('repository_amend_commit', expect.objectContaining({
+      operation: expect.objectContaining({ message: null, confirmUpstreamRewrite: true }),
+    }));
+
+    resolveAmend({
+      previousOid: 'abc',
+      oid: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      state: 'succeeded',
+      errorMessage: null,
+      status: { ...publishedStatus, branch: { ...publishedStatus.branch, oid: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' }, entries: [] },
+    });
+    await pendingAmend;
+    await fixture.whenStable();
+    confirm.mockRestore();
+  });
+
+  it('keeps amend mode and its message after a failed amend and refreshes status', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_amend_commit'
+        ? Promise.reject({ message: 'pre-commit hook rejected amend' })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    textarea.value = 'Keep amended message';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
+      .find((button) => button.textContent?.includes('new message')) as HTMLButtonElement;
+    amend.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value).toBe('Keep amended message');
+    expect(fixture.nativeElement.querySelector('.commit-composer')?.textContent).toContain('Amend HEAD');
+    expect(fixture.nativeElement.querySelector('[role="alert"]')?.textContent).toContain('pre-commit hook rejected amend');
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
+  });
+
+  it('preserves amend input and requires inspection when the backend outcome is unknown', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_amend_commit'
+        ? Promise.resolve({
+            previousOid: 'abc',
+            oid: null,
+            status: null,
+            state: 'outcomeUnknown',
+            errorMessage: 'Git exited before the new HEAD could be verified.',
+          })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    textarea.value = 'Message that must survive';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
+      .find((button) => button.textContent?.includes('new message')) as HTMLButtonElement;
+    amend.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value).toBe('Message that must survive');
+    expect(fixture.nativeElement.querySelector('.working-tree-action-error')?.textContent).toContain('outcome is unknown');
+    expect(fixture.nativeElement.querySelector('.working-tree-action-error')?.textContent).toContain('before the new HEAD could be verified');
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_amend_commit')).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history').length).toBeGreaterThan(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
+  });
+
   it('keeps duplicate paths independently selectable by entry identity', async () => {
     const { fixture, invoke } = await createFixture(defaultIpc);
     statusStoreFor(fixture).state.set({
@@ -749,7 +999,10 @@ describe('WorkspaceHistory', () => {
       globalThis.localStorage.getItem(branchExpansionStorageKey('skibidibi-git', 'local')),
     ).toBe('["rb"]');
 
-    (fixture.nativeElement.querySelector('.workspace-bar button') as HTMLButtonElement).click();
+    const refresh = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.workspace-bar button')]
+      .find((button) => button.textContent?.trim() === 'Refresh');
+    expect(refresh).toBeDefined();
+    refresh?.click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -778,12 +1031,121 @@ describe('WorkspaceHistory', () => {
       repositoryId: 'skibidibi-git',
       operation: {
         fullName: 'refs/heads/rb/feature',
+        expectedOid: 'def',
         stashOnDirty: false,
         stashMessage: null,
       },
     });
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
     confirm.mockRestore();
+  });
+
+  it('creates a local branch from current HEAD without checking it out', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const newBranch = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.workspace-bar button')]
+      .find((button) => button.textContent?.includes('New branch')) as HTMLButtonElement;
+    newBranch.click();
+    fixture.detectChanges();
+    const input = fixture.nativeElement.querySelector('#new-branch-name') as HTMLInputElement;
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(input));
+    input.value = 'feature/current-head';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.navigation-inline-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('create_repository_branch', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        name: 'feature/current-head',
+        source: { kind: 'current', expectedOid: 'abc' },
+      },
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch')).toHaveLength(0);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('Created local branch');
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(newBranch));
+  });
+
+  it('returns focus after cancelling branch creation and closes a remote form in current-only mode', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const remote = fixture.nativeElement.querySelector('[aria-label="Remote branches"]') as HTMLElement;
+    (remote.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const remoteTrigger = fixture.nativeElement.querySelector('[aria-label="Create local branch from origin/main"]') as HTMLButtonElement;
+    remoteTrigger.click();
+    fixture.detectChanges();
+    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('new-branch-name'));
+    const currentOnly = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLLabelElement>('.toggle-control')]
+      .find((label) => label.textContent?.includes('Current only'))
+      ?.querySelector('input') as HTMLInputElement;
+    currentOnly.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.navigation-inline-form')).toBeNull();
+
+    currentOnly.click();
+    fixture.detectChanges();
+    const newBranch = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.workspace-bar button')]
+      .find((button) => button.textContent?.includes('New branch')) as HTMLButtonElement;
+    newBranch.click();
+    fixture.detectChanges();
+    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('new-branch-name'));
+    (fixture.nativeElement.querySelector('.navigation-inline-form button[type="button"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(newBranch));
+  });
+
+  it('creates a tracking branch from the exact selected remote ref', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const remote = fixture.nativeElement.querySelector('[aria-label="Remote branches"]') as HTMLElement;
+    (remote.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[aria-label="Create local branch from origin/main"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const input = fixture.nativeElement.querySelector('#new-branch-name') as HTMLInputElement;
+    input.value = 'tracking-main';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.navigation-inline-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('create_repository_branch', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        name: 'tracking-main',
+        source: {
+          kind: 'remoteTracking',
+          fullName: 'refs/remotes/origin/main',
+          expectedOid: 'abc',
+        },
+      },
+    });
+  });
+
+  it('refreshes after branch creation failure and explains manual cleanup recovery', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'create_repository_branch'
+        ? Promise.reject({ message: 'manualCleanupRequired: ref write succeeded before verification failed' })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const newBranch = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.workspace-bar button')]
+      .find((button) => button.textContent?.includes('New branch')) as HTMLButtonElement;
+    newBranch.click();
+    fixture.detectChanges();
+    const input = fixture.nativeElement.querySelector('#new-branch-name') as HTMLInputElement;
+    input.value = 'possibly-created';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.navigation-inline-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const alert = fixture.nativeElement.querySelector('.navigation-action-error') as HTMLElement;
+    expect(alert.textContent).toContain('branch may have been created');
+    expect(alert.textContent).toContain('delete it manually');
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
   });
 
   it('offers to stash a dirty working tree and retries the branch switch with a WIP message', async () => {
@@ -794,7 +1156,24 @@ describe('WorkspaceHistory', () => {
       }
       const operation = (request as { operation: { stashOnDirty: boolean } }).operation;
       return operation.stashOnDirty
-        ? Promise.resolve({ fullName: 'refs/heads/rb/feature', name: 'rb/feature', head: 'def', changed: true, stashCreated: true })
+        ? Promise.resolve({
+            fullName: 'refs/heads/rb/feature',
+            name: 'rb/feature',
+            head: 'def',
+            changed: true,
+            stashCreated: true,
+            operationSucceeded: true,
+            operationError: null,
+            autoStash: {
+              create: 'created',
+              stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+              restore: 'applied',
+              cleanup: 'dropped',
+              createError: null,
+              restoreError: null,
+              cleanupError: null,
+            },
+          })
         : Promise.reject({ message: 'dirtyWorkingTree: uncommitted changes prevent checkout' });
     };
     const { fixture, invoke } = await createFixture(ipc);
@@ -815,12 +1194,322 @@ describe('WorkspaceHistory', () => {
     expect(switchCalls[1][1]).toMatchObject({
       operation: {
         fullName: 'refs/heads/rb/feature',
+        expectedOid: 'def',
         stashOnDirty: true,
       },
     });
     expect((switchCalls[1][1] as { operation: { stashMessage: string } }).operation.stashMessage)
       .toMatch(/^WIP \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} main$/);
     expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
+    confirm.mockRestore();
+  });
+
+  it('surfaces a resolved partial auto-stash switch result and refreshes all repository slices', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'switch_repository_branch'
+        ? Promise.resolve({
+            fullName: 'refs/heads/rb/feature',
+            name: 'rb/feature',
+            head: 'abc',
+            changed: false,
+            stashCreated: true,
+            operationSucceeded: false,
+            operationError: 'checkout failed',
+            autoStash: {
+              create: 'created',
+              stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+              restore: 'conflicted',
+              cleanup: 'retained',
+              createError: null,
+              restoreError: 'resolve conflicts',
+              cleanupError: null,
+            },
+          })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...local.querySelectorAll<HTMLButtonElement>('button.branch-row')]
+      .find((button) => button.title.includes('rb/feature')) as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const alert = fixture.nativeElement.querySelector('.navigation-action-error') as HTMLElement;
+    expect(alert.textContent).toContain('checkout failed');
+    expect(alert.textContent).toContain('Operation: switch failed');
+    expect(alert.textContent).toContain('Restore: changes were applied with conflicts');
+    expect(alert.textContent).toContain('Cleanup: auto-stash stash@{0} retained');
+    expect(alert.textContent).toContain('conflicts');
+    expect(alert.textContent).toContain('resolve conflicts');
+    expect(alert.textContent).toContain('retained');
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history').length).toBeGreaterThan(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
+    confirm.mockRestore();
+  });
+
+  it('creates a manual stash including untracked files with a full state precondition', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_navigation'
+        ? Promise.resolve(navigationWithStash())
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const input = fixture.nativeElement.querySelector('[aria-label="Stash message"]') as HTMLInputElement;
+    input.value = 'Pause current work';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.stash-create-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_push_stash', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        message: 'Pause current work',
+        includeUntracked: true,
+        precondition: {
+          expectedHead: 'abc',
+          expectedHeadName: 'main',
+          expectedDetached: false,
+          expectedUnborn: false,
+          expectedIndexFingerprint: 'index-before',
+          expectedWorktreeFingerprint: 'worktree-before',
+        },
+      },
+    });
+  });
+
+  it('preserves the stash message and requires inspection for an unknown mutation outcome', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve(navigationWithStash());
+      }
+      if (command === 'repository_push_stash') {
+        return Promise.resolve({
+          state: 'failed',
+          stash: null,
+          status: null,
+          errorMessage: 'Git exited before stash creation could be verified.',
+          mutationOid: 'mutation-123',
+          mutationMayHaveOccurred: true,
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const input = fixture.nativeElement.querySelector('[aria-label="Stash message"]') as HTMLInputElement;
+    input.value = 'Do not retry blindly';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.stash-create-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(input.value).toBe('Do not retry blindly');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('before stash creation could be verified');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('mutating command was attempted');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('before retrying');
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
+  });
+
+  it('accepts a verified stash creation even when a mutating command was attempted', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve(navigationWithStash());
+      }
+      if (command === 'repository_push_stash') {
+        return Promise.resolve({
+          state: 'created',
+          stash: { oid: 'stash-new', selector: 'stash@{0}' },
+          status: { ...repositoryStatus(), entries: [] },
+          errorMessage: null,
+          mutationOid: 'stash-new',
+          mutationMayHaveOccurred: true,
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture } = await createFixture(ipc);
+    const input = fixture.nativeElement.querySelector('[aria-label="Stash message"]') as HTMLInputElement;
+    input.value = 'Verified stash';
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.stash-create-form button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('Created stash@{0}');
+  });
+
+  it('shows progress on the exact stash action while it is pending', async () => {
+    let resolveApply!: (value: unknown) => void;
+    const pendingApply = new Promise((resolve) => { resolveApply = resolve; });
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve(navigationWithStash());
+      }
+      if (command === 'repository_apply_stash') {
+        return pendingApply;
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('[aria-label="Apply stash@{0}"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[aria-label="Apply stash@{0}"]')?.textContent).toContain('Applying…');
+
+    resolveApply({
+      stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+      restore: 'applied',
+      cleanup: 'notRequired',
+      status: repositoryStatus(),
+      errorMessage: null,
+      mutationMayHaveOccurred: false,
+    });
+    await pendingApply;
+    await fixture.whenStable();
+  });
+
+  it('accepts verified apply, pop, and drop results when mutation was attempted', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve(navigationWithStash());
+      }
+      if (command === 'repository_apply_stash') {
+        return Promise.resolve({
+          stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+          restore: 'applied',
+          cleanup: 'retained',
+          status: repositoryStatus(),
+          errorMessage: null,
+          mutationMayHaveOccurred: true,
+        });
+      }
+      if (command === 'repository_pop_stash') {
+        return Promise.resolve({
+          stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+          restore: 'applied',
+          cleanup: 'dropped',
+          status: repositoryStatus(),
+          restoreError: null,
+          cleanupError: null,
+          mutationMayHaveOccurred: true,
+        });
+      }
+      if (command === 'repository_drop_stash') {
+        return Promise.resolve({
+          stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+          cleanup: 'dropped',
+          errorMessage: null,
+          mutationMayHaveOccurred: true,
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { fixture } = await createFixture(ipc);
+
+    (fixture.nativeElement.querySelector('[aria-label="Apply stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('changes applied');
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('stash retained');
+
+    (fixture.nativeElement.querySelector('[aria-label="Pop stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('stash dropped');
+
+    (fixture.nativeElement.querySelector('[aria-label="Drop stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('Dropped stash@{0}');
+    confirm.mockRestore();
+  });
+
+  it('applies an exact stash identity with index restore and reports conflicts without hiding retention', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve(navigationWithStash());
+      }
+      if (command === 'repository_apply_stash') {
+        return Promise.resolve({
+          stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+          restore: 'conflicted',
+          cleanup: 'retained',
+          status: repositoryStatus(),
+          errorMessage: 'resolve app.ts',
+          mutationMayHaveOccurred: false,
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('[aria-label="Apply stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('repository_apply_stash', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+        restoreIndex: true,
+        precondition: expect.objectContaining({
+          expectedHead: 'abc',
+          expectedIndexFingerprint: 'index-before',
+          expectedWorktreeFingerprint: 'worktree-before',
+        }),
+      },
+    });
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('conflicts');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('retained');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('resolve app.ts');
+  });
+
+  it('reports pop cleanup failure and confirms dropping the exact stash identity', async () => {
+    let pop = true;
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve(navigationWithStash());
+      }
+      if (command === 'repository_pop_stash') {
+        pop = false;
+        return Promise.resolve({
+          stash: { oid: 'stash-oid', selector: 'stash@{0}' },
+          restore: 'applied',
+          cleanup: 'failed',
+          status: repositoryStatus(),
+          restoreError: null,
+          cleanupError: 'stash ref changed concurrently',
+          mutationMayHaveOccurred: false,
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('[aria-label="Pop stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(pop).toBe(false);
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('Restore: changes applied');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('Cleanup: failed');
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('stash ref changed concurrently');
+
+    (fixture.nativeElement.querySelector('[aria-label="Drop stash@{0}"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    expect(confirm).toHaveBeenCalledWith('Drop stash@{0} “Saved work”? This cannot be undone.');
+    expect(invoke).toHaveBeenCalledWith('repository_drop_stash', {
+      repositoryId: 'skibidibi-git',
+      operation: { stash: { oid: 'stash-oid', selector: 'stash@{0}' } },
+    });
     confirm.mockRestore();
   });
 
@@ -1026,6 +1715,24 @@ describe('WorkspaceHistory', () => {
       repositoryId: 'skibidibi-git',
       oid: commits[0].oid,
     });
+  });
+
+  it('shows the backend reason when selected commit details fail', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_commit_detail') {
+        return Promise.reject({ message: 'Commit file summaries were inconsistent.' });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture } = await createFixture(ipc);
+
+    (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.inspector').textContent).toContain(
+      'Commit file summaries were inconsistent.',
+    );
   });
 
   it('loads the next history page without replacing existing commits', async () => {

@@ -31,6 +31,14 @@ This file is the canonical instruction set for AI contributors. Keep `CLAUDE.md`
 - Optimize model cost by default: reserve the strongest/Sol profile for security-sensitive Git execution, cross-platform process behavior, contract arbitration, and final blocker review. Delegate bounded Angular presentation, pure reducers/parsers, fixtures, documentation, and focused regression tests to cheaper profiles whenever file ownership can remain disjoint.
 - Split parallel work only after DTOs and file ownership are frozen. Prefer several small independently verifiable tasks over one broad agent task, and always run an integrated review/test pass before handoff.
 
+## Git test isolation
+
+- Never run mutating Git tests, fixtures, smoke scenarios, branch switches, stash operations, rebases, pulls, resets, or worktree operations against the user's production repositories, including `voucherify-mono`.
+- Prefer disposable repositories created under a temporary directory for automated and real-Git integration tests. Each test owns its repository, branches, remotes, and worktrees and removes them through the test fixture lifecycle.
+- When a persistent manual test repository is genuinely needed, use this `skibidibi-git` repository only with clearly named dedicated test branches/worktrees (for example `codex/test-*`) created specifically for the scenario. Never reuse the user's normal branches or existing worktrees.
+- Before any manual mutating Git smoke test, verify the repository root, current branch, worktree path, and clean/expected state. Stop if the target is not an isolated fixture or an explicitly dedicated `skibidibi-git` test worktree.
+- Do not use another user repository as a test fixture even for read-only validation. Read-only inspection is allowed only when the user explicitly requests analysis of that repository, never as a substitute for an isolated test repository; do not modify its refs, worktrees, configuration, index, or files.
+
 ## Definition of done
 
 - The requested behavior is implemented with scoped tests updated or added where behavior changed.

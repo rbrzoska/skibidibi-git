@@ -18,7 +18,10 @@ import {
   type RepositoryCommitSummary,
   type RepositoryBranch,
   type RepositoryNavigationResponse,
+  type RepositoryStatusResponse,
+  type RepositoryStash,
   type RepositoryWorktree,
+  type SwitchRepositoryBranchResponse,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
@@ -55,7 +58,10 @@ type FileDiffDisplayMode = 'contextual' | 'full';
 type HistorySelection = 'none' | 'working-tree' | 'commit';
 type WorkingTreeMutation =
   | { readonly action: IndexAction; readonly scope: 'selected' | 'all' }
-  | { readonly action: 'commit'; readonly scope: null };
+  | { readonly action: 'commit' | 'amend'; readonly scope: null };
+type BranchCreationTarget =
+  | { readonly kind: 'current'; readonly label: string }
+  | { readonly kind: 'remote'; readonly branch: RepositoryBranch };
 type DetailState =
   | { readonly kind: 'idle' }
   | { readonly kind: 'loading' }
@@ -112,6 +118,8 @@ export class WorkspaceHistory implements OnDestroy {
   private autoFetchTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private liveChangesTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private liveRefreshInFlight = false;
+  private branchCreationReturnFocus: HTMLElement | null = null;
+  private amendReturnFocus: HTMLElement | null = null;
 
   protected readonly statusStore = inject(RepositoryStatusStore);
   protected readonly repositoryId = this.route.snapshot.paramMap.get('repositoryId') ?? '';
@@ -139,18 +147,26 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly openingWorktree = signal<string | null>(null);
   protected readonly refreshingWorkspace = signal(false);
   protected readonly navigationActionError = signal('');
+  protected readonly navigationActionNotice = signal('');
   protected readonly currentOnly = signal(this.initialRefreshPreferences.currentOnly);
   protected readonly autoFetch = signal(this.initialRefreshPreferences.autoFetch);
   protected readonly liveChanges = signal(this.initialRefreshPreferences.liveChanges);
   protected readonly fetchingRepository = signal(false);
   protected readonly deletingBranch = signal<string | null>(null);
   protected readonly removingWorktree = signal<string | null>(null);
+  protected readonly branchCreationTarget = signal<BranchCreationTarget | null>(null);
+  protected readonly newBranchName = signal('');
+  protected readonly creatingBranch = signal(false);
+  protected readonly stashMessage = signal('');
+  protected readonly stashIncludeUntracked = signal(true);
+  protected readonly stashMutation = signal<string | null>(null);
   protected readonly selectedFilePath = signal<string | null>(null);
   protected readonly selectedWorkingTreeEntryKind = signal<WorkingTreeFile['entryKind'] | null>(null);
   protected readonly fileDiffState = signal<FileDiffState>({ kind: 'idle' });
   protected readonly fileDiffDisplayMode = signal<FileDiffDisplayMode>('contextual');
   protected readonly selectedWorkingTreeFiles = signal<ReadonlySet<string>>(new Set());
   protected readonly commitMessage = signal('');
+  protected readonly amendMode = signal(false);
   protected readonly workingTreeMutation = signal<WorkingTreeMutation | null>(null);
   protected readonly workingTreeMutationError = signal('');
   protected readonly workspaceActionBusy = computed(
@@ -161,7 +177,9 @@ export class WorkspaceHistory implements OnDestroy {
       this.refreshingWorkspace() ||
       this.fetchingRepository() ||
       this.deletingBranch() !== null ||
-      this.removingWorktree() !== null,
+      this.removingWorktree() !== null ||
+      this.creatingBranch() ||
+      this.stashMutation() !== null,
   );
   protected readonly parsedFileDiff = computed(() => {
     const state = this.fileDiffState();
@@ -264,6 +282,26 @@ export class WorkspaceHistory implements OnDestroy {
       this.commitMessage().trim().length === 0 ||
       !this.workingTreeCapabilities().canCommit,
   );
+  protected readonly amendUnavailable = computed(() => {
+    const state = this.statusStore.state();
+    return (
+      state.kind !== 'ready' ||
+      state.status.branch.oid === null ||
+      state.status.branch.unborn ||
+      this.workspaceActionBusy()
+    );
+  });
+  protected readonly amendWithMessageDisabled = computed(
+    () => this.amendUnavailable() || this.commitMessage().trim().length === 0,
+  );
+  protected readonly amendRewritesUpstream = computed(() => {
+    const state = this.statusStore.state();
+    return (
+      state.kind === 'ready' &&
+      state.status.branch.upstream !== null &&
+      state.status.branch.ahead === 0
+    );
+  });
 
   protected readonly selectedFileSummary = computed(() => {
     const state = this.detailState();
@@ -302,6 +340,11 @@ export class WorkspaceHistory implements OnDestroy {
 
   protected setCurrentOnly(enabled: boolean): void {
     this.currentOnly.set(enabled);
+    if (enabled && this.branchCreationTarget()?.kind === 'remote') {
+      this.branchCreationTarget.set(null);
+      this.newBranchName.set('');
+      this.branchCreationReturnFocus = null;
+    }
     writeWorkspaceRefreshSetting(this.refreshStorage, this.repositoryId, 'currentOnly', enabled);
   }
 
@@ -368,6 +411,227 @@ export class WorkspaceHistory implements OnDestroy {
     this.navigationFilter.set(value);
   }
 
+  protected startBranchFromCurrent(trigger: HTMLElement): void {
+    const state = this.statusStore.state();
+    if (state.kind !== 'ready' || state.status.branch.oid === null || this.workspaceActionBusy()) {
+      return;
+    }
+    this.branchCreationTarget.set({ kind: 'current', label: state.status.branch.head ?? 'HEAD' });
+    this.branchCreationReturnFocus = trigger;
+    this.newBranchName.set('');
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.focusAfterRender('new-branch-name');
+  }
+
+  protected startBranchFromRemote(branch: RepositoryBranch, trigger: HTMLElement): void {
+    if (branch.kind !== 'remote' || this.workspaceActionBusy()) {
+      return;
+    }
+    this.branchCreationTarget.set({ kind: 'remote', branch });
+    this.branchCreationReturnFocus = trigger;
+    this.newBranchName.set('');
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.focusAfterRender('new-branch-name');
+  }
+
+  protected updateNewBranchName(name: string): void {
+    this.newBranchName.set(name);
+  }
+
+  protected cancelBranchCreation(): void {
+    if (this.creatingBranch()) {
+      return;
+    }
+    this.branchCreationTarget.set(null);
+    this.newBranchName.set('');
+    this.restoreFocusAfterRender(this.branchCreationReturnFocus);
+    this.branchCreationReturnFocus = null;
+  }
+
+  protected async createBranch(): Promise<void> {
+    const target = this.branchCreationTarget();
+    const name = this.newBranchName().trim();
+    const state = this.statusStore.state();
+    if (target === null || name.length === 0 || state.kind !== 'ready' || this.workspaceActionBusy()) {
+      return;
+    }
+    const source = target.kind === 'remote'
+      ? {
+          kind: 'remoteTracking' as const,
+          fullName: target.branch.fullName,
+          expectedOid: target.branch.oid,
+        }
+      : state.status.branch.oid === null
+        ? null
+        : { kind: 'current' as const, expectedOid: state.status.branch.oid };
+    if (source === null) {
+      return;
+    }
+
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.creatingBranch.set(true);
+    let restoreFocusOnSuccess = false;
+    try {
+      const created = await this.ipc.invoke('create_repository_branch', {
+        repositoryId: this.repositoryId,
+        operation: { name, source },
+      });
+      if (this.destroyed) {
+        return;
+      }
+      this.branchCreationTarget.set(null);
+      this.newBranchName.set('');
+      restoreFocusOnSuccess = true;
+      this.navigationActionNotice.set(
+        created.upstream === null
+          ? `Created local branch “${created.name}”.`
+          : `Created local branch “${created.name}” tracking ${created.upstream}.`,
+      );
+      await this.loadNavigation();
+    } catch (error) {
+      if (!this.destroyed) {
+        const message = this.errorMessage(error, 'The branch could not be created.');
+        this.navigationActionError.set(
+          message.includes('manualCleanupRequired')
+            ? `The branch may have been created, but final verification failed. Inspect the refreshed branch list and delete it manually if it is not wanted. ${message}`
+            : message,
+        );
+        await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.creatingBranch.set(false);
+        if (restoreFocusOnSuccess) {
+          this.restoreFocusAfterRender(this.branchCreationReturnFocus);
+          this.branchCreationReturnFocus = null;
+        }
+      }
+    }
+  }
+
+  protected updateStashMessage(message: string): void {
+    this.stashMessage.set(message);
+  }
+
+  protected setStashIncludeUntracked(include: boolean): void {
+    this.stashIncludeUntracked.set(include);
+  }
+
+  protected async pushStash(): Promise<void> {
+    const state = this.statusStore.state();
+    const message = this.stashMessage().trim();
+    if (state.kind !== 'ready' || message.length === 0 || this.workspaceActionBusy()) {
+      return;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.stashMutation.set('create');
+    try {
+      const result = await this.ipc.invoke('repository_push_stash', {
+        repositoryId: this.repositoryId,
+        operation: {
+          message,
+          includeUntracked: this.stashIncludeUntracked(),
+          precondition: this.repositoryStatePrecondition(state.status),
+        },
+      });
+      if (this.destroyed) {
+        return;
+      }
+      if (result.status !== null) {
+        this.statusStore.acceptMutationResult(result.status);
+      }
+      const verifiedCreated =
+        result.state === 'created' &&
+        result.status !== null &&
+        result.stash !== null &&
+        result.errorMessage === null;
+      const verifiedNoChanges =
+        result.state === 'noChanges' && result.status !== null && result.errorMessage === null;
+      if (verifiedCreated) {
+        this.stashMessage.set('');
+        this.navigationActionNotice.set(
+          `Created ${result.stash.selector}.`,
+        );
+      } else if (verifiedNoChanges) {
+        this.navigationActionNotice.set('There were no changes to stash.');
+      } else {
+        const recovery = result.mutationMayHaveOccurred
+          ? ' A mutating command was attempted; inspect the refreshed working tree and stash list before retrying.'
+          : '';
+        this.navigationActionError.set(
+          result.state === 'partial'
+            ? `The stash operation completed only partially${result.stash ? `; ${result.stash.selector} was retained` : ''}. ${result.errorMessage ?? 'Review the repository state before continuing.'}${recovery}`
+            : `${result.errorMessage ?? 'The stash result could not be verified.'}${recovery}`,
+        );
+      }
+      this.clearWorkingTreeMutationView();
+      await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+    } catch (error) {
+      if (!this.destroyed) {
+        this.navigationActionError.set(this.errorMessage(error, 'The stash could not be created.'));
+        await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.stashMutation.set(null);
+      }
+    }
+  }
+
+  protected async applyStash(stash: RepositoryStash): Promise<void> {
+    await this.restoreStash('apply', stash);
+  }
+
+  protected async popStash(stash: RepositoryStash): Promise<void> {
+    await this.restoreStash('pop', stash);
+  }
+
+  protected async dropStash(stash: RepositoryStash): Promise<void> {
+    if (this.workspaceActionBusy()) {
+      return;
+    }
+    if (!globalThis.confirm(`Drop ${stash.selector} “${stash.message}”? This cannot be undone.`)) {
+      return;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.stashMutation.set(`drop:${stash.oid}`);
+    try {
+      const result = await this.ipc.invoke('repository_drop_stash', {
+        repositoryId: this.repositoryId,
+        operation: { stash: { oid: stash.oid, selector: stash.selector } },
+      });
+      if (this.destroyed) {
+        return;
+      }
+      const verifiedDrop = result.cleanup === 'dropped' && result.errorMessage === null;
+      if (verifiedDrop) {
+        this.navigationActionNotice.set(`Dropped ${stash.selector}.`);
+      } else {
+        const recovery = result.mutationMayHaveOccurred
+          ? ' A mutating command was attempted; inspect the refreshed stash list before retrying.'
+          : '';
+        this.navigationActionError.set(
+          `${stash.selector} was not confirmed dropped (${result.cleanup}). ${result.errorMessage ?? 'It may remain available in the stash list.'}${recovery}`,
+        );
+      }
+      await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+    } catch (error) {
+      if (!this.destroyed) {
+        this.navigationActionError.set(this.errorMessage(error, `${stash.selector} could not be dropped.`));
+        await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.stashMutation.set(null);
+      }
+    }
+  }
+
   protected toggleBranchFolder(kind: RepositoryBranch['kind'], path: string): void {
     const expanded = this.expandedFoldersFor(kind);
     expanded.set(
@@ -390,12 +654,14 @@ export class WorkspaceHistory implements OnDestroy {
     }
 
     this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
     this.switchingBranch.set(branch.fullName);
     try {
-      await this.ipc.invoke('switch_repository_branch', {
+      const result = await this.ipc.invoke('switch_repository_branch', {
         repositoryId: this.repositoryId,
         operation: {
           fullName: branch.fullName,
+          expectedOid: branch.oid,
           stashOnDirty: false,
           stashMessage: null,
         },
@@ -403,21 +669,19 @@ export class WorkspaceHistory implements OnDestroy {
       if (this.destroyed) {
         return;
       }
-      await Promise.all([
-        this.statusStore.refresh(),
-        this.reloadHistory(),
-        this.loadNavigation(),
-      ]);
+      this.recordBranchSwitchOutcome(result);
+      await this.refreshAfterBranchSwitch();
     } catch (error) {
       const message = this.errorMessage(error, 'The branch could not be switched.');
       if (!this.destroyed && message.includes('dirtyWorkingTree')) {
         const currentBranch = this.currentLocalBranch()?.name ?? this.branchName();
         if (globalThis.confirm(`The working tree has uncommitted changes. Stash them and switch to “${branch.name}”?`)) {
           try {
-            await this.ipc.invoke('switch_repository_branch', {
+            const result = await this.ipc.invoke('switch_repository_branch', {
               repositoryId: this.repositoryId,
               operation: {
                 fullName: branch.fullName,
+                expectedOid: branch.oid,
                 stashOnDirty: true,
                 stashMessage: buildWipStashMessage(
                   currentBranch,
@@ -426,11 +690,13 @@ export class WorkspaceHistory implements OnDestroy {
               },
             });
             if (!this.destroyed) {
-              await Promise.all([this.statusStore.refresh(), this.reloadHistory(), this.loadNavigation()]);
+              this.recordBranchSwitchOutcome(result);
+              await this.refreshAfterBranchSwitch();
             }
           } catch (retryError) {
             if (!this.destroyed) {
               this.navigationActionError.set(this.errorMessage(retryError, 'The branch could not be switched after stashing.'));
+              await this.refreshAfterBranchSwitch();
             }
           }
         }
@@ -442,6 +708,50 @@ export class WorkspaceHistory implements OnDestroy {
         this.switchingBranch.set(null);
       }
     }
+  }
+
+  private recordBranchSwitchOutcome(result: SwitchRepositoryBranchResponse): void {
+    const operationStage = result.operationSucceeded
+      ? `Operation: switched to “${result.name}”.`
+      : `Operation: switch failed — ${result.operationError ?? 'the branch switch did not complete'}.`;
+    const restoreStage = result.autoStash.restore === 'applied'
+      ? 'Restore: auto-stashed changes were applied.'
+      : result.autoStash.restore === 'conflicted'
+        ? `Restore: changes were applied with conflicts${result.autoStash.restoreError ? ` — ${result.autoStash.restoreError}` : ''}.`
+        : result.autoStash.restore === 'notRequired'
+          ? 'Restore: not required.'
+          : `Restore: ${result.autoStash.restore}${result.autoStash.restoreError ? ` — ${result.autoStash.restoreError}` : ''}.`;
+    const cleanupStage = result.autoStash.cleanup === 'dropped'
+      ? 'Cleanup: auto-stash dropped.'
+      : result.autoStash.cleanup === 'retained'
+        ? `Cleanup: auto-stash${result.autoStash.stash ? ` ${result.autoStash.stash.selector}` : ''} retained${result.autoStash.cleanupError ? ` — ${result.autoStash.cleanupError}` : ''}.`
+        : result.autoStash.cleanup === 'notRequired'
+          ? 'Cleanup: not required.'
+          : `Cleanup: failed; the stash may remain available${result.autoStash.cleanupError ? ` — ${result.autoStash.cleanupError}` : ''}.`;
+    const createFailed =
+      result.autoStash.create === 'failed' || result.autoStash.create === 'partial';
+    const hasPartialOutcome =
+      !result.operationSucceeded ||
+      createFailed ||
+      result.autoStash.restore === 'conflicted' ||
+      result.autoStash.restore === 'failed' ||
+      result.autoStash.restore === 'skippedUnsafe' ||
+      result.autoStash.cleanup === 'retained' ||
+      result.autoStash.cleanup === 'failed';
+    const creationStage = createFailed
+      ? ` Auto-stash: ${result.autoStash.create}${result.autoStash.createError ? ` — ${result.autoStash.createError}` : ''}.`
+      : '';
+    const message = `${operationStage}${creationStage} ${restoreStage} ${cleanupStage}`;
+    if (hasPartialOutcome) {
+      this.navigationActionError.set(message);
+      this.navigationActionNotice.set('');
+    } else {
+      this.navigationActionNotice.set(message);
+    }
+  }
+
+  private async refreshAfterBranchSwitch(): Promise<void> {
+    await Promise.all([this.statusStore.refresh(), this.reloadHistory(), this.loadNavigation()]);
   }
 
   protected async deleteBranch(branch: RepositoryBranch): Promise<void> {
@@ -744,11 +1054,14 @@ export class WorkspaceHistory implements OnDestroy {
       if (generation === this.detailRequestGeneration && this.selectedOid() === commit.oid) {
         this.detailState.set({ kind: 'ready', detail });
       }
-    } catch {
+    } catch (error) {
       if (generation === this.detailRequestGeneration && this.selectedOid() === commit.oid) {
         this.detailState.set({
           kind: 'error',
-          message: 'Commit details could not be loaded. Select the commit to retry.',
+          message: this.errorMessage(
+            error,
+            'Commit details could not be loaded. Select the commit to retry.',
+          ),
         });
       }
     }
@@ -796,6 +1109,28 @@ export class WorkspaceHistory implements OnDestroy {
     this.commitMessage.set(message);
   }
 
+  protected startAmend(trigger: HTMLElement): void {
+    if (this.amendUnavailable()) {
+      return;
+    }
+    this.amendReturnFocus = trigger;
+    this.amendMode.set(true);
+    this.workingTreeMutationError.set('');
+    this.selectWorkingTree();
+    this.focusAfterRender('commit-message');
+  }
+
+  protected cancelAmend(): void {
+    if (this.workspaceActionBusy()) {
+      return;
+    }
+    this.amendMode.set(false);
+    this.commitMessage.set('');
+    this.workingTreeMutationError.set('');
+    this.restoreFocusAfterRender(this.amendReturnFocus);
+    this.amendReturnFocus = null;
+  }
+
   protected async applyIndexChange(action: IndexAction, all: boolean): Promise<void> {
     const state = this.statusStore.state();
     if (state.kind !== 'ready' || this.workspaceActionBusy()) {
@@ -839,7 +1174,9 @@ export class WorkspaceHistory implements OnDestroy {
       if (!this.isCurrentMutation(generation)) {
         return;
       }
-      this.statusStore.acceptMutationResult(result.status);
+      if (result.status !== null) {
+        this.statusStore.acceptMutationResult(result.status);
+      }
       this.selectedWorkingTreeFiles.set(new Set());
       this.invalidateWorkingTreeDiff();
     } catch (error) {
@@ -906,6 +1243,82 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  protected async amendCommit(message: string | null): Promise<void> {
+    const state = this.statusStore.state();
+    if (
+      state.kind !== 'ready' ||
+      !this.amendMode() ||
+      this.amendUnavailable() ||
+      (message !== null && message.trim().length === 0)
+    ) {
+      return;
+    }
+
+    const rewritesUpstreamCommit = this.amendRewritesUpstream();
+    if (
+      rewritesUpstreamCommit &&
+      !globalThis.confirm(
+        'HEAD is already part of the upstream history. Amending it rewrites published history and the next push may require force. Continue?',
+      )
+    ) {
+      return;
+    }
+
+    this.workingTreeMutationError.set('');
+    const generation = ++this.mutationRequestGeneration;
+    this.workingTreeMutation.set({ action: 'amend', scope: null });
+    try {
+      const result = await this.ipc.invoke('repository_amend_commit', {
+        repositoryId: this.repositoryId,
+        operation: {
+          message,
+          confirmUpstreamRewrite: rewritesUpstreamCommit,
+          expectedHead: state.status.branch.oid,
+          expectedHeadName: state.status.branch.head,
+          expectedDetached: state.status.branch.detached,
+          expectedUnborn: state.status.branch.unborn,
+          expectedIndexFingerprint: state.status.indexFingerprint,
+          expectedWorktreeFingerprint: state.status.worktreeFingerprint,
+        },
+      });
+      if (!this.isCurrentMutation(generation)) {
+        return;
+      }
+      if (result.state === 'succeeded' && result.status !== null) {
+        this.statusStore.acceptMutationResult(result.status);
+        this.amendMode.set(false);
+        this.commitMessage.set('');
+        this.selectedWorkingTreeFiles.set(new Set());
+        this.invalidateWorkingTreeDiff();
+        await Promise.all([this.reloadHistory(), this.loadNavigation()]);
+        this.restoreFocusAfterRender(this.amendReturnFocus);
+        this.amendReturnFocus = null;
+      } else {
+        this.workingTreeMutationError.set(
+          `The amend outcome is unknown. ${result.errorMessage ?? 'Inspect HEAD and the working tree before deciding whether to retry.'}`,
+        );
+        await Promise.all([
+          this.statusStore.refresh(),
+          this.reloadHistory(),
+          this.loadNavigation(),
+        ]);
+        this.selectWorkingTree();
+        this.focusAfterRender('commit-message');
+      }
+    } catch (error) {
+      if (this.isCurrentMutation(generation)) {
+        this.workingTreeMutationError.set(
+          this.errorMessage(error, 'HEAD could not be amended.'),
+        );
+        await this.statusStore.refresh();
+      }
+    } finally {
+      if (this.isCurrentMutation(generation)) {
+        this.workingTreeMutation.set(null);
+      }
+    }
+  }
+
   protected mutationInProgress(action: WorkingTreeMutation['action'], scope?: 'selected' | 'all'): boolean {
     const mutation = this.workingTreeMutation();
     return mutation?.action === action && (scope === undefined || mutation.scope === scope);
@@ -916,6 +1329,122 @@ export class WorkspaceHistory implements OnDestroy {
       return 'Resolve all conflicts before changing the index.';
     }
     return ambiguous ? 'Select every entry sharing the same path before changing the index.' : '';
+  }
+
+  private async restoreStash(action: 'apply' | 'pop', stash: RepositoryStash): Promise<void> {
+    const state = this.statusStore.state();
+    if (state.kind !== 'ready' || this.workspaceActionBusy()) {
+      return;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.stashMutation.set(`${action}:${stash.oid}`);
+    const operation = {
+      stash: { oid: stash.oid, selector: stash.selector },
+      restoreIndex: true,
+      precondition: this.repositoryStatePrecondition(state.status),
+    };
+    try {
+      const result = action === 'apply'
+        ? await this.ipc.invoke('repository_apply_stash', {
+            repositoryId: this.repositoryId,
+            operation,
+          })
+        : await this.ipc.invoke('repository_pop_stash', {
+            repositoryId: this.repositoryId,
+            operation,
+          });
+      if (this.destroyed) {
+        return;
+      }
+      if (result.status !== null) {
+        this.statusStore.acceptMutationResult(result.status);
+      }
+      const restoreError = 'restoreError' in result ? result.restoreError : result.errorMessage;
+      const cleanupError = 'cleanupError' in result ? result.cleanupError : null;
+      const restoreStage = result.restore === 'applied'
+        ? 'Restore: changes applied.'
+        : result.restore === 'conflicted'
+          ? `Restore: changes applied with conflicts${restoreError ? ` — ${restoreError}` : ''}.`
+          : `Restore: ${result.restore}${restoreError ? ` — ${restoreError}` : ''}.`;
+      const cleanupStage = result.cleanup === 'dropped'
+        ? 'Cleanup: stash dropped.'
+        : result.cleanup === 'retained'
+          ? `Cleanup: changes applied but stash retained${cleanupError ? ` — ${cleanupError}` : ''}.`
+          : result.cleanup === 'notRequired'
+            ? action === 'apply'
+              ? 'Cleanup: not requested; stash retained.'
+              : 'Cleanup: not required.'
+            : `Cleanup: failed; changes may already be applied and the stash may still be present${cleanupError ? ` — ${cleanupError}` : ''}.`;
+      const applyVerified =
+        action === 'apply' &&
+        result.restore === 'applied' &&
+        result.status !== null &&
+        restoreError === null &&
+        result.cleanup !== 'failed';
+      const popVerified =
+        action === 'pop' &&
+        result.restore === 'applied' &&
+        result.cleanup === 'dropped' &&
+        result.status !== null &&
+        restoreError === null &&
+        cleanupError === null;
+      const verified = applyVerified || popVerified;
+      const recoveryStage = !verified && result.mutationMayHaveOccurred
+        ? ' Recovery: a mutating command was attempted; inspect the refreshed working tree and stash list before retrying.'
+        : '';
+      const message = `${stash.selector}. ${restoreStage} ${cleanupStage}${recoveryStage}`;
+      if (!verified) {
+        this.navigationActionError.set(message);
+      } else {
+        this.navigationActionNotice.set(message);
+      }
+      this.clearWorkingTreeMutationView();
+      await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+    } catch (error) {
+      if (!this.destroyed) {
+        this.navigationActionError.set(
+          this.errorMessage(error, `${stash.selector} could not be ${action === 'pop' ? 'popped' : 'applied'}.`),
+        );
+        await Promise.all([this.statusStore.refresh(), this.loadNavigation()]);
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.stashMutation.set(null);
+      }
+    }
+  }
+
+  private repositoryStatePrecondition(status: RepositoryStatusResponse) {
+    return {
+      expectedHead: status.branch.oid,
+      expectedHeadName: status.branch.head,
+      expectedDetached: status.branch.detached,
+      expectedUnborn: status.branch.unborn,
+      expectedIndexFingerprint: status.indexFingerprint,
+      expectedWorktreeFingerprint: status.worktreeFingerprint,
+    };
+  }
+
+  private clearWorkingTreeMutationView(): void {
+    this.selectedWorkingTreeFiles.set(new Set());
+    this.invalidateWorkingTreeDiff();
+  }
+
+  private focusAfterRender(id: string): void {
+    globalThis.setTimeout(() => {
+      if (!this.destroyed) {
+        globalThis.document?.getElementById(id)?.focus();
+      }
+    }, 0);
+  }
+
+  private restoreFocusAfterRender(target: HTMLElement | null): void {
+    globalThis.setTimeout(() => {
+      if (!this.destroyed && target?.isConnected) {
+        target.focus();
+      }
+    }, 0);
   }
 
   private isCurrentMutation(generation: number): boolean {

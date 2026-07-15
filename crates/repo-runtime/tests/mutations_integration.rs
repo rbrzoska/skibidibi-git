@@ -1,8 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
 use app_domain::{
-    ApplyIndexChangeRequest, ChangeSelection, CreateCommitRequest, IndexAction, RepositoryStatus,
-    StatusEntry, WorkingTreeEntrySelector,
+    AmendCommitRequest, AmendCommitState, ApplyIndexChangeRequest, ChangeSelection,
+    CreateCommitRequest, IndexAction, RepositoryStatus, StatusEntry, WorkingTreeEntrySelector,
 };
 use repo_runtime::{MutationRuntimeError, RepositoryRuntime};
 
@@ -57,6 +57,23 @@ fn index_request(
     ApplyIndexChangeRequest {
         action,
         selection: ChangeSelection::Selected { entries },
+        expected_head: status.branch.oid.clone(),
+        expected_head_name: status.branch.head.clone(),
+        expected_detached: status.branch.detached,
+        expected_unborn: status.branch.unborn,
+        expected_index_fingerprint: status.index_fingerprint.clone(),
+        expected_worktree_fingerprint: status.worktree_fingerprint.clone(),
+    }
+}
+
+fn amend_request(
+    status: &RepositoryStatus,
+    message: Option<&str>,
+    confirm_upstream_rewrite: bool,
+) -> AmendCommitRequest {
+    AmendCommitRequest {
+        message: message.map(str::to_owned),
+        confirm_upstream_rewrite,
         expected_head: status.branch.oid.clone(),
         expected_head_name: status.branch.head.clone(),
         expected_detached: status.branch.detached,
@@ -189,6 +206,336 @@ fn handles_unborn_stage_unstage_and_first_commit() {
     assert_eq!(committed.oid.len(), 40);
     assert!(!committed.status.branch.unborn);
     assert!(committed.status.entries.is_empty());
+}
+
+#[test]
+fn amend_with_a_new_message_commits_staged_content_and_preserves_the_parent_set() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    let parents_before =
+        git_output(repository.path(), &["show", "-s", "--format=%P", "HEAD"]).stdout;
+    fs::write(repository.path().join("tracked.txt"), "amended\n").unwrap();
+    git(repository.path(), &["add", "tracked.txt"]);
+    let before = runtime.status(repository.path()).unwrap();
+    let result = runtime
+        .amend_commit(
+            repository.path(),
+            &amend_request(&before, Some("replacement subject\n\nbody"), false),
+        )
+        .unwrap();
+
+    assert_eq!(result.previous_oid, before.branch.oid.unwrap());
+    assert_eq!(result.state, AmendCommitState::Succeeded);
+    assert_eq!(
+        result.oid,
+        result
+            .status
+            .as_ref()
+            .and_then(|status| status.branch.oid.clone())
+    );
+    assert_eq!(
+        git_output(repository.path(), &["show", "-s", "--format=%P", "HEAD"]).stdout,
+        parents_before
+    );
+    assert_eq!(
+        String::from_utf8(
+            git_output(repository.path(), &["show", "-s", "--format=%B", "HEAD"]).stdout
+        )
+        .unwrap(),
+        "replacement subject\n\nbody\n\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.path().join("tracked.txt")).unwrap(),
+        "amended\n"
+    );
+    assert!(result.status.as_ref().unwrap().entries.is_empty());
+}
+
+#[test]
+fn amend_without_editing_the_message_succeeds_without_staged_changes() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    let message_before =
+        git_output(repository.path(), &["show", "-s", "--format=%B", "HEAD"]).stdout;
+    let tree_before = git_output(repository.path(), &["show", "-s", "--format=%T", "HEAD"]).stdout;
+    let parents_before =
+        git_output(repository.path(), &["show", "-s", "--format=%P", "HEAD"]).stdout;
+    let before = runtime.status(repository.path()).unwrap();
+
+    let result = runtime
+        .amend_commit(repository.path(), &amend_request(&before, None, false))
+        .unwrap();
+
+    assert_eq!(result.previous_oid, before.branch.oid.unwrap());
+    assert_eq!(
+        git_output(repository.path(), &["show", "-s", "--format=%B", "HEAD"]).stdout,
+        message_before
+    );
+    assert_eq!(
+        git_output(repository.path(), &["show", "-s", "--format=%T", "HEAD"]).stdout,
+        tree_before
+    );
+    assert_eq!(
+        git_output(repository.path(), &["show", "-s", "--format=%P", "HEAD"]).stdout,
+        parents_before
+    );
+}
+
+#[test]
+fn amend_requires_confirmation_when_head_is_on_the_configured_upstream() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    git(
+        repository.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repository.git",
+        ],
+    );
+    git(
+        repository.path(),
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    git(
+        repository.path(),
+        &["branch", "--set-upstream-to=origin/main", "main"],
+    );
+    let before = runtime.status(repository.path()).unwrap();
+    assert_eq!(before.branch.upstream.as_deref(), Some("origin/main"));
+    assert_eq!(before.branch.ahead, 0);
+    let head_before = before.branch.oid.clone();
+
+    let rejected = runtime.amend_commit(
+        repository.path(),
+        &amend_request(&before, Some("published replacement"), false),
+    );
+    assert!(matches!(
+        rejected,
+        Err(MutationRuntimeError::UpstreamRewriteConfirmationRequired)
+    ));
+    assert_eq!(
+        runtime.status(repository.path()).unwrap().branch.oid,
+        head_before
+    );
+
+    let confirmed = runtime
+        .amend_commit(
+            repository.path(),
+            &amend_request(&before, Some("published replacement"), true),
+        )
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(
+            git_output(repository.path(), &["show", "-s", "--format=%s", "HEAD"]).stdout
+        )
+        .unwrap()
+        .trim(),
+        "published replacement"
+    );
+    assert_ne!(
+        confirmed.oid.as_deref(),
+        Some(confirmed.previous_oid.as_str())
+    );
+}
+
+#[test]
+fn amend_of_an_unpushed_head_does_not_require_upstream_confirmation() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    git(
+        repository.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repository.git",
+        ],
+    );
+    git(
+        repository.path(),
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    git(
+        repository.path(),
+        &["branch", "--set-upstream-to=origin/main", "main"],
+    );
+    fs::write(repository.path().join("local.txt"), "local\n").unwrap();
+    git(repository.path(), &["add", "local.txt"]);
+    git(repository.path(), &["commit", "-qm", "local"]);
+    let before = runtime.status(repository.path()).unwrap();
+    assert_eq!(before.branch.ahead, 1);
+
+    runtime
+        .amend_commit(
+            repository.path(),
+            &amend_request(&before, Some("local replacement"), false),
+        )
+        .unwrap();
+}
+
+#[test]
+fn amend_rejects_unborn_head_and_invalid_messages_without_mutation() {
+    let repository = init_repository(false);
+    let runtime = RepositoryRuntime::default();
+    let before = runtime.status(repository.path()).unwrap();
+    let no_head = runtime.amend_commit(repository.path(), &amend_request(&before, None, false));
+    assert!(matches!(no_head, Err(MutationRuntimeError::NothingToAmend)));
+
+    let invalid = runtime.amend_commit(
+        repository.path(),
+        &amend_request(&before, Some(" \n\t"), false),
+    );
+    assert!(matches!(
+        invalid,
+        Err(MutationRuntimeError::InvalidCommitMessage { .. })
+    ));
+    assert!(runtime.status(repository.path()).unwrap().branch.unborn);
+}
+
+#[test]
+fn amend_rejects_a_stale_index_without_mutating_head_or_index() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    let stale = runtime.status(repository.path()).unwrap();
+    let head_before = stale.branch.oid.clone();
+    fs::write(repository.path().join("external.txt"), "external\n").unwrap();
+    git(repository.path(), &["add", "external.txt"]);
+    let index_before = git_output(repository.path(), &["ls-files", "--stage", "-z"]).stdout;
+
+    let result = runtime.amend_commit(
+        repository.path(),
+        &amend_request(&stale, Some("must not amend stale state"), false),
+    );
+
+    assert!(matches!(result, Err(MutationRuntimeError::StaleState)));
+    assert_eq!(
+        runtime.status(repository.path()).unwrap().branch.oid,
+        head_before
+    );
+    assert_eq!(
+        git_output(repository.path(), &["ls-files", "--stage", "-z"]).stdout,
+        index_before
+    );
+}
+
+#[test]
+fn amend_rejects_conflicted_entries_without_mutating_head_or_index() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    git(repository.path(), &["switch", "-qc", "other"]);
+    fs::write(repository.path().join("tracked.txt"), "other\n").unwrap();
+    git(repository.path(), &["commit", "-qam", "other"]);
+    git(repository.path(), &["switch", "-q", "main"]);
+    fs::write(repository.path().join("tracked.txt"), "main\n").unwrap();
+    git(repository.path(), &["commit", "-qam", "main"]);
+    let merge = git_output(repository.path(), &["merge", "other"]);
+    assert!(!merge.status.success());
+    let before = runtime.status(repository.path()).unwrap();
+    let head_before = before.branch.oid.clone();
+    let index_before = git_output(repository.path(), &["ls-files", "--stage", "-z"]).stdout;
+
+    let result = runtime.amend_commit(
+        repository.path(),
+        &amend_request(&before, Some("must not amend conflicts"), false),
+    );
+
+    assert!(matches!(
+        result,
+        Err(MutationRuntimeError::ConflictsPresent)
+    ));
+    assert_eq!(
+        runtime.status(repository.path()).unwrap().branch.oid,
+        head_before
+    );
+    assert_eq!(
+        git_output(repository.path(), &["ls-files", "--stage", "-z"]).stdout,
+        index_before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn amend_runs_hooks_and_preserves_head_and_index_when_a_hook_rejects_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    fs::write(repository.path().join("tracked.txt"), "staged amend\n").unwrap();
+    git(repository.path(), &["add", "tracked.txt"]);
+    let hook = repository.path().join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\necho amend-hook-blocked >&2\nexit 31\n").unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+    let before = runtime.status(repository.path()).unwrap();
+    let head_before = before.branch.oid.clone();
+    let index_before = git_output(repository.path(), &["ls-files", "--stage", "-z"]).stdout;
+
+    let result = runtime.amend_commit(
+        repository.path(),
+        &amend_request(&before, Some("hooked amend"), false),
+    );
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("amend-hook-blocked")
+    );
+    assert_eq!(
+        runtime.status(repository.path()).unwrap().branch.oid,
+        head_before
+    );
+    assert_eq!(
+        git_output(repository.path(), &["ls-files", "--stage", "-z"]).stdout,
+        index_before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn amend_reports_an_unknown_outcome_when_a_hook_moves_head_during_commit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    git(repository.path(), &["switch", "-qc", "external"]);
+    fs::write(repository.path().join("external.txt"), "external\n").unwrap();
+    git(repository.path(), &["add", "external.txt"]);
+    git(repository.path(), &["commit", "-qm", "external"]);
+    let external_oid =
+        String::from_utf8(git_output(repository.path(), &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+    git(repository.path(), &["switch", "-q", "main"]);
+
+    let hook = repository.path().join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\ngit update-ref refs/heads/main {external_oid}\n"),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+    let before = runtime.status(repository.path()).unwrap();
+
+    let result = runtime
+        .amend_commit(repository.path(), &amend_request(&before, None, false))
+        .expect("post-mutation uncertainty is returned as a structured outcome");
+
+    assert_eq!(result.state, AmendCommitState::OutcomeUnknown);
+    assert!(result.error_message.is_some());
+    assert_eq!(
+        result
+            .status
+            .as_ref()
+            .and_then(|status| status.branch.oid.as_deref()),
+        Some(external_oid.as_str())
+    );
 }
 
 #[test]

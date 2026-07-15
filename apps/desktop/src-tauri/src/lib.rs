@@ -6,19 +6,21 @@ use std::{
 };
 
 use app_domain::{
-    ApplyIndexChangeRequest, ApplyIndexChangeResult, CommitDetails, CommitHistoryPage,
-    CreateCommitRequest, CreateCommitResult, DeleteBranchRequest, DeleteBranchResult,
-    FetchRepositoryResult, FileDiff, IntegrationHealth, IntegrationHealthIssue,
-    IntegrationHealthState, RememberRepositoryInput, RememberedRepository, RemoveWorktreeRequest,
-    RemoveWorktreeResult, RepositoryAvailability, RepositoryHealthUpdate, RepositoryNavigation,
-    RepositoryProvider, RepositoryStatus, RepositoryTransport, SwitchBranchRequest,
-    SwitchBranchResult, WorkingTreeFileDiff,
+    AmendCommitRequest, AmendCommitResult, ApplyIndexChangeRequest, ApplyIndexChangeResult,
+    ApplyStashRequest, ApplyStashResult, CommitDetails, CommitHistoryPage, CreateBranchRequest,
+    CreateBranchResult, CreateCommitRequest, CreateCommitResult, DeleteBranchRequest,
+    DeleteBranchResult, DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff,
+    IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState, PopStashRequest,
+    PopStashResult, PushStashRequest, PushStashResult, RememberRepositoryInput,
+    RememberedRepository, RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability,
+    RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider, RepositoryStatus,
+    RepositoryTransport, SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff,
 };
 use app_store::{CatalogError, RepositoryCatalog};
 use repo_runtime::{
-    BranchSwitchError, FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError,
-    MutationRuntimeError, NavigationRuntimeError, RepositoryRuntime, RepositoryRuntimeError,
-    WorkingTreeDiffRuntimeError,
+    BranchCreationError, BranchSwitchError, FileDiffRuntimeError, HistoryRuntimeError,
+    MaintenanceError, MutationRuntimeError, NavigationRuntimeError, RepositoryRuntime,
+    RepositoryRuntimeError, StashActionError, WorkingTreeDiffRuntimeError,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -106,6 +108,22 @@ impl From<NavigationRuntimeError> for CommandError {
 
 impl From<BranchSwitchError> for CommandError {
     fn from(error: BranchSwitchError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<BranchCreationError> for CommandError {
+    fn from(error: BranchCreationError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<StashActionError> for CommandError {
+    fn from(error: StashActionError) -> Self {
         Self {
             message: format!("{}: {}", error.code(), error),
         }
@@ -405,6 +423,29 @@ async fn repository_create_commit(
 }
 
 #[tauri::command]
+async fn repository_amend_commit(
+    repository_id: String,
+    operation: AmendCommitRequest,
+    state: State<'_, AppState>,
+) -> Result<AmendCommitResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .amend_commit(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("amend task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
 async fn repository_navigation(
     repository_id: String,
     state: State<'_, AppState>,
@@ -419,6 +460,121 @@ async fn repository_navigation(
     .await
     .map_err(|error| CommandError {
         message: format!("repository navigation task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn create_repository_branch(
+    repository_id: String,
+    operation: CreateBranchRequest,
+    state: State<'_, AppState>,
+) -> Result<CreateBranchResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .create_branch(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("branch creation task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_push_stash(
+    repository_id: String,
+    operation: PushStashRequest,
+    state: State<'_, AppState>,
+) -> Result<PushStashResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .push_stash(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("stash push task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_apply_stash(
+    repository_id: String,
+    operation: ApplyStashRequest,
+    state: State<'_, AppState>,
+) -> Result<ApplyStashResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .apply_stash(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("stash apply task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_pop_stash(
+    repository_id: String,
+    operation: PopStashRequest,
+    state: State<'_, AppState>,
+) -> Result<PopStashResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .pop_stash(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("stash pop task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_drop_stash(
+    repository_id: String,
+    operation: DropStashRequest,
+    state: State<'_, AppState>,
+) -> Result<DropStashResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .drop_stash(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("stash drop task failed: {error}"),
     })?
 }
 
@@ -680,7 +836,13 @@ pub fn run() {
             repository_working_tree_file_diff,
             repository_apply_index_change,
             repository_create_commit,
+            repository_amend_commit,
             repository_navigation,
+            create_repository_branch,
+            repository_push_stash,
+            repository_apply_stash,
+            repository_pop_stash,
+            repository_drop_stash,
             switch_repository_branch,
             delete_repository_branch,
             remove_repository_worktree,

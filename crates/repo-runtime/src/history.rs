@@ -69,6 +69,7 @@ impl HistoryQuery {
             Self::DetailsNames { oid } => vec![
                 "show".to_owned(),
                 "--format=".to_owned(),
+                "--first-parent".to_owned(),
                 "--name-status".to_owned(),
                 "-z".to_owned(),
                 "-M".to_owned(),
@@ -78,6 +79,7 @@ impl HistoryQuery {
             Self::DetailsNumbers { oid } => vec![
                 "show".to_owned(),
                 "--format=".to_owned(),
+                "--first-parent".to_owned(),
                 "--numstat".to_owned(),
                 "-z".to_owned(),
                 "-M".to_owned(),
@@ -412,6 +414,25 @@ mod tests {
     }
 
     #[test]
+    fn detail_file_queries_use_the_same_first_parent_merge_semantics() {
+        for query in [
+            HistoryQuery::DetailsNames {
+                oid: OID.to_owned(),
+            },
+            HistoryQuery::DetailsNumbers {
+                oid: OID.to_owned(),
+            },
+        ] {
+            let arguments = query.arguments();
+            let arguments = arguments
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(arguments.contains(&"--first-parent"));
+        }
+    }
+
+    #[test]
     fn snapshot_offset_pages_match_full_traversal_on_merge_graph() {
         let directory = tempfile::tempdir().unwrap();
         git(directory.path(), &["init", "-b", "main"]);
@@ -438,6 +459,20 @@ mod tests {
         );
 
         let runtime = RepositoryRuntime::default();
+        let merge_oid = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(directory.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let merge_details = runtime
+            .commit_details(directory.path(), merge_oid.trim())
+            .expect("merge commit details use one deterministic parent");
+        assert_eq!(merge_details.files.len(), 1);
+        assert_eq!(merge_details.files[0].path, "side");
         let expected = runtime.history_page(directory.path(), 250, None).unwrap();
         let mut actual = Vec::new();
         let mut cursor = None;

@@ -405,7 +405,13 @@ fn allowed_show(arguments: &[&str]) -> bool {
         && arguments.iter().all(|argument| {
             matches!(
                 *argument,
-                "-s" | "-z" | "--format=" | "--name-status" | "--numstat" | "-M" | "--"
+                "-s" | "-z"
+                    | "--format="
+                    | "--first-parent"
+                    | "--name-status"
+                    | "--numstat"
+                    | "-M"
+                    | "--"
             ) || argument.starts_with("--format=")
                 || valid_object_id(argument)
         })
@@ -671,7 +677,16 @@ mod tests {
             ],
             vec!["log", "-g", "--format=%H", "refs/stash"],
             vec!["show", "-s", "-z", "--format=%H", oid, "--"],
-            vec!["show", "--format=", "--name-status", "-z", "-M", oid, "--"],
+            vec![
+                "show",
+                "--format=",
+                "--first-parent",
+                "--name-status",
+                "-z",
+                "-M",
+                oid,
+                "--",
+            ],
             vec![
                 "show",
                 "--format=",

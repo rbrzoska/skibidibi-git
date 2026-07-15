@@ -137,6 +137,24 @@ describe('DesktopIpc', () => {
     ).rejects.toThrow('unavailable outside the desktop application');
   });
 
+  it('does not pretend to amend commits outside Tauri', async () => {
+    await expect(
+      service.invoke('repository_amend_commit', {
+        repositoryId: 'example-repository',
+        operation: {
+          message: null,
+          confirmUpstreamRewrite: false,
+          expectedHead: 'abc123',
+          expectedHeadName: 'main',
+          expectedDetached: false,
+          expectedUnborn: false,
+          expectedIndexFingerprint: 'fixture-index',
+          expectedWorktreeFingerprint: 'fixture-worktree',
+        },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
   it('returns honest empty repository navigation outside Tauri', async () => {
     await expect(
       service.invoke('repository_navigation', { repositoryId: 'example-repository' }),
@@ -149,9 +167,66 @@ describe('DesktopIpc', () => {
         repositoryId: 'example-repository',
         operation: {
           fullName: 'refs/heads/feature',
+          expectedOid: '0123456789012345678901234567890123456789',
           stashOnDirty: false,
           stashMessage: null,
         },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('does not pretend to create branches outside Tauri', async () => {
+    await expect(
+      service.invoke('create_repository_branch', {
+        repositoryId: 'example-repository',
+        operation: {
+          name: 'feature/safe',
+          source: {
+            kind: 'remoteTracking',
+            fullName: 'refs/remotes/origin/feature/safe',
+            expectedOid: '0123456789012345678901234567890123456789',
+          },
+        },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('does not pretend to mutate stashes outside Tauri', async () => {
+    const precondition = {
+      expectedHead: '0123456789012345678901234567890123456789',
+      expectedHeadName: 'main',
+      expectedDetached: false,
+      expectedUnborn: false,
+      expectedIndexFingerprint: 'fixture-index',
+      expectedWorktreeFingerprint: 'fixture-worktree',
+    };
+    const stash = {
+      oid: 'abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+      selector: 'stash@{0}',
+    };
+
+    await expect(
+      service.invoke('repository_push_stash', {
+        repositoryId: 'example-repository',
+        operation: { message: 'WIP safe', includeUntracked: true, precondition },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+    await expect(
+      service.invoke('repository_apply_stash', {
+        repositoryId: 'example-repository',
+        operation: { stash, restoreIndex: true, precondition },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+    await expect(
+      service.invoke('repository_pop_stash', {
+        repositoryId: 'example-repository',
+        operation: { stash, restoreIndex: false, precondition },
+      }),
+    ).rejects.toThrow('unavailable outside the desktop application');
+    await expect(
+      service.invoke('repository_drop_stash', {
+        repositoryId: 'example-repository',
+        operation: { stash },
       }),
     ).rejects.toThrow('unavailable outside the desktop application');
   });
