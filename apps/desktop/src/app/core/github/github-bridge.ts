@@ -90,12 +90,32 @@ export interface GitHubPullRequestDetailRequest {
   readonly number: number;
 }
 
+export interface GitHubDeviceFlowStart {
+  readonly flowId: string;
+  readonly userCode: string;
+  readonly verificationUri: string;
+  readonly expiresAt: number;
+  readonly intervalSeconds: number;
+}
+
+export type GitHubDeviceFlowPollState = 'pending' | 'authorized' | 'expired' | 'denied';
+
+export interface GitHubDeviceFlowPoll {
+  readonly state: GitHubDeviceFlowPollState;
+  readonly nextPollAt: number | null;
+  readonly account: GitHubAccount | null;
+}
+
 /**
  * Narrow bridge used by Angular GitHub features. The desktop adapter owns token
  * storage and transport; consumers must never persist or expose a PAT.
  */
 export interface GitHubBridge {
   githubListAccounts(): Promise<readonly GitHubAccount[]>;
+  githubStartDeviceFlow(): Promise<GitHubDeviceFlowStart>;
+  githubPollDeviceFlow(request: { readonly flowId: string }): Promise<GitHubDeviceFlowPoll>;
+  githubCancelDeviceFlow(request: { readonly flowId: string }): Promise<{ readonly cancelled: boolean }>;
+  githubOpenDeviceVerification(request: { readonly flowId: string }): Promise<void>;
   githubConnectPat(request: { readonly token: string }): Promise<GitHubAccount>;
   githubDisconnectAccount(request: { readonly accountId: string }): Promise<{ readonly disconnected: boolean }>;
   githubListRepositories(request: { readonly accountId: string; readonly cursor: string | null; readonly pageSize: number }): Promise<GitHubRepositoryPage>;

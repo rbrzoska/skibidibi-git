@@ -415,6 +415,56 @@ export interface PullRepositoryResponse {
   readonly errorMessage: string | null;
 }
 
+export interface MergeRepositoryBranchRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly sourceFullName: string;
+    readonly expectedSourceOid: string;
+    readonly targetFullName: string;
+    readonly expectedTargetOid: string;
+    readonly autoStash: { readonly message: string } | null;
+  };
+}
+
+export interface MergeRepositoryBranchResponse {
+  readonly state: PullOperationState;
+  readonly headBefore: string;
+  readonly headAfter: string | null;
+  readonly status: RepositoryStatusResponse | null;
+  readonly autoStash: AutoStashOutcome;
+  readonly errorMessage: string | null;
+  readonly mutationMayHaveOccurred: boolean;
+}
+
+export interface PullInactiveBranchRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly branchFullName: string;
+    readonly expectedOid: string;
+    readonly expectedUpstream: string;
+  };
+}
+
+export interface PullInactiveBranchResponse {
+  readonly branchFullName: string;
+  readonly headBefore: string;
+  readonly headAfter: string;
+  readonly upstream: string;
+  readonly changed: boolean;
+}
+
+export interface WorktreeDirtyStateResponse {
+  readonly branchFullName: string | null;
+  readonly worktreePath: string;
+  readonly dirty: boolean;
+  readonly changeCount: number;
+  readonly errorMessage: string | null;
+}
+
+export interface WorktreeDirtyStatesResponse {
+  readonly states: readonly WorktreeDirtyStateResponse[];
+}
+
 export type PushReadiness = 'noUpstream' | 'upToDate' | 'ready' | 'behind' | 'diverged';
 
 export interface PushAnalysisResponse {
@@ -687,6 +737,20 @@ export interface GitHubAccountResponse {
   readonly lastValidatedAt: number | null;
 }
 
+export interface GitHubDeviceFlowStartResponse {
+  readonly flowId: string;
+  readonly userCode: string;
+  readonly verificationUri: string;
+  readonly expiresAt: number;
+  readonly intervalSeconds: number;
+}
+
+export interface GitHubDeviceFlowPollResponse {
+  readonly state: 'pending' | 'authorized' | 'expired' | 'denied';
+  readonly nextPollAt: number | null;
+  readonly account: GitHubAccountResponse | null;
+}
+
 export interface GitHubRepositoryResponse {
   readonly id: string;
   readonly owner: string;
@@ -823,6 +887,18 @@ export interface DesktopIpcContract {
     readonly request: PullRepositoryRequest;
     readonly response: PullRepositoryResponse;
   };
+  readonly repository_merge_branch: {
+    readonly request: MergeRepositoryBranchRequest;
+    readonly response: MergeRepositoryBranchResponse;
+  };
+  readonly repository_pull_inactive_branch: {
+    readonly request: PullInactiveBranchRequest;
+    readonly response: PullInactiveBranchResponse;
+  };
+  readonly repository_worktree_dirty_states: {
+    readonly request: RepositoryNavigationRequest;
+    readonly response: WorktreeDirtyStatesResponse;
+  };
   readonly repository_push: {
     readonly request: PushRepositoryRequest;
     readonly response: PushRepositoryResponse;
@@ -890,6 +966,22 @@ export interface DesktopIpcContract {
   readonly github_list_accounts: {
     readonly request: Record<string, never>;
     readonly response: readonly GitHubAccountResponse[];
+  };
+  readonly github_start_device_flow: {
+    readonly request: Record<string, never>;
+    readonly response: GitHubDeviceFlowStartResponse;
+  };
+  readonly github_poll_device_flow: {
+    readonly request: { readonly flowId: string };
+    readonly response: GitHubDeviceFlowPollResponse;
+  };
+  readonly github_cancel_device_flow: {
+    readonly request: { readonly flowId: string };
+    readonly response: { readonly cancelled: boolean };
+  };
+  readonly github_open_device_verification: {
+    readonly request: { readonly flowId: string };
+    readonly response: void;
   };
   readonly github_connect_pat: {
     readonly request: { readonly token: string };
@@ -1036,6 +1128,9 @@ export class DesktopIpc implements DesktopIpcClient {
     if (
       command === 'repository_push_analysis' ||
       command === 'repository_pull' ||
+      command === 'repository_merge_branch' ||
+      command === 'repository_pull_inactive_branch' ||
+      command === 'repository_worktree_dirty_states' ||
       command === 'repository_push' ||
       command === 'repository_set_upstream'
     ) {
@@ -1166,6 +1261,10 @@ export class DesktopIpc implements DesktopIpcClient {
     if (
       command === 'clone_repository' ||
       command === 'repository_maintenance_stats' ||
+      command === 'github_start_device_flow' ||
+      command === 'github_poll_device_flow' ||
+      command === 'github_cancel_device_flow' ||
+      command === 'github_open_device_verification' ||
       command === 'github_connect_pat' ||
       command === 'github_disconnect_account' ||
       command === 'github_list_repositories' ||

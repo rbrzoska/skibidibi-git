@@ -4,6 +4,8 @@ import { DESKTOP_IPC } from '../ipc/desktop-ipc';
 import type {
   GitHubAccount,
   GitHubBridge,
+  GitHubDeviceFlowPoll,
+  GitHubDeviceFlowStart,
   GitHubListPullRequestsRequest,
   GitHubListPullRequestsResponse,
   GitHubPullRequestDetail,
@@ -18,6 +20,24 @@ export class DesktopGitHubBridge implements GitHubBridge {
   async githubListAccounts(): Promise<readonly GitHubAccount[]> {
     const accounts = await this.ipc.invoke('github_list_accounts', {});
     return accounts.map(({ id, login, host, avatarUrl, state }) => ({ id, login, host, avatarUrl, state }));
+  }
+
+  githubStartDeviceFlow(): Promise<GitHubDeviceFlowStart> {
+    return this.ipc.invoke('github_start_device_flow', {});
+  }
+
+  githubPollDeviceFlow(request: { readonly flowId: string }): Promise<GitHubDeviceFlowPoll> {
+    return this.ipc.invoke('github_poll_device_flow', request);
+  }
+
+  githubCancelDeviceFlow(
+    request: { readonly flowId: string },
+  ): Promise<{ readonly cancelled: boolean }> {
+    return this.ipc.invoke('github_cancel_device_flow', request);
+  }
+
+  githubOpenDeviceVerification(request: { readonly flowId: string }): Promise<void> {
+    return this.ipc.invoke('github_open_device_verification', request);
   }
 
   async githubConnectPat(request: { readonly token: string }): Promise<GitHubAccount> {

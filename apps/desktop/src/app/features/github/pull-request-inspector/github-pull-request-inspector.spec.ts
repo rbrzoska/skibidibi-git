@@ -16,7 +16,9 @@ describe('GitHubPullRequestInspector', () => {
       reviewThreads: [{ id: 'thread-1', path: 'src/app.ts', line: 12, resolved: false, outdated: true, comments: [comment] }],
     };
     const bridge: GitHubBridge = {
-      githubListAccounts: vi.fn(), githubConnectPat: vi.fn(), githubDisconnectAccount: vi.fn(),
+      githubListAccounts: vi.fn(), githubStartDeviceFlow: vi.fn(), githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(), githubConnectPat: vi.fn(), githubDisconnectAccount: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(), githubPullRequestDetail: vi.fn().mockResolvedValue(detail),
     };

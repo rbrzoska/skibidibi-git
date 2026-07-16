@@ -46,6 +46,10 @@ describe('SettingsPage', () => {
   };
   const githubBridge: GitHubBridge = {
     githubListAccounts: vi.fn().mockResolvedValue([]),
+    githubStartDeviceFlow: vi.fn(),
+    githubPollDeviceFlow: vi.fn(),
+    githubCancelDeviceFlow: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
     githubListRepositories: vi.fn().mockResolvedValue({ repositories: [], nextCursor: null }),
     githubConnectPat: vi.fn(),
     githubDisconnectAccount: vi.fn(),

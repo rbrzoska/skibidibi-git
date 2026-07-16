@@ -16,6 +16,34 @@ pub enum GitHubAccountState {
     Unavailable,
 }
 
+/// Public state of a GitHub Device Flow session. Secret provider codes never cross the UI
+/// boundary; the native layer identifies a session with an application-generated `flow_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHubDeviceFlowState {
+    Pending,
+    Authorized,
+    Expired,
+    Denied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubDeviceFlowStart {
+    pub flow_id: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_at: i64,
+    pub interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubDeviceFlowPoll {
+    pub state: GitHubDeviceFlowState,
+    pub next_poll_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubAccountSummary {
@@ -172,4 +200,27 @@ pub struct GitHubPatValidation {
     pub user: GitHubUser,
     pub scopes: Vec<String>,
     pub rate_limit: GitHubRateLimit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_flow_contract_is_camel_case_and_contains_no_provider_secret() {
+        let value = serde_json::to_value(GitHubDeviceFlowStart {
+            flow_id: "local-flow-id".to_owned(),
+            user_code: "ABCD-1234".to_owned(),
+            verification_uri: "https://github.com/login/device".to_owned(),
+            expires_at: 1_800_000_000,
+            interval_seconds: 5,
+        })
+        .unwrap();
+
+        assert_eq!(value["flowId"], "local-flow-id");
+        assert_eq!(value["userCode"], "ABCD-1234");
+        assert_eq!(value["intervalSeconds"], 5);
+        assert!(value.get("deviceCode").is_none());
+        assert!(value.get("accessToken").is_none());
+    }
 }

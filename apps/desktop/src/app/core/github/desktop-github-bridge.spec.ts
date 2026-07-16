@@ -57,6 +57,40 @@ describe('DesktopGitHubBridge', () => {
     expect(invoke).toHaveBeenCalledWith('github_connect_pat', { token: 'test-token' });
   });
 
+  it('uses opaque flow identifiers for the OAuth device flow IPC contract', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce({
+        flowId: 'flow-1',
+        userCode: 'ABCD-EFGH',
+        verificationUri: 'https://github.com/login/device',
+        expiresAt: 1_800_000_000,
+        intervalSeconds: 5,
+      })
+      .mockResolvedValueOnce({ state: 'pending', nextPollAt: 1_700_000_005, account: null })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ cancelled: true });
+    TestBed.configureTestingModule({
+      providers: [
+        DesktopGitHubBridge,
+        { provide: DESKTOP_IPC, useValue: { invoke } as unknown as DesktopIpcClient },
+      ],
+    });
+    const bridge = TestBed.inject(DesktopGitHubBridge);
+
+    const started = await bridge.githubStartDeviceFlow();
+    await bridge.githubPollDeviceFlow({ flowId: started.flowId });
+    await bridge.githubOpenDeviceVerification({ flowId: started.flowId });
+    await bridge.githubCancelDeviceFlow({ flowId: started.flowId });
+
+    expect(invoke.mock.calls).toEqual([
+      ['github_start_device_flow', {}],
+      ['github_poll_device_flow', { flowId: 'flow-1' }],
+      ['github_open_device_verification', { flowId: 'flow-1' }],
+      ['github_cancel_device_flow', { flowId: 'flow-1' }],
+    ]);
+    expect(JSON.stringify(invoke.mock.calls)).not.toContain('deviceCode');
+  });
+
   it('lists authenticated repositories through the account-scoped IPC contract', async () => {
     const page = {
       repositories: [{

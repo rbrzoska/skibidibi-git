@@ -28,6 +28,10 @@ describe('CloneRepositoryDialog', () => {
     const ipc: DesktopIpcClient = { invoke: invoke as DesktopIpcClient['invoke'] };
     const github: GitHubBridge = {
       githubListAccounts: vi.fn().mockResolvedValue([]),
+      githubStartDeviceFlow: vi.fn(),
+      githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn().mockResolvedValue({ repositories: [], nextCursor: null }),

@@ -11,6 +11,7 @@ import {
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../core/github';
 import { branchExpansionStorageKey } from './branch-expansion-state';
+import { releaseBranchStorageKey } from './release-branch-state';
 import { WorkspaceHistory } from './workspace-history';
 
 const rememberedRepository = {
@@ -162,6 +163,7 @@ describe('WorkspaceHistory', () => {
     globalThis.localStorage.removeItem('skibidibi-git.workspace.current-only.skibidibi-git');
     globalThis.localStorage.removeItem('skibidibi-git.workspace.auto-fetch.skibidibi-git');
     globalThis.localStorage.removeItem('skibidibi-git.workspace.live-changes.skibidibi-git');
+    globalThis.localStorage.removeItem(releaseBranchStorageKey('skibidibi-git'));
   });
 
   async function createFixture(
@@ -171,6 +173,10 @@ describe('WorkspaceHistory', () => {
     const ipc = { invoke } as unknown as DesktopIpcClient;
     const githubBridge: GitHubBridge = {
       githubListAccounts: async () => [],
+      githubStartDeviceFlow: async () => { throw new Error('not used'); },
+      githubPollDeviceFlow: async () => { throw new Error('not used'); },
+      githubCancelDeviceFlow: async () => ({ cancelled: false }),
+      githubOpenDeviceVerification: async () => undefined,
       githubConnectPat: async () => { throw new Error('not used'); },
       githubDisconnectAccount: async () => ({ disconnected: false }),
       githubListRepositories: async () => ({ repositories: [], nextCursor: null }),
@@ -233,6 +239,45 @@ describe('WorkspaceHistory', () => {
         ],
         worktrees: [{ path: '/work/feature-tree', head: 'def', branch: 'rb/feature', detached: false, bare: false, locked: false, lockReason: null, prunable: false, prunableReason: null }],
         stashes: [],
+      });
+    }
+    if (command === 'repository_worktree_dirty_states') {
+      return Promise.resolve({
+        states: [{
+          branchFullName: 'refs/heads/rb/feature',
+          worktreePath: '/work/feature-tree',
+          dirty: true,
+          changeCount: 3,
+          errorMessage: null,
+        }],
+      });
+    }
+    if (command === 'repository_merge_branch') {
+      return Promise.resolve({
+        state: 'succeeded',
+        headBefore: 'abc',
+        headAfter: 'def',
+        status: { ...repositoryStatus(), entries: [] },
+        autoStash: {
+          create: 'created',
+          stash: { oid: 'stash-auto', selector: 'stash@{0}' },
+          restore: 'applied',
+          cleanup: 'dropped',
+          createError: null,
+          restoreError: null,
+          cleanupError: null,
+        },
+        errorMessage: null,
+        mutationMayHaveOccurred: false,
+      });
+    }
+    if (command === 'repository_pull_inactive_branch') {
+      return Promise.resolve({
+        branchFullName: 'refs/heads/rb/feature',
+        headBefore: 'def',
+        headAfter: 'fed',
+        upstream: 'origin/rb/feature',
+        changed: true,
       });
     }
     if (command === 'switch_repository_branch') {
@@ -1194,6 +1239,176 @@ describe('WorkspaceHistory', () => {
     (remote.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
     expect(remote.textContent).toContain('main');
+  });
+
+  it('marks an exact local ref as release from the keyboard-accessible context menu', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const currentActions = fixture.nativeElement.querySelector(
+      '[aria-label="Actions for main"]',
+    ) as HTMLButtonElement;
+
+    currentActions.click();
+    fixture.detectChanges();
+    const markRelease = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>(
+      '.branch-context-menu button',
+    )].find((button) => button.textContent?.includes('Mark as release')) as HTMLButtonElement;
+    expect(markRelease).toBeTruthy();
+    markRelease.click();
+    fixture.detectChanges();
+
+    expect(globalThis.localStorage.getItem(releaseBranchStorageKey('skibidibi-git'))).toBe(
+      'refs/heads/main',
+    );
+    expect(fixture.nativeElement.querySelector('[title="Release branch"]')).toBeTruthy();
+    expect(fixture.nativeElement.textContent).toContain('is now the release branch');
+  });
+
+  it('renders a lazy dirty marker only for the branch attached to a dirty worktree', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(local.querySelector('[title="3 uncommitted changes in its worktree"]')).toBeTruthy();
+    });
+    expect(local.querySelectorAll('.dirty-token')).toHaveLength(2);
+    expect(
+      (local.querySelector('.pinned-current') as HTMLElement).querySelector('.dirty-token'),
+    ).toBeTruthy();
+  });
+
+  it('uses an in-app source-to-target confirmation and forwards auto-stash to merge', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm');
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const mergeIntoActive = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>(
+      '.branch-context-menu button',
+    )].find((button) => button.textContent?.includes('Merge into active branch')) as HTMLButtonElement;
+    mergeIntoActive.click();
+
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.merge-confirmation')).toBeTruthy();
+    });
+    const route = fixture.nativeElement.querySelector('.merge-route') as HTMLElement;
+    expect(route.textContent).toContain('rb/feature');
+    expect(route.textContent).toContain('main');
+    expect((fixture.nativeElement.querySelector('.merge-autostash input') as HTMLInputElement).checked).toBe(true);
+
+    (fixture.nativeElement.querySelector('#confirm-branch-merge') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('repository_merge_branch', {
+        repositoryId: 'skibidibi-git',
+        operation: expect.objectContaining({
+          sourceFullName: 'refs/heads/rb/feature',
+          targetFullName: 'refs/heads/main',
+          autoStash: expect.objectContaining({ message: expect.stringContaining('WIP') }),
+        }),
+      });
+    });
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('fast-forwards an inactive branch in the background without switching worktrees', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+            { kind: 'local', fullName: 'refs/heads/rb/feature', name: 'rb/feature', oid: 'def', current: false, upstream: 'origin/rb/feature', ahead: 0, behind: 2, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [],
+          stashes: [],
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const pull = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>(
+      '.branch-context-menu button',
+    )].find((button) => button.textContent?.includes('Pull branch (FF-only)')) as HTMLButtonElement;
+    pull.click();
+
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('repository_pull_inactive_branch', {
+        repositoryId: 'skibidibi-git',
+        operation: {
+          branchFullName: 'refs/heads/rb/feature',
+          expectedOid: 'def',
+          expectedUpstream: 'origin/rb/feature',
+        },
+      });
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch')).toHaveLength(0);
+  });
+
+  it('confirms main into a noncurrent target once, then switches and merges fresh refs', async () => {
+    let switched = false;
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'switch_repository_branch') {
+        switched = true;
+        return defaultIpc(command, request);
+      }
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: switched
+            ? [
+                { kind: 'local', fullName: 'refs/heads/rb/feature', name: 'rb/feature', oid: 'fresh-feature', current: true, upstream: 'origin/rb/feature', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+                { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'fresh-main', current: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+              ]
+            : [
+                { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+                { kind: 'local', fullName: 'refs/heads/rb/feature', name: 'rb/feature', oid: 'def', current: false, upstream: 'origin/rb/feature', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+              ],
+          worktrees: [],
+          stashes: [],
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const confirm = vi.spyOn(globalThis, 'confirm');
+    const { fixture, invoke } = await createFixture(ipc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const mergeMain = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>(
+      '.branch-context-menu button',
+    )].find((button) => button.textContent?.includes('Merge main into this branch')) as HTMLButtonElement;
+    mergeMain.click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.merge-confirmation')).toBeTruthy();
+    });
+    (fixture.nativeElement.querySelector('#confirm-branch-merge') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('repository_merge_branch', {
+        repositoryId: 'skibidibi-git',
+        operation: expect.objectContaining({
+          sourceFullName: 'refs/heads/main',
+          expectedSourceOid: 'fresh-main',
+          targetFullName: 'refs/heads/rb/feature',
+          expectedTargetOid: 'fresh-feature',
+        }),
+      });
+    });
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(commands.indexOf('switch_repository_branch')).toBeLessThan(commands.indexOf('repository_merge_branch'));
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it('keeps local and remote folders with the same path independently collapsible', async () => {

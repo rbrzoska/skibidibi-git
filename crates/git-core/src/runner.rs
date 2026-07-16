@@ -360,6 +360,7 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ] => true,
         ["rev-parse", "--is-inside-work-tree"] => true,
         ["rev-parse", "--verify", "--quiet", "HEAD"] => true,
+        ["rev-parse", "--verify", "ORIG_HEAD^{commit}"] => true,
         ["symbolic-ref", "--quiet", "--short", "HEAD"] => true,
         ["config", "--get", key] => safe_config_key(key),
         ["remote"] => true,
@@ -374,6 +375,9 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ["ls-files", "--stage", "-z"] => true,
         ["cat-file", "blob", oid] => valid_object_id(oid),
         ["merge-base", "--is-ancestor", oid, "HEAD"] => valid_object_id(oid),
+        ["merge-base", "--is-ancestor", ancestor, descendant] => {
+            valid_object_id(ancestor) && valid_object_id(descendant)
+        }
         _ => false,
     }
 }
@@ -723,6 +727,19 @@ mod tests {
             vec!["show", "--format=", oid, "--"],
             vec!["log", "-c", "diff.external=unsafe", oid],
             vec!["config", "--get", "diff.external.command"],
+            vec!["merge-base", "--is-ancestor", "0123456", "HEAD"],
+            vec![
+                "merge-base",
+                "--is-ancestor",
+                "0123456789012345678901234567890123456789",
+                "--all",
+            ],
+            vec![
+                "merge-base",
+                "--is-ancestor",
+                "012345678901234567890123456789012345678g",
+                "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
         ];
 
         for arguments in forbidden {
@@ -740,6 +757,7 @@ mod tests {
     #[test]
     fn read_only_policy_preserves_fixed_status_metadata_history_and_navigation_queries() {
         let oid = "0123456789012345678901234567890123456789";
+        let descendant = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
         let allowed = [
             vec![
                 "status",
@@ -758,6 +776,8 @@ mod tests {
                 "refs/remotes",
             ],
             vec!["worktree", "list", "--porcelain", "-z"],
+            vec!["rev-parse", "--verify", "ORIG_HEAD^{commit}"],
+            vec!["merge-base", "--is-ancestor", oid, descendant],
             vec![
                 "log",
                 "-z",

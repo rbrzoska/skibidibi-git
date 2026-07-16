@@ -1,4 +1,78 @@
 <main class="workspace">
+  @if (branchContextMenu(); as menu) {
+    <div
+      id="branch-context-menu"
+      class="branch-context-menu"
+      role="menu"
+      tabindex="-1"
+      [attr.aria-label]="'Actions for ' + menu.branch.name"
+      [style.left.px]="menu.x"
+      [style.top.px]="menu.y"
+    >
+      <p>{{ menu.branch.name }}</p>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="toggleReleaseBranch(menu.branch)">
+        <span aria-hidden="true">◆</span>{{ isReleaseBranch(menu.branch) ? 'Unmark release' : 'Mark as release' }}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        [disabled]="menu.branch.current || workspaceActionBusy()"
+        [title]="menu.branch.current ? 'This is already the active branch.' : 'Merge this branch into the active branch.'"
+        (click)="mergeSelectedIntoActive(menu.branch)"
+      ><span aria-hidden="true">⑂</span>Merge into active branch</button>
+      <button
+        type="button"
+        role="menuitem"
+        [disabled]="!canMergeInto(menu.branch, releaseBranch())"
+        [title]="releaseBranch() === null ? 'Mark a local branch as release first.' : isReleaseBranch(menu.branch) ? 'The selected branch is the release branch.' : 'Switch safely when needed, then merge the release branch.'"
+        (click)="mergeReleaseIntoBranch(menu.branch)"
+      ><span aria-hidden="true">◆</span>Merge {{ releaseBranch()?.name ?? 'release' }} into this branch</button>
+      <button
+        type="button"
+        role="menuitem"
+        [disabled]="!canMergeInto(menu.branch, primaryBranch())"
+        [title]="primaryBranch() === null ? 'No local main or master branch exists.' : menu.branch.fullName === primaryBranch()?.fullName ? 'The selected branch is the primary branch.' : 'Switch safely when needed, then merge the primary branch.'"
+        (click)="mergePrimaryIntoBranch(menu.branch)"
+      ><span aria-hidden="true">⌂</span>Merge {{ primaryBranch()?.name ?? 'main/master' }} into this branch</button>
+      <button
+        type="button"
+        role="menuitem"
+        [disabled]="menu.branch.upstream === null || menu.branch.upstreamGone || workspaceActionBusy()"
+        [title]="menu.branch.current ? 'Pull the active branch using the selected toolbar strategy.' : menu.branch.upstream === null ? 'This branch has no upstream.' : menu.branch.upstreamGone ? 'The configured upstream no longer exists.' : 'Background pull is fast-forward only and never switches the visible worktree.'"
+        (click)="pullInactiveBranch(menu.branch)"
+      ><span aria-hidden="true">↓</span>{{ menu.branch.current ? 'Pull active branch' : 'Pull branch (FF-only)' }}</button>
+    </div>
+  }
+  @if (mergeConfirmation(); as merge) {
+    <dialog
+      #referenceMergeDialog
+      class="reference-confirmation merge-confirmation"
+      aria-labelledby="branch-merge-title"
+      aria-describedby="branch-merge-description"
+      (cancel)="$event.preventDefault(); cancelMerge()"
+    >
+      <p class="eyebrow"><span aria-hidden="true">⑂</span> branch merge</p>
+      <h2 id="branch-merge-title">Merge branches?</h2>
+      <div id="branch-merge-description" class="reference-confirmation-description merge-route">
+        <span><small>Source</small><strong>{{ merge.source.name }}</strong></span>
+        <span aria-hidden="true">→</span>
+        <span><small>Target</small><strong>{{ merge.target.name }}</strong></span>
+      </div>
+      @if (merge.switchRequired) {
+        <p class="merge-note">The app will first safely switch the active worktree to <strong>{{ merge.target.name }}</strong>. If local changes block the switch, the existing auto-stash recovery will be offered.</p>
+      }
+      @if (merge.dirty) {
+        <label class="merge-autostash">
+          <input type="checkbox" [checked]="mergeAutoStash()" (change)="setMergeAutoStash($any($event.target).checked)" />
+          <span><strong>Auto-stash uncommitted changes</strong><small>Restore them after the merge when Git can do so safely.</small></span>
+        </label>
+      }
+      <div class="reference-confirmation-actions">
+        <button id="cancel-branch-merge" type="button" [disabled]="branchContextMutation() !== null" (click)="cancelMerge()"><span aria-hidden="true">×</span>Cancel</button>
+        <button id="confirm-branch-merge" type="button" [disabled]="branchContextMutation() !== null" (click)="confirmMerge()"><span aria-hidden="true">⑂</span>{{ branchContextMutation() ? 'Merging…' : 'Merge' }}</button>
+      </div>
+    </dialog>
+  }
   @if (deletionConfirmation(); as confirmation) {
       <dialog
         #referenceDeletionDialog
@@ -189,15 +263,20 @@
           <ul class="branch-tree" aria-label="Local branches">
             @if (currentLocalBranch(); as currentBranch) {
               <li>
-                <button type="button" class="tree-row branch-row active pinned-current" disabled aria-current="true" [title]="currentBranch.name + ' (current branch)'">
-                  <span class="branch-icon" aria-hidden="true">⑂</span>
-                  <span class="tree-label">{{ currentBranch.name }}</span>
-                  <span class="branch-badges">
-                    @if (currentBranch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ currentBranch.ahead }}</small> }
-                    @if (currentBranch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ currentBranch.behind }}</small> }
-                    @if (currentBranch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
-                  </span>
-                </button>
+                <div class="tree-action-row" (contextmenu)="openBranchContextMenu($event, currentBranch, $any($event.currentTarget))">
+                  <button type="button" class="tree-row branch-row active pinned-current" disabled aria-current="true" [title]="currentBranch.name + ' (current branch)'">
+                    <span class="branch-icon" aria-hidden="true">⑂</span>
+                    <span class="tree-label">{{ currentBranch.name }}</span>
+                    <span class="branch-badges">
+                      @if (isReleaseBranch(currentBranch)) { <small class="release-token" title="Release branch"><span aria-hidden="true">◆</span><span class="sr-only">Release branch</span></small> }
+                      @if (branchDirtyChangeCount(currentBranch) > 0) { <small class="dirty-token" [title]="branchDirtyChangeCount(currentBranch) + ' uncommitted changes in its worktree'"><span aria-hidden="true">✦</span><span class="sr-only">Uncommitted changes</span></small> }
+                      @if (currentBranch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ currentBranch.ahead }}</small> }
+                      @if (currentBranch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ currentBranch.behind }}</small> }
+                      @if (currentBranch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
+                    </span>
+                  </button>
+                  <button type="button" class="branch-menu-trigger" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Actions for ' + currentBranch.name" aria-haspopup="menu" [attr.aria-expanded]="branchContextMenu()?.branch?.fullName === currentBranch.fullName" (click)="openBranchContextMenu(null, currentBranch, $any($event.currentTarget))">⋯</button>
+                </div>
               </li>
             }
             @for (node of currentOnly() ? [] : localBranchTree(); track node.kind + ':' + node.path) {
@@ -215,7 +294,7 @@
                     <small>{{ node.branchCount }}</small>
                   </button>
                 } @else {
-                  <div class="tree-action-row">
+                  <div class="tree-action-row" (contextmenu)="openBranchContextMenu($event, node.branch, $any($event.currentTarget))">
                     <button
                       type="button"
                       class="tree-row branch-row"
@@ -229,12 +308,15 @@
                         <small>switching…</small>
                       } @else {
                         <span class="branch-badges">
+                          @if (isReleaseBranch(node.branch)) { <small class="release-token" title="Release branch"><span aria-hidden="true">◆</span><span class="sr-only">Release branch</span></small> }
+                          @if (branchDirtyChangeCount(node.branch) > 0) { <small class="dirty-token" [title]="branchDirtyChangeCount(node.branch) + ' uncommitted changes in its worktree'"><span aria-hidden="true">✦</span><span class="sr-only">Uncommitted changes</span></small> }
                           @if (node.branch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ node.branch.ahead }}</small> }
                           @if (node.branch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ node.branch.behind }}</small> }
                           @if (node.branch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
                         </span>
                       }
                     </button>
+                    <button type="button" class="branch-menu-trigger" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Actions for ' + node.branch.name" aria-haspopup="menu" [attr.aria-expanded]="branchContextMenu()?.branch?.fullName === node.branch.fullName" (click)="openBranchContextMenu(null, node.branch, $any($event.currentTarget))">⋯</button>
                     <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Delete local branch ' + node.branch.name" [title]="'Delete local branch ' + node.branch.name" (click)="requestBranchDeletion(node.branch, $any($event.currentTarget))">
                       {{ deletingBranch() === node.branch.fullName ? '…' : '×' }}
                     </button>

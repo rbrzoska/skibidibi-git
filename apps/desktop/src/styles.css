@@ -298,3 +298,24 @@ button {
 .workspace .diff-row.file-header { position: sticky; top: 3.75rem; z-index: 1; border-block: 1px solid #30363d; color: #e6edf3; background: #161b22; font-weight: 700; }
 .workspace .diff-row.metadata { color: #8b949e; background: #161b2280; }
 .workspace .diff-row.omitted-range { border-block: 1px solid #30363d; color: #8b949e; background: #161b22; font-style: italic; }
+.workspace .branch-badges .release-token { color: #d2a8ff; background: #8957e529; }
+.workspace .branch-badges .dirty-token { color: #f2cc60; background: #9e6a032e; }
+.workspace .tree-action-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+.workspace .branch-menu-trigger { display: grid; place-items: center; width: 1.55rem; height: 1.55rem; border: 0; border-radius: .3rem; padding: 0; color: #8b949e; background: transparent; font-size: 1rem; line-height: 1; cursor: pointer; }
+.workspace .branch-menu-trigger:hover:not(:disabled), .workspace .branch-menu-trigger:focus-visible, .workspace .branch-menu-trigger[aria-expanded="true"] { outline: 0; color: #fff; background: #21262d; }
+.workspace .branch-menu-trigger:disabled { cursor: not-allowed; opacity: .45; }
+.workspace .branch-context-menu { position: fixed; z-index: 50; display: grid; width: min(15rem, calc(100vw - 1rem)); overflow: hidden; border: 1px solid #484f58; border-radius: .45rem; padding: .3rem; box-shadow: 0 .75rem 2rem #010409cc; background: #161b22; }
+.workspace .branch-context-menu p { margin: 0 .35rem .25rem; padding: .35rem .2rem .45rem; overflow: hidden; border-bottom: 1px solid #30363d; color: #8b949e; font-size: .68rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.workspace .branch-context-menu button { display: grid; grid-template-columns: 1rem minmax(0, 1fr); align-items: center; gap: .35rem; width: 100%; border: 0; border-radius: .3rem; padding: .38rem .45rem; color: #c9d1d9; background: transparent; font: inherit; font-size: .72rem; text-align: left; cursor: pointer; }
+.workspace .branch-context-menu button:hover:not(:disabled), .workspace .branch-context-menu button:focus-visible { outline: 0; color: #fff; background: #1f6feb33; }
+.workspace .branch-context-menu button:disabled { cursor: not-allowed; opacity: .42; }
+.workspace .merge-confirmation { max-width: 28rem; }
+.workspace .merge-route { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: .7rem; padding: .65rem; border: 1px solid #30363d; border-radius: .45rem; background: #0d1117; }
+.workspace .merge-route span { display: grid; min-width: 0; gap: .15rem; }
+.workspace .merge-route small { color: #8b949e; font-size: .62rem; text-transform: uppercase; }
+.workspace .merge-route strong { overflow: hidden; color: #e6edf3; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+.workspace .merge-note { margin: .65rem 0 0; color: #b1bac4; font-size: .72rem; line-height: 1.45; }
+.workspace .merge-autostash { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: .55rem; margin-top: .65rem; border: 1px solid #30363d; border-radius: .45rem; padding: .6rem; cursor: pointer; }
+.workspace .merge-autostash span { display: grid; gap: .15rem; }
+.workspace .merge-autostash strong { color: #e6edf3; font-size: .75rem; }
+.workspace .merge-autostash small { color: #8b949e; font-size: .68rem; line-height: 1.35; }

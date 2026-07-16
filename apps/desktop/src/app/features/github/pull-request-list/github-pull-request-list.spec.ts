@@ -12,7 +12,9 @@ describe('GitHubPullRequestList', () => {
       authoredByViewer: true, reviewRequestedFromViewer: true, unresolvedThreadCount: 2,
     };
     const bridge: GitHubBridge = {
-      githubListAccounts: vi.fn(), githubConnectPat: vi.fn(), githubDisconnectAccount: vi.fn(),
+      githubListAccounts: vi.fn(), githubStartDeviceFlow: vi.fn(), githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(), githubConnectPat: vi.fn(), githubDisconnectAccount: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn().mockResolvedValue({ pullRequests: [pullRequest], nextCursor: null }),
       githubPullRequestDetail: vi.fn().mockResolvedValue({ ...pullRequest, body: '', comments: [], reviewThreads: [] }),

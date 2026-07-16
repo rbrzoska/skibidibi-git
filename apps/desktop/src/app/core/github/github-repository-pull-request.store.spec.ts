@@ -33,6 +33,10 @@ describe('GitHubRepositoryPullRequestStore', () => {
   it('loads deduplicated cursor pages for the configured repository and account', async () => {
     const bridge: GitHubBridge = {
       githubListAccounts: vi.fn(),
+      githubStartDeviceFlow: vi.fn(),
+      githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
@@ -61,6 +65,10 @@ describe('GitHubRepositoryPullRequestStore', () => {
     let resolveOldDetail!: (value: GitHubPullRequestDetail) => void;
     const bridge: GitHubBridge = {
       githubListAccounts: vi.fn(),
+      githubStartDeviceFlow: vi.fn(),
+      githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),

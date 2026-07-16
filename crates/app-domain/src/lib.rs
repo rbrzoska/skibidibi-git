@@ -1,5 +1,6 @@
 mod branch_actions;
 mod branch_creation;
+mod branch_operations;
 mod clone;
 mod conflict_resolution;
 mod file_diff;
@@ -17,6 +18,10 @@ mod working_tree;
 
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use branch_creation::{BranchCreationSource, CreateBranchRequest, CreateBranchResult};
+pub use branch_operations::{
+    MergeBranchRequest, MergeBranchResult, MergeBranchState, PullInactiveBranchRequest,
+    PullInactiveBranchResult, WorktreeDirtyState,
+};
 pub use clone::{CloneRepositoryRequest, CloneRepositoryResult};
 pub use conflict_resolution::{
     ConflictFileDetail, ConflictFileDetailRequest, ConflictFileSummary, ConflictListResult,
@@ -25,7 +30,8 @@ pub use conflict_resolution::{
 };
 pub use file_diff::{FileDiff, FileDiffRequest};
 pub use github::{
-    GitHubAccountState, GitHubAccountSummary, GitHubApiResult, GitHubAuthKind, GitHubPage,
+    GitHubAccountState, GitHubAccountSummary, GitHubApiResult, GitHubAuthKind,
+    GitHubDeviceFlowPoll, GitHubDeviceFlowStart, GitHubDeviceFlowState, GitHubPage,
     GitHubPatValidation, GitHubRateLimit, GitHubRepository, GitHubUser, IssueComment,
     PullRequestDetail, PullRequestMergeability, PullRequestState, PullRequestSummary,
     ReviewComment, ReviewCommentSide, ReviewThread,

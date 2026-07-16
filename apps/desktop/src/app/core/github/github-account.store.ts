@@ -1,6 +1,10 @@
 import { Injectable, inject, signal } from '@angular/core';
 
-import { GITHUB_BRIDGE, type GitHubAccount } from './github-bridge';
+import {
+  GITHUB_BRIDGE,
+  type GitHubAccount,
+  type GitHubDeviceFlowStart,
+} from './github-bridge';
 
 export type GitHubAccountState =
   | { readonly kind: 'idle' }
@@ -8,19 +12,81 @@ export type GitHubAccountState =
   | { readonly kind: 'ready'; readonly accounts: readonly GitHubAccount[] }
   | { readonly kind: 'error'; readonly message: string };
 
+export type GitHubDeviceFlowState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'starting' }
+  | ({ readonly kind: 'waiting'; readonly nextPollAt: number } & GitHubDeviceFlowStart)
+  | { readonly kind: 'expired' }
+  | { readonly kind: 'denied' };
+
 @Injectable()
 export class GitHubAccountStore {
   private readonly bridge = inject(GITHUB_BRIDGE);
   private loadGeneration = 0;
   private mutationGeneration = 0;
+  private deviceFlowTimer: ReturnType<typeof setTimeout> | null = null;
 
   readonly state = signal<GitHubAccountState>({ kind: 'idle' });
   readonly connecting = signal(false);
+  readonly deviceFlow = signal<GitHubDeviceFlowState>({ kind: 'idle' });
   readonly disconnectingAccountId = signal<string | null>(null);
   readonly mutationError = signal('');
 
+  async startDeviceFlow(): Promise<void> {
+    if (this.connecting() || this.disconnectingAccountId() !== null || this.deviceFlow().kind === 'starting' || this.deviceFlow().kind === 'waiting') {
+      return;
+    }
+    ++this.loadGeneration;
+    const generation = ++this.mutationGeneration;
+    this.clearDeviceFlowTimer();
+    this.deviceFlow.set({ kind: 'starting' });
+    this.mutationError.set('');
+    try {
+      const flow = await this.bridge.githubStartDeviceFlow();
+      if (generation !== this.mutationGeneration) {
+        void this.bridge.githubCancelDeviceFlow({ flowId: flow.flowId }).catch(() => undefined);
+        return;
+      }
+      const nextPollAt = Date.now() + Math.max(1, flow.intervalSeconds) * 1_000;
+      this.deviceFlow.set({ kind: 'waiting', ...flow, nextPollAt });
+      this.scheduleDeviceFlowPoll(generation, nextPollAt);
+    } catch (error) {
+      if (generation === this.mutationGeneration) {
+        this.deviceFlow.set({ kind: 'idle' });
+        this.mutationError.set(errorMessage(error, 'GitHub sign-in could not be started.'));
+      }
+    }
+  }
+
+  async cancelDeviceFlow(): Promise<void> {
+    const flow = this.deviceFlow();
+    ++this.mutationGeneration;
+    this.clearDeviceFlowTimer();
+    this.deviceFlow.set({ kind: 'idle' });
+    if (flow.kind !== 'waiting') {
+      return;
+    }
+    try {
+      await this.bridge.githubCancelDeviceFlow({ flowId: flow.flowId });
+    } catch (error) {
+      this.mutationError.set(errorMessage(error, 'GitHub sign-in could not be cancelled cleanly.'));
+    }
+  }
+
+  async openDeviceVerification(): Promise<void> {
+    const flow = this.deviceFlow();
+    if (flow.kind !== 'waiting') {
+      return;
+    }
+    try {
+      await this.bridge.githubOpenDeviceVerification({ flowId: flow.flowId });
+    } catch (error) {
+      this.mutationError.set(errorMessage(error, 'The GitHub sign-in page could not be opened.'));
+    }
+  }
+
   async load(): Promise<void> {
-    if (this.connecting() || this.disconnectingAccountId() !== null) {
+    if (this.connecting() || this.disconnectingAccountId() !== null || this.deviceFlowActive()) {
       return;
     }
     const generation = ++this.loadGeneration;
@@ -39,7 +105,7 @@ export class GitHubAccountStore {
 
   async connectPat(token: string): Promise<boolean> {
     const normalized = token.trim();
-    if (normalized.length === 0 || this.connecting() || this.disconnectingAccountId() !== null) {
+    if (normalized.length === 0 || this.connecting() || this.disconnectingAccountId() !== null || this.deviceFlowActive()) {
       return false;
     }
     ++this.loadGeneration;
@@ -71,7 +137,7 @@ export class GitHubAccountStore {
   }
 
   async disconnect(accountId: string): Promise<void> {
-    if (accountId.length === 0 || this.connecting() || this.disconnectingAccountId() !== null) {
+    if (accountId.length === 0 || this.connecting() || this.disconnectingAccountId() !== null || this.deviceFlowActive()) {
       return;
     }
     ++this.loadGeneration;
@@ -105,6 +171,78 @@ export class GitHubAccountStore {
     ++this.mutationGeneration;
     this.connecting.set(false);
     this.disconnectingAccountId.set(null);
+    this.clearDeviceFlowTimer();
+    this.deviceFlow.set({ kind: 'idle' });
+  }
+
+  private scheduleDeviceFlowPoll(generation: number, nextPollAt: number): void {
+    this.clearDeviceFlowTimer();
+    this.deviceFlowTimer = setTimeout(() => {
+      this.deviceFlowTimer = null;
+      void this.pollDeviceFlow(generation);
+    }, Math.max(0, nextPollAt - Date.now()));
+  }
+
+  private async pollDeviceFlow(generation: number): Promise<void> {
+    const flow = this.deviceFlow();
+    if (generation !== this.mutationGeneration || flow.kind !== 'waiting') {
+      return;
+    }
+    if (Date.now() >= flow.expiresAt * 1_000) {
+      this.deviceFlow.set({ kind: 'expired' });
+      void this.bridge.githubCancelDeviceFlow({ flowId: flow.flowId }).catch(() => undefined);
+      return;
+    }
+    try {
+      const result = await this.bridge.githubPollDeviceFlow({ flowId: flow.flowId });
+      if (generation !== this.mutationGeneration) {
+        return;
+      }
+      if (result.state === 'authorized' && result.account !== null) {
+        const current = this.state();
+        const accounts = current.kind === 'ready' ? current.accounts : [];
+        this.state.set({
+          kind: 'ready',
+          accounts: [result.account, ...accounts.filter((candidate) => candidate.id !== result.account?.id)],
+        });
+        this.deviceFlow.set({ kind: 'idle' });
+        return;
+      }
+      if (result.state === 'authorized') {
+        this.deviceFlow.set({ kind: 'idle' });
+        this.mutationError.set('GitHub authorized the sign-in but returned no account. Try again.');
+        return;
+      }
+      if (result.state === 'expired' || result.state === 'denied') {
+        this.deviceFlow.set({ kind: result.state });
+        return;
+      }
+      const fallbackNextPollAt = Date.now() + Math.max(1, flow.intervalSeconds) * 1_000;
+      const nextPollAt = result.nextPollAt === null
+        ? fallbackNextPollAt
+        : Math.max(fallbackNextPollAt, result.nextPollAt * 1_000);
+      const updated = { ...flow, nextPollAt };
+      this.deviceFlow.set(updated);
+      this.scheduleDeviceFlowPoll(generation, nextPollAt);
+    } catch (error) {
+      if (generation === this.mutationGeneration) {
+        void this.bridge.githubCancelDeviceFlow({ flowId: flow.flowId }).catch(() => undefined);
+        this.deviceFlow.set({ kind: 'idle' });
+        this.mutationError.set(errorMessage(error, 'GitHub sign-in could not be completed.'));
+      }
+    }
+  }
+
+  private clearDeviceFlowTimer(): void {
+    if (this.deviceFlowTimer !== null) {
+      clearTimeout(this.deviceFlowTimer);
+      this.deviceFlowTimer = null;
+    }
+  }
+
+  private deviceFlowActive(): boolean {
+    const state = this.deviceFlow();
+    return state.kind === 'starting' || state.kind === 'waiting';
   }
 }
 

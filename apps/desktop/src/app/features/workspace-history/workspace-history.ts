@@ -20,6 +20,8 @@ import {
   type ConflictFileSummary,
   type ConflictResolution,
   type IndexAction,
+  type MergeRepositoryBranchResponse,
+  type PullInactiveBranchResponse,
   type PullRepositoryResponse,
   type PullStrategy,
   type PushAnalysisResponse,
@@ -35,6 +37,8 @@ import {
   type StashChangedFile,
   type StashFileSource,
   type SwitchRepositoryBranchResponse,
+  type WorktreeDirtyStateResponse,
+  type WorktreeDirtyStatesResponse,
   type WorktreeRemovalMode,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
@@ -61,6 +65,11 @@ import {
   type WorkingTreeFile,
   type WorkingTreePrimaryStatus,
 } from './working-tree-summary';
+import {
+  readReleaseBranch,
+  writeReleaseBranch,
+  type ReleaseBranchStorage,
+} from './release-branch-state';
 import {
   AUTO_FETCH_INTERVAL_MS,
   LIVE_STATUS_INTERVAL_MS,
@@ -123,6 +132,19 @@ type FileDiffState =
       readonly response: Pick<RepositoryFileDiffResponse, 'path' | 'patch' | 'binary' | 'truncated'>;
     }
   | { readonly kind: 'error'; readonly path: string; readonly oldPath: string | null; readonly message: string };
+interface BranchContextMenu {
+  readonly branch: RepositoryBranch;
+  readonly x: number;
+  readonly y: number;
+  readonly returnFocus: HTMLElement;
+}
+interface MergeConfirmation {
+  readonly source: RepositoryBranch;
+  readonly target: RepositoryBranch;
+  readonly switchRequired: boolean;
+  readonly dirty: boolean;
+  readonly returnFocus: HTMLElement;
+}
 
 const HISTORY_PAGE_SIZE = 50;
 const MAX_RENDERED_DIFF_ROWS = 20_000;
@@ -160,6 +182,7 @@ export class WorkspaceHistory implements OnDestroy {
   private pushAnalysisRequestGeneration = 0;
   private conflictListRequestGeneration = 0;
   private conflictDetailRequestGeneration = 0;
+  private dirtyStatesRequestGeneration = 0;
   private destroyed = false;
   private fileDiffReturnFocus: HTMLElement | null = null;
   private activeResizePointer: number | null = null;
@@ -168,6 +191,7 @@ export class WorkspaceHistory implements OnDestroy {
   private liveRefreshInFlight = false;
   private branchCreationReturnFocus: HTMLElement | null = null;
   private amendReturnFocus: HTMLElement | null = null;
+  private readonly releaseBranchStorage: ReleaseBranchStorage = globalThis.localStorage;
 
   protected readonly statusStore = inject(RepositoryStatusStore);
   protected readonly repositoryId = this.route.snapshot.paramMap.get('repositoryId') ?? '';
@@ -208,6 +232,12 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly refreshingWorkspace = signal(false);
   protected readonly navigationActionError = signal('');
   protected readonly navigationActionNotice = signal('');
+  protected readonly branchContextMenu = signal<BranchContextMenu | null>(null);
+  protected readonly branchContextMutation = signal<string | null>(null);
+  protected readonly mergeConfirmation = signal<MergeConfirmation | null>(null);
+  protected readonly mergeAutoStash = signal(true);
+  protected readonly releaseBranchFullName = signal<string | null>(null);
+  protected readonly worktreeDirtyStates = signal<ReadonlyMap<string, WorktreeDirtyStateResponse>>(new Map());
   protected readonly currentOnly = signal(this.initialRefreshPreferences.currentOnly);
   protected readonly autoFetch = signal(this.initialRefreshPreferences.autoFetch);
   protected readonly liveChanges = signal(this.initialRefreshPreferences.liveChanges);
@@ -220,6 +250,7 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly worktreeRemovalStashMessage = signal<string | null>(null);
   protected readonly worktreeRemovalDialogError = signal('');
   private readonly deletionDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceDeletionDialog');
+  private readonly mergeDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceMergeDialog');
   private readonly openDeletionDialog = effect(() => {
     if (this.deletionConfirmation() === null) {
       return;
@@ -236,6 +267,25 @@ export class WorkspaceHistory implements OnDestroy {
         dialog.showModal();
       } catch {
         // jsdom and older webviews may not implement the top-layer API.
+        dialog.setAttribute('open', '');
+      }
+    });
+  });
+  private readonly openMergeDialog = effect(() => {
+    if (this.mergeConfirmation() === null) {
+      return;
+    }
+    const dialog = this.mergeDialogElement()?.nativeElement;
+    if (dialog === undefined || dialog.open) {
+      return;
+    }
+    globalThis.queueMicrotask(() => {
+      if (!dialog.isConnected || dialog.open || this.mergeConfirmation() === null) {
+        return;
+      }
+      try {
+        dialog.showModal();
+      } catch {
         dialog.setAttribute('open', '');
       }
     });
@@ -278,10 +328,12 @@ export class WorkspaceHistory implements OnDestroy {
       this.deletingBranch() !== null ||
       this.removingWorktree() !== null ||
       this.deletionConfirmation() !== null ||
+      this.mergeConfirmation() !== null ||
       this.creatingBranch() ||
       this.stashMutation() !== null ||
       this.networkMutation() !== null ||
-      this.conflictMutation(),
+      this.conflictMutation() ||
+      this.branchContextMutation() !== null,
   );
   protected readonly pushDisabledReason = computed(() => {
     const state = this.pushAnalysisState();
@@ -329,6 +381,17 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly remoteBranches = computed(() => this.branchesOfKind('remote'));
   protected readonly currentLocalBranch = computed(
     () => this.localBranches().find((branch) => branch.current) ?? null,
+  );
+  protected readonly releaseBranch = computed(() => {
+    const fullName = this.releaseBranchFullName();
+    return fullName === null
+      ? null
+      : (this.localBranches().find((branch) => branch.fullName === fullName) ?? null);
+  });
+  protected readonly primaryBranch = computed(
+    () => this.localBranches().find((branch) => branch.name === 'main')
+      ?? this.localBranches().find((branch) => branch.name === 'master')
+      ?? null,
   );
   protected readonly otherLocalBranches = computed(() =>
     this.localBranches().filter((branch) => !branch.current),
@@ -445,6 +508,8 @@ export class WorkspaceHistory implements OnDestroy {
 
   constructor() {
     globalThis.addEventListener('resize', this.clampSidebarToViewport);
+    globalThis.document.addEventListener('pointerdown', this.closeBranchContextMenuFromOutside);
+    globalThis.document.addEventListener('keydown', this.handleBranchContextMenuKeydown);
     this.configureAutoFetchTimer();
     this.configureLiveChangesTimer();
     void this.loadRepository();
@@ -460,10 +525,13 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.pushAnalysisRequestGeneration;
     ++this.conflictListRequestGeneration;
     ++this.conflictDetailRequestGeneration;
+    ++this.dirtyStatesRequestGeneration;
     this.clearAutoFetchTimer();
     this.clearLiveChangesTimer();
     this.stopSidebarResize();
     globalThis.removeEventListener('resize', this.clampSidebarToViewport);
+    globalThis.document.removeEventListener('pointerdown', this.closeBranchContextMenuFromOutside);
+    globalThis.document.removeEventListener('keydown', this.handleBranchContextMenuKeydown);
   }
 
   protected setCurrentOnly(enabled: boolean): void {
@@ -1174,14 +1242,307 @@ export class WorkspaceHistory implements OnDestroy {
     );
   }
 
-  protected async switchBranch(branch: RepositoryBranch): Promise<void> {
-    if (branch.kind !== 'local' || branch.current || this.workspaceActionBusy()) {
+  protected openBranchContextMenu(
+    event: MouseEvent | null,
+    branch: RepositoryBranch,
+    trigger: HTMLElement,
+  ): void {
+    if (branch.kind !== 'local') {
       return;
     }
-    if (!globalThis.confirm(`Switch the active worktree to “${branch.name}”?`)) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const rect = trigger.getBoundingClientRect();
+    const requestedX = event !== null && event.clientX > 0 ? event.clientX : rect.right;
+    const requestedY = event !== null && event.clientY > 0 ? event.clientY : rect.bottom;
+    this.branchContextMenu.set({
+      branch,
+      x: Math.min(requestedX, Math.max(8, globalThis.innerWidth - 250)),
+      y: Math.min(requestedY, Math.max(8, globalThis.innerHeight - 260)),
+      returnFocus: trigger,
+    });
+    this.focusAfterRender('branch-context-menu');
+  }
+
+  protected closeBranchContextMenu(restoreFocus = false): void {
+    const menu = this.branchContextMenu();
+    this.branchContextMenu.set(null);
+    if (restoreFocus && menu !== null) {
+      this.restoreFocusAfterRender(menu.returnFocus);
+    }
+  }
+
+  protected isReleaseBranch(branch: RepositoryBranch): boolean {
+    return this.releaseBranchFullName() === branch.fullName;
+  }
+
+  protected toggleReleaseBranch(branch: RepositoryBranch): void {
+    if (branch.kind !== 'local' || this.workspaceActionBusy()) {
       return;
+    }
+    const next = this.isReleaseBranch(branch) ? null : branch.fullName;
+    writeReleaseBranch(this.releaseBranchStorage, this.repositoryId, next);
+    this.releaseBranchFullName.set(next);
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set(
+      next === null
+        ? `“${branch.name}” is no longer the release branch.`
+        : `“${branch.name}” is now the release branch for this repository.`,
+    );
+    this.closeBranchContextMenu(true);
+  }
+
+  protected branchDirtyChangeCount(branch: RepositoryBranch): number {
+    if (branch.current) {
+      const status = this.statusStore.state();
+      return status.kind === 'ready' ? status.status.entries.length : 0;
+    }
+    const state = this.worktreeDirtyStates().get(branch.fullName);
+    return state?.dirty ? state.changeCount : 0;
+  }
+
+  protected canMergeInto(branch: RepositoryBranch, source: RepositoryBranch | null): boolean {
+    return source !== null && source.fullName !== branch.fullName && !this.workspaceActionBusy();
+  }
+
+  protected async mergeSelectedIntoActive(source: RepositoryBranch): Promise<void> {
+    const target = this.currentLocalBranch();
+    if (target === null || source.fullName === target.fullName || this.workspaceActionBusy()) {
+      return;
+    }
+    this.requestMerge(source, target);
+  }
+
+  protected async mergeReleaseIntoBranch(target: RepositoryBranch): Promise<void> {
+    const source = this.releaseBranch();
+    if (!this.canMergeInto(target, source) || source === null) {
+      return;
+    }
+    this.requestMerge(source, target);
+  }
+
+  protected async mergePrimaryIntoBranch(target: RepositoryBranch): Promise<void> {
+    const source = this.primaryBranch();
+    if (!this.canMergeInto(target, source) || source === null) {
+      return;
+    }
+    this.requestMerge(source, target);
+  }
+
+  protected setMergeAutoStash(enabled: boolean): void {
+    this.mergeAutoStash.set(enabled);
+  }
+
+  protected cancelMerge(): void {
+    const confirmation = this.mergeConfirmation();
+    if (confirmation === null || this.branchContextMutation() !== null) {
+      return;
+    }
+    this.mergeConfirmation.set(null);
+    this.closeDialog(this.mergeDialogElement()?.nativeElement);
+    this.restoreFocusAfterRender(confirmation.returnFocus);
+  }
+
+  protected async confirmMerge(): Promise<void> {
+    const confirmation = this.mergeConfirmation();
+    if (confirmation === null || this.branchContextMutation() !== null) {
+      return;
+    }
+    const autoStash = this.mergeAutoStash();
+    this.mergeConfirmation.set(null);
+    this.closeDialog(this.mergeDialogElement()?.nativeElement);
+    await this.mergeIntoTargetWithSwitch(confirmation.source, confirmation.target, autoStash);
+  }
+
+  private requestMerge(source: RepositoryBranch, target: RepositoryBranch): void {
+    const menu = this.branchContextMenu();
+    const status = this.statusStore.state();
+    if (menu === null || status.kind !== 'ready' || this.workspaceActionBusy()) {
+      return;
+    }
+    this.branchContextMenu.set(null);
+    this.mergeAutoStash.set(true);
+    this.mergeConfirmation.set({
+      source,
+      target,
+      switchRequired: !target.current,
+      dirty: status.status.entries.length > 0,
+      returnFocus: menu.returnFocus,
+    });
+    this.focusAfterRender('cancel-branch-merge');
+  }
+
+  protected async pullInactiveBranch(branch: RepositoryBranch): Promise<void> {
+    this.closeBranchContextMenu();
+    if (branch.current) {
+      await this.pullRepository();
+      return;
+    }
+    if (
+      branch.kind !== 'local' ||
+      branch.upstream === null ||
+      branch.upstreamGone ||
+      this.workspaceActionBusy()
+    ) {
+      return;
+    }
+    this.branchContextMutation.set(`pull:${branch.fullName}`);
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    try {
+      const result: PullInactiveBranchResponse = await this.ipc.invoke(
+        'repository_pull_inactive_branch', {
+          repositoryId: this.repositoryId,
+          operation: {
+            branchFullName: branch.fullName,
+            expectedOid: branch.oid,
+            expectedUpstream: branch.upstream,
+          },
+        },
+      );
+      this.navigationActionNotice.set(
+        result.changed
+          ? `Fast-forwarded “${branch.name}” from ${result.upstream}.`
+          : `“${branch.name}” is already up to date with ${result.upstream}.`,
+      );
+    } catch (error) {
+      this.navigationActionError.set(
+        this.errorMessage(error, `“${branch.name}” could not be fast-forwarded in the background.`),
+      );
+    } finally {
+      if (!this.destroyed) {
+        this.branchContextMutation.set(null);
+        await this.loadNavigation();
+      }
+    }
+  }
+
+  private async mergeIntoTargetWithSwitch(
+    source: RepositoryBranch,
+    target: RepositoryBranch,
+    autoStash: boolean,
+  ): Promise<void> {
+    if (!target.current && !(await this.switchBranchForMerge(target, autoStash))) {
+      return;
+    }
+    const refreshedTarget = this.currentLocalBranch();
+    const refreshedSource = this.localBranches().find((branch) => branch.fullName === source.fullName) ?? null;
+    if (refreshedTarget === null || refreshedSource === null) {
+      this.navigationActionError.set('The source or target branch changed while preparing the merge. Refresh and retry.');
+      return;
+    }
+    await this.mergeBranch(refreshedSource, refreshedTarget, autoStash);
+  }
+
+  private async switchBranchForMerge(branch: RepositoryBranch, autoStash: boolean): Promise<boolean> {
+    if (branch.kind !== 'local' || branch.current || this.workspaceActionBusy()) {
+      return branch.current;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.switchingBranch.set(branch.fullName);
+    try {
+      const currentBranch = this.currentLocalBranch()?.name ?? this.branchName();
+      const result = await this.ipc.invoke('switch_repository_branch', {
+        repositoryId: this.repositoryId,
+        operation: {
+          fullName: branch.fullName,
+          expectedOid: branch.oid,
+          stashOnDirty: autoStash,
+          stashMessage: autoStash
+            ? buildWipStashMessage(
+                currentBranch,
+                new Date(Date.now() - new Date().getTimezoneOffset() * 60_000),
+              )
+            : null,
+        },
+      });
+      if (this.destroyed) {
+        return false;
+      }
+      this.recordBranchSwitchOutcome(result);
+      await this.refreshAfterBranchSwitch();
+      return result.operationSucceeded;
+    } catch (error) {
+      if (!this.destroyed) {
+        const fallback = autoStash
+          ? 'The target branch could not be activated after auto-stashing.'
+          : 'The target branch could not be activated. Enable auto-stash if uncommitted changes block the switch.';
+        this.navigationActionError.set(this.errorMessage(error, fallback));
+        await this.refreshAfterBranchSwitch();
+      }
+      return false;
+    } finally {
+      if (!this.destroyed) {
+        this.switchingBranch.set(null);
+      }
+    }
+  }
+
+  private async mergeBranch(
+    source: RepositoryBranch,
+    target: RepositoryBranch,
+    autoStashRequested: boolean,
+  ): Promise<void> {
+    const status = this.statusStore.state();
+    if (status.kind !== 'ready' || this.workspaceActionBusy()) {
+      return;
+    }
+    let autoStash: { readonly message: string } | null = null;
+    if (status.status.entries.length > 0 && autoStashRequested) {
+      autoStash = { message: buildWipStashMessage(target.name) };
     }
 
+    this.branchContextMutation.set(`merge:${source.fullName}:${target.fullName}`);
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    try {
+      const result: MergeRepositoryBranchResponse = await this.ipc.invoke('repository_merge_branch', {
+        repositoryId: this.repositoryId,
+        operation: {
+          sourceFullName: source.fullName,
+          expectedSourceOid: source.oid,
+          targetFullName: target.fullName,
+          expectedTargetOid: target.oid,
+          autoStash,
+        },
+      });
+      if (result.status !== null) {
+        this.statusStore.acceptMutationResult(result.status);
+      }
+      const stash = this.autoStashSummary(result.autoStash);
+      if (result.state === 'succeeded') {
+        this.navigationActionNotice.set(`Merged “${source.name}” into “${target.name}”.${stash}`);
+      } else if (result.state === 'conflicted') {
+        this.navigationActionError.set(
+          `Merge stopped with conflicts. ${result.errorMessage ?? 'Resolve the unmerged files before continuing.'}${stash}`,
+        );
+      } else {
+        const uncertainty = result.mutationMayHaveOccurred
+          ? ' Git may have changed the target; inspect the refreshed branch before retrying.'
+          : '';
+        this.navigationActionError.set(`${result.errorMessage ?? 'Merge failed.'}${uncertainty}${stash}`);
+      }
+      await this.refreshAfterNetworkMutation();
+    } catch (error) {
+      this.navigationActionError.set(this.errorMessage(error, `Could not merge “${source.name}” into “${target.name}”.`));
+      await this.refreshAfterNetworkMutation();
+    } finally {
+      if (!this.destroyed) {
+        this.branchContextMutation.set(null);
+      }
+    }
+  }
+
+  protected async switchBranch(branch: RepositoryBranch): Promise<boolean> {
+    if (branch.kind !== 'local' || branch.current || this.workspaceActionBusy()) {
+      return false;
+    }
+    if (!globalThis.confirm(`Switch the active worktree to “${branch.name}”?`)) {
+      return false;
+    }
+
+    let switched = false;
     this.navigationActionError.set('');
     this.navigationActionNotice.set('');
     this.switchingBranch.set(branch.fullName);
@@ -1196,9 +1557,10 @@ export class WorkspaceHistory implements OnDestroy {
         },
       });
       if (this.destroyed) {
-        return;
+        return false;
       }
       this.recordBranchSwitchOutcome(result);
+      switched = result.operationSucceeded;
       await this.refreshAfterBranchSwitch();
     } catch (error) {
       const message = this.errorMessage(error, 'The branch could not be switched.');
@@ -1220,6 +1582,7 @@ export class WorkspaceHistory implements OnDestroy {
             });
             if (!this.destroyed) {
               this.recordBranchSwitchOutcome(result);
+              switched = result.operationSucceeded;
               await this.refreshAfterBranchSwitch();
             }
           } catch (retryError) {
@@ -1237,6 +1600,7 @@ export class WorkspaceHistory implements OnDestroy {
         this.switchingBranch.set(null);
       }
     }
+    return switched;
   }
 
   private recordBranchSwitchOutcome(result: SwitchRepositoryBranchResponse): void {
@@ -1563,6 +1927,14 @@ export class WorkspaceHistory implements OnDestroy {
       });
       if (generation === this.navigationRequestGeneration) {
         this.navigationState.set({ kind: 'ready', navigation });
+        const availableLocalRefs = new Set(
+          navigation.branches
+            .filter((branch) => branch.kind === 'local')
+            .map((branch) => branch.fullName),
+        );
+        this.releaseBranchFullName.set(
+          readReleaseBranch(this.releaseBranchStorage, this.repositoryId, availableLocalRefs),
+        );
         this.reconcileSelectedStash(navigation.stashes);
         const localTree = buildBranchTree(
           navigation.branches.filter((branch) => branch.kind === 'local' && !branch.current),
@@ -1584,6 +1956,7 @@ export class WorkspaceHistory implements OnDestroy {
             branchFolderPaths(remoteTree),
           ),
         );
+        void this.loadWorktreeDirtyStates();
       }
     } catch {
       if (generation === this.navigationRequestGeneration) {
@@ -2428,6 +2801,59 @@ export class WorkspaceHistory implements OnDestroy {
     return state.kind === 'ready'
       ? state.navigation.branches.filter((branch) => branch.kind === kind)
       : [];
+  }
+
+  private async loadWorktreeDirtyStates(): Promise<void> {
+    const generation = ++this.dirtyStatesRequestGeneration;
+    try {
+      const response: WorktreeDirtyStatesResponse = await this.ipc.invoke(
+        'repository_worktree_dirty_states',
+        { repositoryId: this.repositoryId },
+      );
+      if (generation !== this.dirtyStatesRequestGeneration || this.destroyed) {
+        return;
+      }
+      this.worktreeDirtyStates.set(new Map(
+        response.states
+          .filter((state): state is WorktreeDirtyStateResponse & { readonly branchFullName: string } =>
+            state.branchFullName !== null && state.dirty && state.errorMessage == null)
+          .map((state) => [state.branchFullName, state]),
+      ));
+    } catch {
+      if (generation === this.dirtyStatesRequestGeneration && !this.destroyed) {
+        this.worktreeDirtyStates.set(new Map());
+      }
+    }
+  }
+
+  private readonly closeBranchContextMenuFromOutside = (event: PointerEvent): void => {
+    if (this.branchContextMenu() === null) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Element && target.closest('.branch-context-menu, .branch-menu-trigger') !== null) {
+      return;
+    }
+    this.closeBranchContextMenu();
+  };
+
+  private readonly handleBranchContextMenuKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== 'Escape' || this.branchContextMenu() === null) {
+      return;
+    }
+    event.preventDefault();
+    this.closeBranchContextMenu(true);
+  };
+
+  private closeDialog(dialog: HTMLDialogElement | undefined): void {
+    if (dialog === undefined) {
+      return;
+    }
+    if (typeof dialog.close === 'function') {
+      dialog.close();
+    } else {
+      dialog.removeAttribute('open');
+    }
   }
 
   private collapsedFoldersFor(kind: RepositoryBranch['kind']): ReadonlySet<string> {

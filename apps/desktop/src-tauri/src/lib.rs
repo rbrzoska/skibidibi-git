@@ -11,21 +11,22 @@ use app_domain::{
     ConflictFileDetail, ConflictFileDetailRequest, ConflictListResult, CreateBranchRequest,
     CreateBranchResult, CreateCommitRequest, CreateCommitResult, DeleteBranchRequest,
     DeleteBranchResult, DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff,
-    IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState, PopStashRequest,
-    PopStashResult, PullRequest, PullResult, PushAnalysis, PushRequest, PushResult,
+    IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState, MergeBranchRequest,
+    MergeBranchResult, PopStashRequest, PopStashResult, PullInactiveBranchRequest,
+    PullInactiveBranchResult, PullRequest, PullResult, PushAnalysis, PushRequest, PushResult,
     PushStashRequest, PushStashResult, RememberRepositoryInput, RememberedRepository,
     RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability, RepositoryHealthUpdate,
     RepositoryNavigation, RepositoryProvider, RepositoryStatus, RepositoryTransport,
     ResolveConflictRequest, ResolveConflictResult, SetUpstreamRequest, SetUpstreamResult,
     StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource, SwitchBranchRequest,
-    SwitchBranchResult, WorkingTreeFileDiff, WorktreeRemovalMode,
+    SwitchBranchResult, WorkingTreeFileDiff, WorktreeDirtyState, WorktreeRemovalMode,
 };
 use app_store::{CatalogError, RepositoryCatalog};
 use repo_runtime::{
-    BranchCreationError, BranchSwitchError, CloneRepositoryError, ConflictResolutionError,
-    FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError, MutationRuntimeError,
-    NavigationRuntimeError, NetworkOperationError, RepositoryRuntime, RepositoryRuntimeError,
-    StashActionError, StashInspectionError, WorkingTreeDiffRuntimeError,
+    BranchCreationError, BranchOperationError, BranchSwitchError, CloneRepositoryError,
+    ConflictResolutionError, FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError,
+    MutationRuntimeError, NavigationRuntimeError, NetworkOperationError, RepositoryRuntime,
+    RepositoryRuntimeError, StashActionError, StashInspectionError, WorkingTreeDiffRuntimeError,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -42,6 +43,8 @@ struct AppState {
     github_credentials: Arc<dyn secret_store::CredentialStore>,
     github_config: github_client::GitHubClientConfig,
     github_transport: github_client::ReqwestTransport,
+    github_device_flow: github_client::GitHubDeviceFlowClient,
+    github_device_sessions: github::GitHubDeviceFlowSessions,
     github_mutations: tokio::sync::Mutex<()>,
     github_account_generations: Mutex<HashMap<String, u64>>,
     mutations: MutationLockRegistry,
@@ -59,6 +62,7 @@ impl AppState {
             url::Url::parse("https://api.github.com/graphql")?,
         )?;
         let github_transport = github_client::ReqwestTransport::new(api_base_url)?;
+        let github_device_flow = github_client::GitHubDeviceFlowClient::new()?;
         Ok(Self {
             repositories: RepositoryRuntime::default(),
             catalog: Mutex::new(catalog),
@@ -66,6 +70,8 @@ impl AppState {
             github_credentials: Arc::new(secret_store::OsCredentialStore::new()),
             github_config,
             github_transport,
+            github_device_flow,
+            github_device_sessions: github::GitHubDeviceFlowSessions::default(),
             github_mutations: tokio::sync::Mutex::new(()),
             github_account_generations: Mutex::new(HashMap::new()),
             mutations: MutationLockRegistry::default(),
@@ -98,6 +104,12 @@ impl MutationLockRegistry {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CommandError {
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeDirtyStatesResponse {
+    states: Vec<WorktreeDirtyState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +159,14 @@ impl From<BranchSwitchError> for CommandError {
 
 impl From<BranchCreationError> for CommandError {
     fn from(error: BranchCreationError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<BranchOperationError> for CommandError {
+    fn from(error: BranchOperationError) -> Self {
         Self {
             message: format!("{}: {}", error.code(), error),
         }
@@ -506,6 +526,71 @@ async fn repository_pull(
     .map_err(|error| CommandError {
         message: format!("pull task failed: {error}"),
     })?
+}
+
+#[tauri::command]
+async fn repository_merge_branch(
+    repository_id: String,
+    operation: MergeBranchRequest,
+    state: State<'_, AppState>,
+) -> Result<MergeBranchResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .merge_branch(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("branch merge task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_pull_inactive_branch(
+    repository_id: String,
+    operation: PullInactiveBranchRequest,
+    state: State<'_, AppState>,
+) -> Result<PullInactiveBranchResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .pull_inactive_branch(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("background branch pull task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_worktree_dirty_states(
+    repository_id: String,
+    state: State<'_, AppState>,
+) -> Result<WorktreeDirtyStatesResponse, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    let states = tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .worktree_dirty_states(&repository_path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("worktree dirty-state task failed: {error}"),
+    })??;
+    Ok(WorktreeDirtyStatesResponse { states })
 }
 
 #[tauri::command]
@@ -1190,6 +1275,7 @@ async fn select_clone_parent_directory(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
@@ -1208,6 +1294,9 @@ pub fn run() {
             repository_stash_file_diff,
             repository_push_analysis,
             repository_pull,
+            repository_merge_branch,
+            repository_pull_inactive_branch,
+            repository_worktree_dirty_states,
             repository_push,
             repository_set_upstream,
             repository_conflicts,
@@ -1236,6 +1325,10 @@ pub fn run() {
             set_repository_pinned,
             forget_repository,
             github::github_list_accounts,
+            github::github_start_device_flow,
+            github::github_poll_device_flow,
+            github::github_cancel_device_flow,
+            github::github_open_device_verification,
             github::github_connect_pat,
             github::github_disconnect_account,
             github::github_list_repositories,

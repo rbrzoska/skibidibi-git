@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 
 import { GitHubAccountStore } from '../../../core/github';
 
@@ -12,6 +12,11 @@ import { GitHubAccountStore } from '../../../core/github';
 export class GitHubAccountControl {
   protected readonly store = inject(GitHubAccountStore);
   protected readonly token = signal('');
+  protected readonly codeCopied = signal(false);
+  protected readonly oauthBusy = computed(() => {
+    const state = this.store.deviceFlow();
+    return state.kind === 'starting' || state.kind === 'waiting';
+  });
 
   constructor() {
     if (this.store.state().kind === 'idle') {
@@ -23,7 +28,30 @@ export class GitHubAccountControl {
     this.token.set(value);
   }
 
-  protected async connect(): Promise<void> {
+  protected connectWithGitHub(): void {
+    this.codeCopied.set(false);
+    void this.store.startDeviceFlow();
+  }
+
+  protected cancelGitHubConnection(): void {
+    this.codeCopied.set(false);
+    void this.store.cancelDeviceFlow();
+  }
+
+  protected openGitHubVerification(): void {
+    void this.store.openDeviceVerification();
+  }
+
+  protected async copyUserCode(code: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(code);
+      this.codeCopied.set(true);
+    } catch {
+      this.codeCopied.set(false);
+    }
+  }
+
+  protected async connectPat(): Promise<void> {
     const token = this.token();
     this.token.set('');
     await this.store.connectPat(token);
