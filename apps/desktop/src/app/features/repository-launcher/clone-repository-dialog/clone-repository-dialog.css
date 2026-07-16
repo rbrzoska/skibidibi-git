@@ -1,0 +1,24 @@
+:host { display: block; }
+.clone-card { display: grid; gap: .85rem; min-width: 0; border: 1px solid #30363d; border-radius: 1rem; padding: 1.25rem; background: #161b22; }
+header, footer, .path-control, .mode-switch, fieldset { display: flex; align-items: center; }
+header { justify-content: space-between; gap: 1rem; }
+h2, p { margin: 0; }
+h2 { margin-top: .25rem; font-size: 1.15rem; }
+.eyebrow { color: #8b949e; font-size: .7rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.mode-switch { gap: .2rem; border: 1px solid #30363d; border-radius: .4rem; padding: .18rem; }
+button { border: 1px solid #30363d; border-radius: .35rem; padding: .35rem .55rem; color: #c9d1d9; background: #21262d; cursor: pointer; }
+.mode-switch button { border-color: transparent; padding: .25rem .55rem; font-size: .7rem; }
+.mode-switch button.active, .clone-action { border-color: #388bfd; color: #fff; background: #1f6feb; }
+label { display: grid; gap: .3rem; min-width: 0; color: #8b949e; font-size: .7rem; }
+input, select { min-width: 0; width: 100%; height: 2rem; border: 1px solid #30363d; border-radius: .4rem; padding: 0 .55rem; color: #e6edf3; background: #0d1117; }
+.path-control { gap: .4rem; min-width: 0; }
+.path-control input { flex: 1 1 auto; }
+.destination, .github-fields { display: grid; grid-template-columns: minmax(0, 2fr) minmax(10rem, 1fr); gap: .75rem; }
+.github-fields fieldset { align-self: end; gap: .7rem; height: 2rem; margin: 0; border: 1px solid #30363d; border-radius: .4rem; }
+.github-fields fieldset label { display: flex; align-items: center; gap: .3rem; }
+.github-fields input[type='radio'] { width: .8rem; height: .8rem; }
+.hint { grid-column: 1 / -1; color: #8b949e; font-size: .68rem; }
+.clone-error { color: #ff7b72; font-size: .72rem; }
+footer { justify-content: flex-end; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+@media (max-width: 46rem) { .destination, .github-fields { grid-template-columns: 1fr; } header { align-items: flex-start; } }

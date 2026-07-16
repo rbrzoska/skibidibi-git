@@ -3,12 +3,18 @@ import { provideRouter } from '@angular/router';
 
 import { App } from './app';
 import { DESKTOP_IPC, DesktopIpc } from './core/ipc/desktop-ipc';
+import { DesktopGitHubBridge, GITHUB_BRIDGE, GitHubAccountStore } from './core/github';
 
 describe('App', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [App],
-      providers: [provideRouter([]), { provide: DESKTOP_IPC, useExisting: DesktopIpc }],
+      providers: [
+        provideRouter([]),
+        { provide: DESKTOP_IPC, useExisting: DesktopIpc },
+        { provide: GITHUB_BRIDGE, useExisting: DesktopGitHubBridge },
+        GitHubAccountStore,
+      ],
     }).compileComponents();
   });
 

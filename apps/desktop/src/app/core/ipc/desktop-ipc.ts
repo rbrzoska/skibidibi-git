@@ -280,7 +280,7 @@ export type BranchCreationSource =
 export interface CreateRepositoryBranchRequest {
   readonly repositoryId: string;
   readonly operation: {
-    readonly name: string;
+    readonly name: string | null;
     readonly source: BranchCreationSource;
   };
 }
@@ -543,14 +543,21 @@ export interface RemoveRepositoryWorktreeRequest {
   readonly path: string;
   readonly expectedHead: string | null;
   readonly branchFullName: string | null;
+  readonly mode: WorktreeRemovalMode;
+  readonly stashMessage: string | null;
 }
+
+export type WorktreeRemovalMode = 'safe' | 'force' | 'stashAndForce';
 
 export interface RemoveRepositoryWorktreeResponse {
   readonly path: string;
   readonly branchFullName: string | null;
   readonly worktreeRemoved: boolean;
+  readonly worktreeRemovalError: string | null;
   readonly branchDeleted: boolean;
   readonly branchDeletionError: string | null;
+  readonly mode: WorktreeRemovalMode;
+  readonly stash: StashIdentity | null;
 }
 
 export interface FetchRepositoryResponse {
@@ -604,6 +611,29 @@ export interface SelectRepositoryDirectoryResponse {
   readonly path: string | null;
 }
 
+export interface CloneRepositoryRequest {
+  readonly sourceUrl: string;
+  readonly destinationParent: string;
+  readonly directoryName: string;
+}
+
+export interface RepositoryWorktreeStatisticsResponse {
+  readonly path: string;
+  readonly branch: string | null;
+  readonly bytes: number;
+  readonly lastCommitAt: string | null;
+  readonly lastOpenedAt: number | null;
+}
+
+export interface RepositoryMaintenanceStatisticsResponse {
+  readonly repositoryBytes: number;
+  readonly gitBytes: number;
+  readonly worktreeBytes: number;
+  readonly scannedAt: number;
+  readonly repositoryLastCommitAt: string | null;
+  readonly worktrees: readonly RepositoryWorktreeStatisticsResponse[];
+}
+
 export type RepositoryProvider = 'local' | 'github' | 'other';
 export type RepositoryTransport = 'local' | 'ssh' | 'https' | 'other';
 export type RepositoryAvailability = 'unknown' | 'available' | 'missing' | 'inaccessible';
@@ -643,6 +673,77 @@ export interface RememberedRepositoryResponse {
   readonly lastOpenedAt: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
+}
+
+export interface GitHubAccountResponse {
+  readonly id: string;
+  readonly host: string;
+  readonly login: string;
+  readonly displayName: string | null;
+  readonly avatarUrl: string | null;
+  readonly authKind: 'personalAccessToken' | 'oAuthDevice';
+  readonly scopes: readonly string[];
+  readonly state: 'unknown' | 'connected' | 'authenticationRequired' | 'unavailable';
+  readonly lastValidatedAt: number | null;
+}
+
+export interface GitHubRepositoryResponse {
+  readonly id: string;
+  readonly owner: string;
+  readonly name: string;
+  readonly fullName: string;
+  readonly private: boolean;
+  readonly updatedAt: string;
+  readonly httpsCloneUrl: string;
+  readonly sshCloneUrl: string;
+}
+
+export interface GitHubPullRequestSummaryResponse {
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly state: 'open' | 'closed' | 'merged';
+  readonly draft: boolean;
+  readonly authorLogin: string;
+  readonly headRefName: string;
+  readonly baseRefName: string;
+  readonly updatedAt: string;
+  readonly authoredByViewer: boolean;
+  readonly reviewRequestedFromViewer: boolean | null;
+  readonly unresolvedThreadCount: number | null;
+}
+
+export interface GitHubPullRequestCommentResponse {
+  readonly id: string;
+  readonly authorLogin: string;
+  readonly body: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly url: string | null;
+  readonly path: string | null;
+  readonly line: number | null;
+  readonly side: 'left' | 'right' | null;
+}
+
+export interface GitHubReviewThreadResponse {
+  readonly id: string;
+  readonly path: string;
+  readonly line: number | null;
+  readonly resolved: boolean;
+  readonly outdated: boolean;
+  readonly comments: readonly GitHubPullRequestCommentResponse[];
+}
+
+export interface GitHubPullRequestDetailResponse extends GitHubPullRequestSummaryResponse {
+  readonly body: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly changedFiles: number;
+  readonly mergeability: 'unknown' | 'mergeable' | 'conflicting';
+  readonly comments: readonly GitHubPullRequestCommentResponse[];
+  readonly reviewThreads: readonly GitHubReviewThreadResponse[];
+  readonly conversationTruncated: boolean;
+  readonly reviewThreadsTruncated: boolean;
 }
 
 export interface DesktopIpcContract {
@@ -758,6 +859,18 @@ export interface DesktopIpcContract {
     readonly request: SelectRepositoryDirectoryRequest;
     readonly response: SelectRepositoryDirectoryResponse;
   };
+  readonly select_clone_parent_directory: {
+    readonly request: SelectRepositoryDirectoryRequest;
+    readonly response: SelectRepositoryDirectoryResponse;
+  };
+  readonly clone_repository: {
+    readonly request: CloneRepositoryRequest;
+    readonly response: RememberedRepositoryResponse;
+  };
+  readonly repository_maintenance_stats: {
+    readonly request: { readonly repositoryId: string };
+    readonly response: RepositoryMaintenanceStatisticsResponse;
+  };
   readonly list_remembered_repositories: {
     readonly request: Record<string, never>;
     readonly response: readonly RememberedRepositoryResponse[];
@@ -773,6 +886,42 @@ export interface DesktopIpcContract {
   readonly forget_repository: {
     readonly request: { readonly repositoryId: string };
     readonly response: boolean;
+  };
+  readonly github_list_accounts: {
+    readonly request: Record<string, never>;
+    readonly response: readonly GitHubAccountResponse[];
+  };
+  readonly github_connect_pat: {
+    readonly request: { readonly token: string };
+    readonly response: GitHubAccountResponse;
+  };
+  readonly github_disconnect_account: {
+    readonly request: { readonly accountId: string };
+    readonly response: { readonly disconnected: boolean };
+  };
+  readonly github_list_repositories: {
+    readonly request: { readonly accountId: string; readonly cursor: string | null; readonly pageSize: number };
+    readonly response: { readonly repositories: readonly GitHubRepositoryResponse[]; readonly nextCursor: string | null };
+  };
+  readonly github_list_pull_requests: {
+    readonly request: {
+      readonly accountId: string;
+      readonly repositoryId: string;
+      readonly cursor: string | null;
+      readonly pageSize: number;
+    };
+    readonly response: {
+      readonly pullRequests: readonly GitHubPullRequestSummaryResponse[];
+      readonly nextCursor: string | null;
+    };
+  };
+  readonly github_pull_request_detail: {
+    readonly request: {
+      readonly accountId: string;
+      readonly repositoryId: string;
+      readonly number: number;
+    };
+    readonly response: GitHubPullRequestDetailResponse;
   };
 }
 
@@ -850,7 +999,7 @@ export class DesktopIpc implements DesktopIpcClient {
       return Promise.resolve(response as DesktopIpcContract[C]['response']);
     }
 
-    if (command === 'select_repository_directory') {
+    if (command === 'select_repository_directory' || command === 'select_clone_parent_directory') {
       const response: SelectRepositoryDirectoryResponse = { path: null };
       return Promise.resolve(response as DesktopIpcContract[C]['response']);
     }
@@ -1008,6 +1157,24 @@ export class DesktopIpc implements DesktopIpcClient {
 
     if (command === 'set_repository_pinned' || command === 'forget_repository') {
       return Promise.resolve(true as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'github_list_accounts') {
+      return Promise.resolve([] as DesktopIpcContract[C]['response']);
+    }
+
+    if (
+      command === 'clone_repository' ||
+      command === 'repository_maintenance_stats' ||
+      command === 'github_connect_pat' ||
+      command === 'github_disconnect_account' ||
+      command === 'github_list_repositories' ||
+      command === 'github_list_pull_requests' ||
+      command === 'github_pull_request_detail'
+    ) {
+      return Promise.reject(
+        new Error('GitHub integration is unavailable outside the desktop application.'),
+      );
     }
 
     return Promise.reject(new Error(`Unsupported desktop command: ${command}`));

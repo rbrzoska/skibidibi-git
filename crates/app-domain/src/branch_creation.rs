@@ -23,8 +23,9 @@ pub enum BranchCreationSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBranchRequest {
-    /// A short local branch name, for example `feature/safe`.
-    pub name: String,
+    /// A short local branch name, for example `feature/safe`. When omitted for a
+    /// remote-tracking source, the runtime derives it from the configured remote.
+    pub name: Option<String>,
     pub source: BranchCreationSource,
 }
 
@@ -45,7 +46,7 @@ mod tests {
     #[test]
     fn remote_tracking_source_uses_a_tagged_frontend_contract() {
         let request = CreateBranchRequest {
-            name: "feature/safe".to_owned(),
+            name: Some("feature/safe".to_owned()),
             source: BranchCreationSource::RemoteTracking {
                 full_name: "refs/remotes/origin/main".to_owned(),
                 expected_oid: "0123456789012345678901234567890123456789".to_owned(),

@@ -5,13 +5,17 @@ use std::{
 };
 
 use app_domain::{
-    DeleteBranchRequest, DeleteBranchResult, FetchRepositoryResult, RemoveWorktreeRequest,
-    RemoveWorktreeResult, RepositoryBranchKind,
+    DeleteBranchRequest, DeleteBranchResult, FetchRepositoryResult, PushStashRequest,
+    RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryBranchKind, RepositoryStatePrecondition,
+    StashIdentity, StashPushState, WorktreeRemovalMode,
 };
 use git_core::{GitInvocation, GitInvocationPolicy, GitOutput, GitRunError, GitRunner};
 use thiserror::Error;
 
-use crate::{NavigationGitExecutor, NavigationRuntimeError, RepositoryRuntime};
+use crate::{
+    NavigationGitExecutor, NavigationRuntimeError, RepositoryRuntime, RepositoryRuntimeError,
+    RepositoryStatusGitExecutor, StashActionError, StashActionGitExecutor,
+};
 
 const ACTION_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -25,7 +29,12 @@ pub trait MaintenanceGitExecutor: Send + Sync {
         expected_oid: &str,
     ) -> Result<GitOutput, GitRunError>;
 
-    fn remove_worktree(&self, repository: &Path, path: &Path) -> Result<GitOutput, GitRunError>;
+    fn remove_worktree(
+        &self,
+        repository: &Path,
+        path: &Path,
+        force: bool,
+    ) -> Result<GitOutput, GitRunError>;
 
     fn fetch_default_remote(&self, repository: &Path) -> Result<GitOutput, GitRunError>;
 
@@ -61,20 +70,23 @@ impl MaintenanceGitExecutor for GitRunner {
         )
     }
 
-    fn remove_worktree(&self, repository: &Path, path: &Path) -> Result<GitOutput, GitRunError> {
+    fn remove_worktree(
+        &self,
+        repository: &Path,
+        path: &Path,
+        force: bool,
+    ) -> Result<GitOutput, GitRunError> {
+        let mut arguments = vec![OsString::from("worktree"), OsString::from("remove")];
+        if force {
+            arguments.push(OsString::from("--force"));
+        }
+        arguments.push(OsString::from("--"));
+        arguments.push(path.as_os_str().to_owned());
         self.run(
             repository,
-            GitInvocation::new(
-                GitInvocationPolicy::Mutating,
-                vec![
-                    OsString::from("worktree"),
-                    OsString::from("remove"),
-                    OsString::from("--"),
-                    path.as_os_str().to_owned(),
-                ],
-            )
-            .with_output_limits(STDOUT_LIMIT, STDERR_LIMIT)
-            .with_timeout(ACTION_TIMEOUT),
+            GitInvocation::new(GitInvocationPolicy::Mutating, arguments)
+                .with_output_limits(STDOUT_LIMIT, STDERR_LIMIT)
+                .with_timeout(ACTION_TIMEOUT),
         )
     }
 
@@ -158,6 +170,12 @@ pub enum MaintenanceError {
     Git(#[from] GitRunError),
     #[error("system time is outside the supported range")]
     InvalidClock,
+    #[error("worktree changes could not be safely stashed: {0}")]
+    StashRejected(String),
+    #[error(transparent)]
+    Stash(#[from] StashActionError),
+    #[error(transparent)]
+    Repository(#[from] RepositoryRuntimeError),
 }
 
 impl MaintenanceError {
@@ -169,13 +187,18 @@ impl MaintenanceError {
             Self::CurrentWorktree | Self::WorktreeUnavailable => "worktreeUnavailable",
             Self::Navigation(_) | Self::Git(_) => "gitRejected",
             Self::InvalidClock => "internal",
+            Self::StashRejected(_) | Self::Stash(_) => "stashRejected",
+            Self::Repository(_) => "gitRejected",
         }
     }
 }
 
 impl<E> RepositoryRuntime<E>
 where
-    E: NavigationGitExecutor + MaintenanceGitExecutor,
+    E: NavigationGitExecutor
+        + MaintenanceGitExecutor
+        + RepositoryStatusGitExecutor
+        + StashActionGitExecutor,
 {
     pub fn delete_branch(
         &self,
@@ -267,6 +290,17 @@ where
         if worktree.bare || worktree.locked || worktree.prunable {
             return Err(MaintenanceError::WorktreeUnavailable);
         }
+        match request.mode {
+            WorktreeRemovalMode::Safe | WorktreeRemovalMode::Force
+                if request.stash_message.is_some() =>
+            {
+                return Err(MaintenanceError::InvalidRequest);
+            }
+            WorktreeRemovalMode::StashAndForce if request.stash_message.is_none() => {
+                return Err(MaintenanceError::InvalidRequest);
+            }
+            _ => {}
+        }
         if let Some(branch) = &request.branch_full_name {
             super::branch_actions::validate_requested_ref(branch)
                 .map_err(|_| MaintenanceError::InvalidRequest)?;
@@ -286,8 +320,84 @@ where
             }
         }
 
-        self.executor
-            .remove_worktree(repository, Path::new(&worktree.path))?;
+        let stash = if request.mode == WorktreeRemovalMode::StashAndForce {
+            let target = Path::new(&worktree.path);
+            let status = self.status(target)?;
+            let stash_result = self.push_stash(
+                target,
+                &PushStashRequest {
+                    message: request
+                        .stash_message
+                        .clone()
+                        .ok_or(MaintenanceError::InvalidRequest)?,
+                    include_untracked: true,
+                    precondition: precondition_from_status(&status),
+                },
+            )?;
+            let clean = stash_result
+                .status
+                .as_ref()
+                .is_some_and(|status| status.entries.is_empty());
+            match stash_result.state {
+                StashPushState::NoChanges if clean => None,
+                StashPushState::Created if clean => stash_result.stash,
+                state => {
+                    return Ok(RemoveWorktreeResult {
+                        path: request.path.clone(),
+                        branch_full_name: request.branch_full_name.clone(),
+                        worktree_removed: false,
+                        worktree_removal_error: Some(format!(
+                            "stash ended in {state:?}: {}",
+                            stash_result.error_message.unwrap_or_else(||
+                                "the worktree was not verified clean".to_owned()
+                            )
+                        )),
+                        branch_deleted: false,
+                        branch_deletion_error: None,
+                        mode: request.mode,
+                        stash: stash_result.stash,
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
+        let refreshed_worktree = match self.worktrees(repository) {
+            Ok(worktrees) => worktrees
+                .into_iter()
+                .find(|candidate| {
+                    std::fs::canonicalize(&candidate.path)
+                        .is_ok_and(|path| path == requested_canonical)
+                })
+                .filter(|candidate| candidate.head == request.expected_head)
+                .filter(|candidate| candidate.branch == request.branch_full_name),
+            Err(error) => {
+                return Ok(failed_worktree_removal(
+                    request,
+                    stash,
+                    format!("could not revalidate the worktree after stashing: {error}"),
+                ));
+            }
+        };
+        let Some(refreshed_worktree) = refreshed_worktree else {
+            return Ok(failed_worktree_removal(
+                request,
+                stash,
+                "the worktree changed after stashing; it was not removed".to_owned(),
+            ));
+        };
+
+        // After stashing, deliberately use Git's non-force removal. If an editor or watcher
+        // creates a new tracked/untracked change after the stash, Git refuses instead of
+        // deleting a change that is not represented by the returned stash identity.
+        if let Err(error) = self.executor.remove_worktree(
+            repository,
+            Path::new(&refreshed_worktree.path),
+            request.mode == WorktreeRemovalMode::Force,
+        ) {
+            return Ok(failed_worktree_removal(request, stash, error.to_string()));
+        }
         let branch_deletion = if let Some(full_name) = &request.branch_full_name {
             (|| -> Result<bool, MaintenanceError> {
                 let expected_head = request
@@ -339,8 +449,11 @@ where
             path: request.path.clone(),
             branch_full_name: request.branch_full_name.clone(),
             worktree_removed: true,
+            worktree_removal_error: None,
             branch_deleted,
             branch_deletion_error,
+            mode: request.mode,
+            stash,
         })
     }
 
@@ -356,5 +469,33 @@ where
         Ok(FetchRepositoryResult {
             fetched_at: i64::try_from(seconds).map_err(|_| MaintenanceError::InvalidClock)?,
         })
+    }
+}
+
+fn failed_worktree_removal(
+    request: &RemoveWorktreeRequest,
+    stash: Option<StashIdentity>,
+    error: String,
+) -> RemoveWorktreeResult {
+    RemoveWorktreeResult {
+        path: request.path.clone(),
+        branch_full_name: request.branch_full_name.clone(),
+        worktree_removed: false,
+        worktree_removal_error: Some(error),
+        branch_deleted: false,
+        branch_deletion_error: None,
+        mode: request.mode,
+        stash,
+    }
+}
+
+fn precondition_from_status(status: &app_domain::RepositoryStatus) -> RepositoryStatePrecondition {
+    RepositoryStatePrecondition {
+        expected_head: status.branch.oid.clone(),
+        expected_head_name: status.branch.head.clone(),
+        expected_detached: status.branch.detached,
+        expected_unborn: status.branch.unborn,
+        expected_index_fingerprint: status.index_fingerprint.clone(),
+        expected_worktree_fingerprint: status.worktree_fingerprint.clone(),
     }
 }

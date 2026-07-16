@@ -9,6 +9,7 @@ import {
   type RepositoryCommitSummary,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
+import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../core/github';
 import { branchExpansionStorageKey } from './branch-expansion-state';
 import { WorkspaceHistory } from './workspace-history';
 
@@ -168,11 +169,21 @@ describe('WorkspaceHistory', () => {
   ): Promise<{ fixture: ComponentFixture<WorkspaceHistory>; invoke: ReturnType<typeof vi.fn> }> {
     const invoke = vi.fn().mockImplementation(invokeImplementation);
     const ipc = { invoke } as unknown as DesktopIpcClient;
+    const githubBridge: GitHubBridge = {
+      githubListAccounts: async () => [],
+      githubConnectPat: async () => { throw new Error('not used'); },
+      githubDisconnectAccount: async () => ({ disconnected: false }),
+      githubListRepositories: async () => ({ repositories: [], nextCursor: null }),
+      githubListPullRequests: async () => ({ pullRequests: [], nextCursor: null }),
+      githubPullRequestDetail: async () => { throw new Error('not used'); },
+    };
     await TestBed.configureTestingModule({
       imports: [WorkspaceHistory],
       providers: [
         provideRouter([]),
         { provide: DESKTOP_IPC, useValue: ipc },
+        { provide: GITHUB_BRIDGE, useValue: githubBridge },
+        GitHubAccountStore,
         {
           provide: ActivatedRoute,
           useValue: { snapshot: { paramMap: { get: () => 'skibidibi-git' } } },
@@ -280,10 +291,11 @@ describe('WorkspaceHistory', () => {
       return Promise.resolve({ resolved: true, status: repositoryStatus(), errorMessage: null, mutationMayHaveOccurred: false });
     }
     if (command === 'create_repository_branch') {
-      const operation = (request as { operation: { name: string; source: { kind: string } } }).operation;
+      const operation = (request as { operation: { name: string | null; source: { kind: string; fullName?: string } } }).operation;
+      const derivedName = operation.name ?? operation.source.fullName?.replace(/^refs\/remotes\/origin\//, '') ?? 'unknown';
       return Promise.resolve({
-        fullName: `refs/heads/${operation.name}`,
-        name: operation.name,
+        fullName: `refs/heads/${derivedName}`,
+        name: derivedName,
         head: 'abc',
         upstream: operation.source.kind === 'remoteTracking' ? 'origin/main' : null,
       });
@@ -335,8 +347,11 @@ describe('WorkspaceHistory', () => {
         path: '/work/feature-tree',
         branchFullName: 'refs/heads/rb/feature',
         worktreeRemoved: true,
+        worktreeRemovalError: null,
         branchDeleted: true,
         branchDeletionError: null,
+        mode: 'safe',
+        stash: null,
       });
     }
     if (command === 'repository_commit_detail') {
@@ -1334,24 +1349,8 @@ describe('WorkspaceHistory', () => {
     await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(trigger));
   });
 
-  it('returns focus after cancelling branch creation and closes a remote form in current-only mode', async () => {
+  it('returns focus after cancelling branch creation', async () => {
     const { fixture } = await createFixture(defaultIpc);
-    const remote = fixture.nativeElement.querySelector('[aria-label="Remote branches"]') as HTMLElement;
-    (remote.querySelector('.folder-row') as HTMLButtonElement).click();
-    fixture.detectChanges();
-    const remoteTrigger = fixture.nativeElement.querySelector('[aria-label="Create local branch from origin/main"]') as HTMLButtonElement;
-    remoteTrigger.click();
-    fixture.detectChanges();
-    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('new-branch-name'));
-    const currentOnly = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLLabelElement>('.toggle-control')]
-      .find((label) => label.textContent?.includes('Current only'))
-      ?.querySelector('input') as HTMLInputElement;
-    currentOnly.click();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.navigation-inline-form')).toBeNull();
-
-    currentOnly.click();
-    fixture.detectChanges();
     const newBranch = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.workspace-bar button')]
       .find((button) => button.textContent?.includes('New branch')) as HTMLButtonElement;
     newBranch.click();
@@ -1362,28 +1361,62 @@ describe('WorkspaceHistory', () => {
     await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(newBranch));
   });
 
-  it('creates a tracking branch from the exact selected remote ref', async () => {
+  it('creates the same-named local tracking branch directly from the exact remote ref', async () => {
     const { fixture, invoke } = await createFixture(defaultIpc);
     const remote = fixture.nativeElement.querySelector('[aria-label="Remote branches"]') as HTMLElement;
     (remote.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
     (fixture.nativeElement.querySelector('[aria-label="Create local branch from origin/main"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
     fixture.detectChanges();
-    const input = fixture.nativeElement.querySelector('#new-branch-name') as HTMLInputElement;
-    input.value = 'tracking-main';
-    input.dispatchEvent(new Event('input'));
+
+    expect(invoke).toHaveBeenCalledWith('create_repository_branch', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        name: null,
+        source: {
+          kind: 'remoteTracking',
+          fullName: 'refs/remotes/origin/main',
+          expectedOid: 'abc',
+        },
+      },
+    });
+    expect(fixture.nativeElement.querySelector('.navigation-inline-form')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Created local branch “main” tracking origin/main.');
+    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('navigation-action-notice'));
+  });
+
+  it('preserves nested branch path segments when deriving the local name from a remote ref', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+            { kind: 'remote', fullName: 'refs/remotes/origin/rb/feature', name: 'origin/rb/feature', oid: 'def', current: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [],
+          stashes: [],
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const remote = fixture.nativeElement.querySelector('[aria-label="Remote branches"]') as HTMLElement;
+    (remote.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
-    (fixture.nativeElement.querySelector('.navigation-inline-form button[type="submit"]') as HTMLButtonElement).click();
+    (remote.querySelectorAll('.folder-row')[1] as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (remote.querySelector('[aria-label="Create local branch from origin/rb/feature"]') as HTMLButtonElement).click();
     await fixture.whenStable();
 
     expect(invoke).toHaveBeenCalledWith('create_repository_branch', {
       repositoryId: 'skibidibi-git',
       operation: {
-        name: 'tracking-main',
+        name: null,
         source: {
           kind: 'remoteTracking',
-          fullName: 'refs/remotes/origin/main',
-          expectedOid: 'abc',
+          fullName: 'refs/remotes/origin/rb/feature',
+          expectedOid: 'def',
         },
       },
     });
@@ -1811,46 +1844,216 @@ describe('WorkspaceHistory', () => {
     expect(navigation.textContent).not.toContain('feature');
     expect(navigation.textContent).not.toContain('Remote branches');
     expect(navigation.textContent).not.toContain('Stashes');
-    expect(navigation.textContent).not.toContain('Pull Requests');
+    expect(navigation.textContent).toContain('Pull Requests');
     expect(navigation.querySelectorAll('.worktree-row')).toHaveLength(1);
     expect(globalThis.localStorage.getItem('skibidibi-git.workspace.current-only.skibidibi-git')).toBe('true');
   });
 
-  it('confirms and deletes only a non-current local branch', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+  it('opens an in-app dialog and deletes a non-current local branch only after explicit confirmation', async () => {
     const { fixture, invoke } = await createFixture(defaultIpc);
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
 
     (local.querySelector('[aria-label="Delete local branch rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const dialog = fixture.nativeElement.querySelector('[role="alertdialog"]') as HTMLElement;
+    expect(dialog.textContent).toContain('Delete local branch?');
+    expect(dialog.textContent).toContain('rb/feature');
+    expect(invoke.mock.calls.some(([command]) => command === 'delete_repository_branch')).toBe(false);
+    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('cancel-reference-deletion'));
+
+    const confirm = dialog.querySelector('#confirm-reference-deletion') as HTMLButtonElement;
+    confirm.click();
+    confirm.click();
     await fixture.whenStable();
 
-    expect(confirm).toHaveBeenCalledWith('Delete local branch “rb/feature”? This cannot be undone.');
-    expect(invoke).toHaveBeenCalledWith('delete_repository_branch', {
+    expect(invoke.mock.calls.filter(([command]) => command === 'delete_repository_branch')).toEqual([[
+      'delete_repository_branch',
+      {
       repositoryId: 'skibidibi-git',
       fullName: 'refs/heads/rb/feature',
       expectedOid: 'def',
-    });
-    confirm.mockRestore();
+      },
+    ]]);
   });
 
-  it('warns about the associated branch and unmerged commits before removing a worktree', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+  it('lists the associated branch before removing a worktree after explicit confirmation', async () => {
     const { fixture, invoke } = await createFixture(defaultIpc);
 
     (fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/feature-tree"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const dialog = fixture.nativeElement.querySelector('[role="alertdialog"]') as HTMLElement;
+    expect(dialog.textContent).toContain('/work/feature-tree');
+    expect(dialog.textContent).toContain('Local branch to delete: rb/feature');
+    expect(dialog.textContent).toContain('Unmerged commits may be lost');
+    expect(invoke.mock.calls.some(([command]) => command === 'remove_repository_worktree')).toBe(false);
+
+    (dialog.querySelector('#confirm-reference-deletion') as HTMLButtonElement).click();
     await fixture.whenStable();
 
-    expect(confirm.mock.calls[0][0]).toContain('associated branch “rb/feature” will also be deleted');
-    expect(confirm.mock.calls[0][0]).toContain('Unmerged commits may be lost');
     expect(invoke).toHaveBeenCalledWith('remove_repository_worktree', {
       repositoryId: 'skibidibi-git',
       path: '/work/feature-tree',
       expectedHead: 'def',
       branchFullName: 'refs/heads/rb/feature',
+      mode: 'safe',
+      stashMessage: null,
     });
-    confirm.mockRestore();
+  });
+
+  it('requires acknowledgement before force removing a worktree without a stash', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/feature-tree"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('[role="alertdialog"]') as HTMLElement;
+
+    (dialog.querySelector('input[value="force"]') as HTMLInputElement).click();
+    fixture.detectChanges();
+    const confirm = dialog.querySelector('#confirm-reference-deletion') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(dialog.textContent).toContain('modified, untracked and ignored files can be permanently deleted');
+    (dialog.querySelector('.force-removal-acknowledgement input') as HTMLInputElement).click();
+    fixture.detectChanges();
+    expect(confirm.disabled).toBe(false);
+
+    confirm.click();
+    await fixture.whenStable();
+    expect(invoke).toHaveBeenCalledWith('remove_repository_worktree', {
+      repositoryId: 'skibidibi-git',
+      path: '/work/feature-tree',
+      expectedHead: 'def',
+      branchFullName: 'refs/heads/rb/feature',
+      mode: 'force',
+      stashMessage: null,
+    });
+  });
+
+  it('sends the existing WIP name when stashing changes before force removal', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/feature-tree"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('[role="alertdialog"]') as HTMLElement;
+
+    (dialog.querySelector('input[value="stashAndForce"]') as HTMLInputElement).click();
+    fixture.detectChanges();
+    const message = (dialog.querySelector('.worktree-removal-warning code') as HTMLElement).textContent?.trim() ?? '';
+    expect(message).toMatch(/^WIP \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} rb\/feature$/);
+    expect(dialog.textContent).toContain('Ignored files');
+
+    (dialog.querySelector('#confirm-reference-deletion') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    expect(invoke).toHaveBeenCalledWith('remove_repository_worktree', {
+      repositoryId: 'skibidibi-git',
+      path: '/work/feature-tree',
+      expectedHead: 'def',
+      branchFullName: 'refs/heads/rb/feature',
+      mode: 'stashAndForce',
+      stashMessage: message,
+    });
+  });
+
+  it('keeps the dialog open after safe removal is rejected and never retries with force', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'remove_repository_worktree'
+        ? Promise.resolve({
+            path: '/work/feature-tree',
+            branchFullName: 'refs/heads/rb/feature',
+            worktreeRemoved: false,
+            worktreeRemovalError: 'contains modified or untracked files',
+            branchDeleted: false,
+            branchDeletionError: null,
+            mode: 'safe',
+            stash: null,
+          })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    (fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/feature-tree"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#confirm-reference-deletion') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('#worktree-removal-dialog-error').textContent).toContain(
+      'contains modified or untracked files',
+    );
+    const removalCalls = invoke.mock.calls.filter(([command]) => command === 'remove_repository_worktree');
+    expect(removalCalls).toHaveLength(1);
+    expect(removalCalls[0][1]).toMatchObject({ mode: 'safe', stashMessage: null });
+  });
+
+  it('states that no branch will be deleted for a detached worktree', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [{ path: '/work/detached', head: 'def', branch: null, detached: true, bare: false, locked: false, lockReason: null, prunable: false, prunableReason: null }],
+          stashes: [],
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+
+    (fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/detached"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const dialog = fixture.nativeElement.querySelector('[role="alertdialog"]') as HTMLElement;
+    expect(dialog.textContent).toContain('No local branch will be deleted because this worktree is detached.');
+    expect(invoke.mock.calls.some(([command]) => command === 'remove_repository_worktree')).toBe(false);
+  });
+
+  it('does not invoke destructive branch or worktree commands when the in-app dialog is cancelled', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const branchTrigger = local.querySelector('[aria-label="Delete local branch rb/feature"]') as HTMLButtonElement;
+    branchTrigger.click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#cancel-reference-deletion') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(branchTrigger));
+
+    const worktreeTrigger = fixture.nativeElement.querySelector('[aria-label="Remove worktree /work/feature-tree"]') as HTMLButtonElement;
+    worktreeTrigger.click();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('[role="alertdialog"]') as HTMLElement;
+    dialog.dispatchEvent(new Event('cancel', { bubbles: false, cancelable: true }));
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(invoke.mock.calls.some(([command]) => command === 'delete_repository_branch')).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === 'remove_repository_worktree')).toBe(false);
+  });
+
+  it('closes the dialog and focuses the error when branch deletion is rejected', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'delete_repository_branch'
+        ? Promise.reject(new Error('branch is checked out in another worktree'))
+        : defaultIpc(command, request);
+    const { fixture } = await createFixture(ipc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (local.querySelector('[aria-label="Delete local branch rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('#confirm-reference-deletion') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('#navigation-action-error').textContent).toContain(
+      'branch is checked out in another worktree',
+    );
+    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('navigation-action-error'));
   });
 
   it('runs opt-in auto fetch and live status refreshes and clears their intervals on destroy', async () => {

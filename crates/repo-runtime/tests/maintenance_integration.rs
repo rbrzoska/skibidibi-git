@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use app_domain::{DeleteBranchRequest, RemoveWorktreeRequest};
+use app_domain::{DeleteBranchRequest, RemoveWorktreeRequest, WorktreeRemovalMode};
 use repo_runtime::{MaintenanceError, RepositoryRuntime};
 
 fn git_output(repository: &Path, arguments: &[&str]) -> std::process::Output {
@@ -19,6 +19,13 @@ fn git(repository: &Path, arguments: &[&str]) {
         "git {arguments:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn output_text(repository: &Path, arguments: &[&str]) -> String {
+    String::from_utf8(git_output(repository, arguments).stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
 }
 
 fn repository() -> tempfile::TempDir {
@@ -151,6 +158,8 @@ fn removes_a_clean_linked_worktree_and_its_associated_branch() {
                 path: worktree.path.clone(),
                 expected_head: worktree.head.clone(),
                 branch_full_name: worktree.branch.clone(),
+                mode: WorktreeRemovalMode::Safe,
+                stash_message: None,
             },
         )
         .unwrap();
@@ -229,18 +238,21 @@ fn refuses_to_remove_a_dirty_worktree_without_force_and_keeps_its_branch() {
         .find(|worktree| worktree.branch.as_deref() == Some("refs/heads/dirty-worktree"))
         .unwrap();
 
-    let error = runtime
+    let result = runtime
         .remove_worktree_and_branch(
             repository.path(),
             &RemoveWorktreeRequest {
                 path: worktree.path,
                 expected_head: worktree.head,
                 branch_full_name: worktree.branch,
+                mode: WorktreeRemovalMode::Safe,
+                stash_message: None,
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(error, MaintenanceError::Git(_)));
+    assert!(!result.worktree_removed);
+    assert!(result.worktree_removal_error.is_some());
     assert_eq!(
         fs::read_to_string(linked.join("untracked.txt")).unwrap(),
         "preserve\n"
@@ -252,6 +264,121 @@ fn refuses_to_remove_a_dirty_worktree_without_force_and_keeps_its_branch() {
         )
         .status
         .success()
+    );
+}
+
+#[test]
+fn force_removes_a_dirty_worktree_and_its_branch_without_creating_a_stash() {
+    let repository = repository();
+    let runtime = RepositoryRuntime::default();
+    git(repository.path(), &["branch", "force-worktree"]);
+    let linked_root = tempfile::tempdir().unwrap();
+    let linked = linked_root.path().join("force linked");
+    git(
+        repository.path(),
+        &[
+            "worktree",
+            "add",
+            linked.to_str().unwrap(),
+            "force-worktree",
+        ],
+    );
+    fs::write(linked.join("tracked.txt"), "discarded\n").unwrap();
+    fs::write(linked.join("untracked.txt"), "discarded\n").unwrap();
+    let worktree = runtime
+        .navigation(repository.path())
+        .unwrap()
+        .worktrees
+        .into_iter()
+        .find(|worktree| worktree.branch.as_deref() == Some("refs/heads/force-worktree"))
+        .unwrap();
+
+    let result = runtime
+        .remove_worktree_and_branch(
+            repository.path(),
+            &RemoveWorktreeRequest {
+                path: worktree.path,
+                expected_head: worktree.head,
+                branch_full_name: worktree.branch,
+                mode: WorktreeRemovalMode::Force,
+                stash_message: None,
+            },
+        )
+        .unwrap();
+
+    assert!(result.worktree_removed);
+    assert!(result.branch_deleted);
+    assert!(result.stash.is_none());
+    assert!(!linked.exists());
+    assert!(output_text(repository.path(), &["stash", "list"]).is_empty());
+}
+
+#[test]
+fn stash_and_force_preserves_staged_unstaged_and_untracked_changes_before_removal() {
+    let repository = repository();
+    let runtime = RepositoryRuntime::default();
+    git(repository.path(), &["branch", "stash-force-worktree"]);
+    let linked_root = tempfile::tempdir().unwrap();
+    let linked = linked_root.path().join("stash force linked");
+    git(
+        repository.path(),
+        &[
+            "worktree",
+            "add",
+            linked.to_str().unwrap(),
+            "stash-force-worktree",
+        ],
+    );
+    fs::write(linked.join("tracked.txt"), "staged\n").unwrap();
+    git(&linked, &["add", "tracked.txt"]);
+    fs::write(linked.join("tracked.txt"), "worktree\n").unwrap();
+    fs::write(linked.join("untracked.txt"), "untracked\n").unwrap();
+    let worktree = runtime
+        .navigation(repository.path())
+        .unwrap()
+        .worktrees
+        .into_iter()
+        .find(|worktree| worktree.branch.as_deref() == Some("refs/heads/stash-force-worktree"))
+        .unwrap();
+    let message = "WIP 2026-07-16T05:00:00 stash-force-worktree";
+
+    let result = runtime
+        .remove_worktree_and_branch(
+            repository.path(),
+            &RemoveWorktreeRequest {
+                path: worktree.path,
+                expected_head: worktree.head,
+                branch_full_name: worktree.branch,
+                mode: WorktreeRemovalMode::StashAndForce,
+                stash_message: Some(message.to_owned()),
+            },
+        )
+        .unwrap();
+
+    assert!(result.worktree_removed);
+    assert!(result.branch_deleted);
+    assert!(result.stash.is_some());
+    assert!(output_text(repository.path(), &["stash", "list", "--format=%gs"]).contains(message));
+    assert!(!linked.exists());
+
+    git(
+        repository.path(),
+        &["stash", "apply", "--index", "stash@{0}"],
+    );
+    assert_eq!(
+        fs::read_to_string(repository.path().join("tracked.txt")).unwrap(),
+        "worktree\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.path().join("untracked.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(
+        output_text(
+            repository.path(),
+            &["diff", "--cached", "--", "tracked.txt"]
+        )
+        .contains("+staged")
     );
 }
 

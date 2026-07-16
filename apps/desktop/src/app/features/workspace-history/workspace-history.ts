@@ -1,16 +1,20 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  type ElementRef,
   type OnDestroy,
   computed,
+  effect,
   inject,
   signal,
+  viewChild,
 } from '@angular/core';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 
 import {
   DESKTOP_IPC,
   type CommitChangedFile,
+  type BranchCreationSource,
   type ChangeSelection,
   type ConflictFileDetailResponse,
   type ConflictFileSummary,
@@ -31,8 +35,12 @@ import {
   type StashChangedFile,
   type StashFileSource,
   type SwitchRepositoryBranchResponse,
+  type WorktreeRemovalMode,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
+import { GitHubAccountStore, GitHubRepositoryPullRequestStore } from '../../core/github';
+import { AppIcon } from '../../shared/app-icon/app-icon';
+import { GitHubPullRequestInspector, GitHubPullRequestList } from '../github';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import {
   BranchExpansionState,
@@ -64,14 +72,22 @@ import {
 
 type HistoryPhase = 'idle' | 'loading' | 'ready' | 'error';
 type FileDiffDisplayMode = 'contextual' | 'full';
-type HistorySelection = 'none' | 'working-tree' | 'commit' | 'stash';
+type HistorySelection = 'none' | 'working-tree' | 'commit' | 'stash' | 'pull-request';
 type WorkingTreeMutation =
   | { readonly action: IndexAction; readonly scope: 'selected' | 'all' }
   | { readonly action: 'commit' | 'amend'; readonly scope: null };
 type BranchCreationTarget =
   | { readonly kind: 'current'; readonly label: string }
-  | { readonly kind: 'commit'; readonly oid: string; readonly label: string }
-  | { readonly kind: 'remote'; readonly branch: RepositoryBranch };
+  | { readonly kind: 'commit'; readonly oid: string; readonly label: string };
+type DeletionConfirmation =
+  | { readonly kind: 'branch'; readonly branch: RepositoryBranch; readonly returnFocus: HTMLElement }
+  | {
+      readonly kind: 'worktree';
+      readonly worktree: RepositoryWorktree;
+      readonly branchFullName: string | null;
+      readonly branchLabel: string | null;
+      readonly returnFocus: HTMLElement;
+    };
 type DetailState =
   | { readonly kind: 'idle' }
   | { readonly kind: 'loading' }
@@ -123,8 +139,8 @@ const SIDEBAR_RESIZER_WIDTH = 0.4 * ROOT_FONT_SIZE;
 
 @Component({
   selector: 'app-workspace-history',
-  imports: [RouterLink],
-  providers: [RepositoryStatusStore],
+  imports: [AppIcon, GitHubPullRequestInspector, GitHubPullRequestList, RouterLink],
+  providers: [GitHubRepositoryPullRequestStore, RepositoryStatusStore],
   templateUrl: './workspace-history.html',
   styleUrl: './workspace-history.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -134,6 +150,7 @@ export class WorkspaceHistory implements OnDestroy {
   private readonly router = inject(Router);
   private readonly catalog = inject(RepositoryCatalog);
   private readonly ipc = inject(DESKTOP_IPC);
+  protected readonly githubAccounts = inject(GitHubAccountStore);
   private readonly branchExpansionState = new BranchExpansionState();
   private historyRequestGeneration = 0;
   private detailRequestGeneration = 0;
@@ -155,6 +172,16 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly statusStore = inject(RepositoryStatusStore);
   protected readonly repositoryId = this.route.snapshot.paramMap.get('repositoryId') ?? '';
   protected readonly repository = computed(() => this.catalog.find(this.repositoryId));
+  protected readonly githubAccountId = computed(() => {
+    const state = this.githubAccounts.state();
+    const host = this.repository()?.hostedIdentity?.host;
+    if (state.kind !== 'ready' || host === undefined) {
+      return null;
+    }
+    return state.accounts.find(
+      (account) => account.state === 'connected' && account.host.toLowerCase() === host.toLowerCase(),
+    )?.id ?? null;
+  });
   private readonly refreshStorage = browserWorkspaceRefreshStorage();
   private readonly initialRefreshPreferences = readWorkspaceRefreshPreferences(
     this.refreshStorage,
@@ -187,6 +214,32 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly fetchingRepository = signal(false);
   protected readonly deletingBranch = signal<string | null>(null);
   protected readonly removingWorktree = signal<string | null>(null);
+  protected readonly deletionConfirmation = signal<DeletionConfirmation | null>(null);
+  protected readonly worktreeRemovalMode = signal<WorktreeRemovalMode>('safe');
+  protected readonly forceRemovalAcknowledged = signal(false);
+  protected readonly worktreeRemovalStashMessage = signal<string | null>(null);
+  protected readonly worktreeRemovalDialogError = signal('');
+  private readonly deletionDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceDeletionDialog');
+  private readonly openDeletionDialog = effect(() => {
+    if (this.deletionConfirmation() === null) {
+      return;
+    }
+    const dialog = this.deletionDialogElement()?.nativeElement;
+    if (dialog === undefined || dialog.open) {
+      return;
+    }
+    globalThis.queueMicrotask(() => {
+      if (!dialog.isConnected || dialog.open || this.deletionConfirmation() === null) {
+        return;
+      }
+      try {
+        dialog.showModal();
+      } catch {
+        // jsdom and older webviews may not implement the top-layer API.
+        dialog.setAttribute('open', '');
+      }
+    });
+  });
   protected readonly branchCreationTarget = signal<BranchCreationTarget | null>(null);
   protected readonly newBranchName = signal('');
   protected readonly creatingBranch = signal(false);
@@ -224,6 +277,7 @@ export class WorkspaceHistory implements OnDestroy {
       this.fetchingRepository() ||
       this.deletingBranch() !== null ||
       this.removingWorktree() !== null ||
+      this.deletionConfirmation() !== null ||
       this.creatingBranch() ||
       this.stashMutation() !== null ||
       this.networkMutation() !== null ||
@@ -414,11 +468,6 @@ export class WorkspaceHistory implements OnDestroy {
 
   protected setCurrentOnly(enabled: boolean): void {
     this.currentOnly.set(enabled);
-    if (enabled && this.branchCreationTarget()?.kind === 'remote') {
-      this.branchCreationTarget.set(null);
-      this.newBranchName.set('');
-      this.branchCreationReturnFocus = null;
-    }
     writeWorkspaceRefreshSetting(this.refreshStorage, this.repositoryId, 'currentOnly', enabled);
   }
 
@@ -876,16 +925,20 @@ export class WorkspaceHistory implements OnDestroy {
     this.focusAfterRender('new-branch-name');
   }
 
-  protected startBranchFromRemote(branch: RepositoryBranch, trigger: HTMLElement): void {
+  protected async createBranchFromRemote(branch: RepositoryBranch): Promise<void> {
     if (branch.kind !== 'remote' || this.workspaceActionBusy()) {
       return;
     }
-    this.branchCreationTarget.set({ kind: 'remote', branch });
-    this.branchCreationReturnFocus = trigger;
-    this.newBranchName.set('');
-    this.navigationActionError.set('');
-    this.navigationActionNotice.set('');
-    this.focusAfterRender('new-branch-name');
+    await this.submitBranchCreation(
+      null,
+      {
+        kind: 'remoteTracking',
+        fullName: branch.fullName,
+        expectedOid: branch.oid,
+      },
+      null,
+      false,
+    );
   }
 
   protected startBranchFromCommit(detail: RepositoryCommitDetailResponse, trigger: HTMLElement): void {
@@ -921,13 +974,7 @@ export class WorkspaceHistory implements OnDestroy {
     if (target === null || name.length === 0 || state.kind !== 'ready' || this.workspaceActionBusy()) {
       return;
     }
-    const source = target.kind === 'remote'
-      ? {
-          kind: 'remoteTracking' as const,
-          fullName: target.branch.fullName,
-          expectedOid: target.branch.oid,
-        }
-      : target.kind === 'commit'
+    const source: BranchCreationSource | null = target.kind === 'commit'
         ? { kind: 'commit' as const, oid: target.oid }
         : state.status.branch.oid === null
           ? null
@@ -935,6 +982,16 @@ export class WorkspaceHistory implements OnDestroy {
     if (source === null) {
       return;
     }
+
+    await this.submitBranchCreation(name, source, this.branchCreationReturnFocus, true);
+  }
+
+  private async submitBranchCreation(
+    name: string | null,
+    source: BranchCreationSource,
+    returnFocus: HTMLElement | null,
+    closeForm: boolean,
+  ): Promise<void> {
 
     this.navigationActionError.set('');
     this.navigationActionNotice.set('');
@@ -948,8 +1005,10 @@ export class WorkspaceHistory implements OnDestroy {
       if (this.destroyed) {
         return;
       }
-      this.branchCreationTarget.set(null);
-      this.newBranchName.set('');
+      if (closeForm) {
+        this.branchCreationTarget.set(null);
+        this.newBranchName.set('');
+      }
       restoreFocusOnSuccess = true;
       this.navigationActionNotice.set(
         created.upstream === null
@@ -971,8 +1030,12 @@ export class WorkspaceHistory implements OnDestroy {
       if (!this.destroyed) {
         this.creatingBranch.set(false);
         if (restoreFocusOnSuccess) {
-          this.restoreFocusAfterRender(this.branchCreationReturnFocus);
-          this.branchCreationReturnFocus = null;
+          if (closeForm) {
+            this.restoreFocusAfterRender(returnFocus);
+            this.branchCreationReturnFocus = null;
+          } else {
+            this.focusAfterRender('navigation-action-notice');
+          }
         }
       }
     }
@@ -1220,13 +1283,83 @@ export class WorkspaceHistory implements OnDestroy {
     await Promise.all([this.statusStore.refresh(), this.reloadHistory(), this.loadNavigation()]);
   }
 
-  protected async deleteBranch(branch: RepositoryBranch): Promise<void> {
+  protected requestBranchDeletion(branch: RepositoryBranch, trigger: HTMLElement): void {
     if (branch.kind !== 'local' || branch.current || this.workspaceActionBusy()) {
       return;
     }
-    if (!globalThis.confirm(`Delete local branch “${branch.name}”? This cannot be undone.`)) {
+    this.deletionConfirmation.set({ kind: 'branch', branch, returnFocus: trigger });
+    this.focusAfterRender('cancel-reference-deletion');
+  }
+
+  protected requestWorktreeRemoval(worktree: RepositoryWorktree, trigger: HTMLElement): void {
+    if (this.workspaceActionBusy() || this.worktreeRemovalDisabledReason(worktree) !== null) {
       return;
     }
+    const branchFullName = this.worktreeBranchFullName(worktree);
+    this.deletionConfirmation.set({
+      kind: 'worktree',
+      worktree,
+      branchFullName,
+      branchLabel: branchFullName === null ? null : this.worktreeBranchLabel(worktree),
+      returnFocus: trigger,
+    });
+    this.worktreeRemovalMode.set('safe');
+    this.forceRemovalAcknowledged.set(false);
+    this.worktreeRemovalStashMessage.set(null);
+    this.worktreeRemovalDialogError.set('');
+    this.focusAfterRender('cancel-reference-deletion');
+  }
+
+  protected setWorktreeRemovalMode(mode: WorktreeRemovalMode): void {
+    const confirmation = this.deletionConfirmation();
+    if (confirmation?.kind !== 'worktree' || this.removingWorktree() !== null) {
+      return;
+    }
+    this.worktreeRemovalMode.set(mode);
+    this.forceRemovalAcknowledged.set(false);
+    this.worktreeRemovalDialogError.set('');
+    this.worktreeRemovalStashMessage.set(
+      mode === 'stashAndForce'
+        ? buildWipStashMessage(confirmation.branchLabel ?? 'detached HEAD')
+        : null,
+    );
+  }
+
+  protected setForceRemovalAcknowledged(acknowledged: boolean): void {
+    this.forceRemovalAcknowledged.set(acknowledged);
+  }
+
+  protected cancelReferenceDeletion(): void {
+    if (this.deletingBranch() !== null || this.removingWorktree() !== null) {
+      return;
+    }
+    const confirmation = this.deletionConfirmation();
+    this.deletionConfirmation.set(null);
+    this.restoreFocusAfterRender(confirmation?.returnFocus ?? null);
+  }
+
+  protected async confirmReferenceDeletion(): Promise<void> {
+    const confirmation = this.deletionConfirmation();
+    if (confirmation === null || this.deletingBranch() !== null || this.removingWorktree() !== null) {
+      return;
+    }
+    if (confirmation.kind === 'branch') {
+      await this.deleteBranch(confirmation.branch);
+    } else {
+      const mode = this.worktreeRemovalMode();
+      if (mode === 'force' && !this.forceRemovalAcknowledged()) {
+        return;
+      }
+      await this.removeWorktree(
+        confirmation.worktree,
+        confirmation.branchFullName,
+        mode,
+        this.worktreeRemovalStashMessage(),
+      );
+    }
+  }
+
+  private async deleteBranch(branch: RepositoryBranch): Promise<void> {
     this.navigationActionError.set('');
     this.deletingBranch.set(branch.fullName);
     try {
@@ -1236,15 +1369,20 @@ export class WorkspaceHistory implements OnDestroy {
         expectedOid: branch.oid,
       });
       if (!this.destroyed) {
+        this.deletionConfirmation.set(null);
+        this.navigationActionNotice.set(`Deleted local branch “${branch.name}”.`);
         await this.loadNavigation();
+        this.focusAfterRender('navigation-action-notice');
       }
     } catch (error) {
       if (!this.destroyed) {
         this.navigationActionError.set(this.errorMessage(error, 'The local branch could not be deleted.'));
+        this.focusAfterRender('navigation-action-error');
       }
     } finally {
       if (!this.destroyed) {
         this.deletingBranch.set(null);
+        this.deletionConfirmation.set(null);
       }
     }
   }
@@ -1262,42 +1400,70 @@ export class WorkspaceHistory implements OnDestroy {
     return null;
   }
 
-  protected async removeWorktree(worktree: RepositoryWorktree): Promise<void> {
-    if (this.workspaceActionBusy() || this.worktreeRemovalDisabledReason(worktree) !== null) {
-      return;
-    }
-    const branchFullName = this.worktreeBranchFullName(worktree);
-    const branchWarning = branchFullName === null
-      ? ''
-      : `\n\nThe associated branch “${this.worktreeBranchLabel(worktree)}” will also be deleted.`;
-    if (!globalThis.confirm(`Remove worktree “${worktree.path}”?${branchWarning}\n\nUnmerged commits may be lost. This cannot be undone.`)) {
-      return;
-    }
+  private async removeWorktree(
+    worktree: RepositoryWorktree,
+    branchFullName: string | null,
+    mode: WorktreeRemovalMode,
+    stashMessage: string | null,
+  ): Promise<void> {
     this.navigationActionError.set('');
+    this.worktreeRemovalDialogError.set('');
     this.removingWorktree.set(worktree.path);
+    let closeDialog = false;
     try {
       const result = await this.ipc.invoke('remove_repository_worktree', {
         repositoryId: this.repositoryId,
         path: worktree.path,
         expectedHead: worktree.head,
         branchFullName,
+        mode,
+        stashMessage,
       });
       if (!this.destroyed) {
+        if (!result.worktreeRemoved) {
+          const retainedStash = result.stash === null
+            ? ''
+            : ` Saved changes remain available as ${result.stash.selector}.`;
+          this.worktreeRemovalDialogError.set(
+            `${result.worktreeRemovalError ?? 'The worktree was not removed.'}${retainedStash}`,
+          );
+          this.focusAfterRender('worktree-removal-dialog-error');
+          return;
+        }
+        closeDialog = true;
         if (result.branchDeletionError !== null) {
           this.navigationActionError.set(
             `The worktree was removed, but its branch was kept: ${result.branchDeletionError}`,
           );
+        } else {
+          const stashNotice = result.stash === null
+            ? ''
+            : ` Changes were saved as ${result.stash.selector}.`;
+          this.navigationActionNotice.set(
+            result.branchDeleted
+              ? `Removed worktree and deleted local branch “${this.worktreeBranchLabel(worktree)}”.${stashNotice}`
+              : `Removed worktree. No local branch was deleted.${stashNotice}`,
+          );
         }
         await this.loadNavigation();
+        this.focusAfterRender(
+          result.branchDeletionError === null ? 'navigation-action-notice' : 'navigation-action-error',
+        );
       }
     } catch (error) {
       if (!this.destroyed) {
-        this.navigationActionError.set(this.errorMessage(error, 'The worktree could not be removed.'));
+        this.worktreeRemovalDialogError.set(
+          this.errorMessage(error, 'The worktree could not be removed.'),
+        );
         await this.loadNavigation();
+        this.focusAfterRender('worktree-removal-dialog-error');
       }
     } finally {
       if (!this.destroyed) {
         this.removingWorktree.set(null);
+        if (closeDialog) {
+          this.deletionConfirmation.set(null);
+        }
       }
     }
   }
@@ -1584,6 +1750,20 @@ export class WorkspaceHistory implements OnDestroy {
         });
       }
     }
+  }
+
+  protected selectPullRequest(): void {
+    ++this.detailRequestGeneration;
+    ++this.fileDiffRequestGeneration;
+    this.historySelection.set('pull-request');
+    this.selectedOid.set(null);
+    this.detailState.set({ kind: 'idle' });
+    this.stashDetailState.set({ kind: 'idle' });
+    this.selectedStash.set(null);
+    this.selectedFilePath.set(null);
+    this.selectedWorkingTreeEntryKind.set(null);
+    this.selectedStashFileSource.set(null);
+    this.fileDiffState.set({ kind: 'idle' });
   }
 
   protected selectWorkingTree(): void {

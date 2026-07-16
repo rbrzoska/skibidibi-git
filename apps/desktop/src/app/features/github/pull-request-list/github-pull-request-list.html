@@ -1,0 +1,45 @@
+<section class="github-pull-requests" aria-labelledby="github-pr-list-heading">
+  @let state = store.listState();
+  <header>
+    <strong id="github-pr-list-heading">Pull Requests</strong>
+    @if (state.kind === 'ready') { <small>{{ state.pullRequests.length }}</small> }
+  </header>
+  @if (accountId() === null) {
+    <p class="list-state">Connect a GitHub account to load pull requests.</p>
+  } @else {
+    @if (state.kind === 'idle' || state.kind === 'loading') {
+      <p class="list-state" role="status">Loading pull requests…</p>
+    } @else if (state.kind === 'error') {
+      <div class="list-state error" role="alert"><p>{{ state.message }}</p><button type="button" (click)="retry()">Try again</button></div>
+    } @else if (state.pullRequests.length === 0) {
+      <p class="list-state">No pull requests found.</p>
+    } @else {
+      <ul>
+        @for (pullRequest of state.pullRequests; track pullRequest.number) {
+          <li>
+            <button
+              type="button"
+              [class.selected]="store.selectedNumber() === pullRequest.number"
+              [attr.aria-current]="store.selectedNumber() === pullRequest.number ? 'true' : null"
+              (click)="select(pullRequest)"
+            >
+              <span class="title"><strong>#{{ pullRequest.number }} {{ pullRequest.title }}</strong><small>{{ pullRequest.headRefName }} → {{ pullRequest.baseRefName }}</small></span>
+              <span class="badges">
+                @if (pullRequest.draft) { <small>Draft</small> }
+                @if (pullRequest.authoredByViewer) { <small>Mine</small> }
+                @if (pullRequest.reviewRequestedFromViewer === true) { <small>Review requested</small> }
+                @if (pullRequest.unresolvedThreadCount !== null && pullRequest.unresolvedThreadCount > 0) { <small>{{ pullRequest.unresolvedThreadCount }} unresolved</small> }
+              </span>
+            </button>
+          </li>
+        }
+      </ul>
+      @if (state.nextCursor !== null) {
+        <button class="load-more" type="button" [disabled]="store.loadingMore()" (click)="loadMore()">
+          {{ store.loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      }
+      @if (store.paginationError()) { <p class="list-state error" role="alert">{{ store.paginationError() }}</p> }
+    }
+  }
+</section>

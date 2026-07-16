@@ -1,5 +1,6 @@
 mod branch_actions;
 mod branch_creation;
+mod clone;
 mod conflict_resolution;
 mod file_diff;
 mod history;
@@ -13,6 +14,7 @@ mod working_tree_diff;
 
 pub use branch_actions::{BranchActionGitExecutor, BranchSwitchError};
 pub use branch_creation::{BranchCreationError, BranchCreationGitExecutor};
+pub use clone::{CloneGitExecutor, CloneRepositoryError};
 pub use conflict_resolution::{ConflictResolutionError, ConflictResolutionGitExecutor};
 pub use file_diff::{FileDiffGitExecutor, FileDiffQuery, FileDiffRuntimeError, file_diff};
 pub use history::{

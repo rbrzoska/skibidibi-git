@@ -7,43 +7,70 @@ use std::{
 
 use app_domain::{
     AmendCommitRequest, AmendCommitResult, ApplyIndexChangeRequest, ApplyIndexChangeResult,
-    ApplyStashRequest, ApplyStashResult, CommitDetails, CommitHistoryPage, ConflictFileDetail,
-    ConflictFileDetailRequest, ConflictListResult, CreateBranchRequest, CreateBranchResult,
-    CreateCommitRequest, CreateCommitResult, DeleteBranchRequest, DeleteBranchResult,
-    DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff, IntegrationHealth,
-    IntegrationHealthIssue, IntegrationHealthState, PopStashRequest, PopStashResult, PullRequest,
-    PullResult, PushAnalysis, PushRequest, PushResult, PushStashRequest, PushStashResult,
-    RememberRepositoryInput, RememberedRepository, RemoveWorktreeRequest, RemoveWorktreeResult,
-    RepositoryAvailability, RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider,
-    RepositoryStatus, RepositoryTransport, ResolveConflictRequest, ResolveConflictResult,
-    SetUpstreamRequest, SetUpstreamResult, StashDetails, StashFileDiff, StashFileDiffRequest,
-    StashFileSource, SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff,
+    ApplyStashRequest, ApplyStashResult, CloneRepositoryRequest, CommitDetails, CommitHistoryPage,
+    ConflictFileDetail, ConflictFileDetailRequest, ConflictListResult, CreateBranchRequest,
+    CreateBranchResult, CreateCommitRequest, CreateCommitResult, DeleteBranchRequest,
+    DeleteBranchResult, DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff,
+    IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState, PopStashRequest,
+    PopStashResult, PullRequest, PullResult, PushAnalysis, PushRequest, PushResult,
+    PushStashRequest, PushStashResult, RememberRepositoryInput, RememberedRepository,
+    RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability, RepositoryHealthUpdate,
+    RepositoryNavigation, RepositoryProvider, RepositoryStatus, RepositoryTransport,
+    ResolveConflictRequest, ResolveConflictResult, SetUpstreamRequest, SetUpstreamResult,
+    StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource, SwitchBranchRequest,
+    SwitchBranchResult, WorkingTreeFileDiff, WorktreeRemovalMode,
 };
 use app_store::{CatalogError, RepositoryCatalog};
 use repo_runtime::{
-    BranchCreationError, BranchSwitchError, ConflictResolutionError, FileDiffRuntimeError,
-    HistoryRuntimeError, MaintenanceError, MutationRuntimeError, NavigationRuntimeError,
-    NetworkOperationError, RepositoryRuntime, RepositoryRuntimeError, StashActionError,
-    StashInspectionError, WorkingTreeDiffRuntimeError,
+    BranchCreationError, BranchSwitchError, CloneRepositoryError, ConflictResolutionError,
+    FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError, MutationRuntimeError,
+    NavigationRuntimeError, NetworkOperationError, RepositoryRuntime, RepositoryRuntimeError,
+    StashActionError, StashInspectionError, WorkingTreeDiffRuntimeError,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
+mod github;
+mod maintenance_stats;
+
 struct AppState {
     repositories: RepositoryRuntime,
     catalog: Mutex<RepositoryCatalog>,
+    github_accounts: Mutex<app_store::GitHubAccountStore>,
+    github_credentials: Arc<dyn secret_store::CredentialStore>,
+    github_config: github_client::GitHubClientConfig,
+    github_transport: github_client::ReqwestTransport,
+    github_mutations: tokio::sync::Mutex<()>,
+    github_account_generations: Mutex<HashMap<String, u64>>,
     mutations: MutationLockRegistry,
+    clones: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
-    fn new(catalog: RepositoryCatalog) -> Self {
-        Self {
+    fn new(
+        catalog: RepositoryCatalog,
+        github_accounts: app_store::GitHubAccountStore,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let api_base_url = url::Url::parse("https://api.github.com/")?;
+        let github_config = github_client::GitHubClientConfig::new(
+            api_base_url.clone(),
+            url::Url::parse("https://api.github.com/graphql")?,
+        )?;
+        let github_transport = github_client::ReqwestTransport::new(api_base_url)?;
+        Ok(Self {
             repositories: RepositoryRuntime::default(),
             catalog: Mutex::new(catalog),
+            github_accounts: Mutex::new(github_accounts),
+            github_credentials: Arc::new(secret_store::OsCredentialStore::new()),
+            github_config,
+            github_transport,
+            github_mutations: tokio::sync::Mutex::new(()),
+            github_account_generations: Mutex::new(HashMap::new()),
             mutations: MutationLockRegistry::default(),
-        }
+            clones: tokio::sync::Mutex::new(()),
+        })
     }
 }
 
@@ -69,7 +96,7 @@ impl MutationLockRegistry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CommandError {
+pub(crate) struct CommandError {
     message: String,
 }
 
@@ -144,6 +171,14 @@ impl From<NetworkOperationError> for CommandError {
 
 impl From<ConflictResolutionError> for CommandError {
     fn from(error: ConflictResolutionError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
+        }
+    }
+}
+
+impl From<CloneRepositoryError> for CommandError {
+    fn from(error: CloneRepositoryError) -> Self {
         Self {
             message: format!("{}: {}", error.code(), error),
         }
@@ -861,6 +896,8 @@ async fn remove_repository_worktree(
     path: String,
     expected_head: Option<String>,
     branch_full_name: Option<String>,
+    mode: WorktreeRemovalMode,
+    stash_message: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<RemoveWorktreeResult, CommandError> {
     let repository_path = resolve_repository_path(&repository_id, &state)?;
@@ -877,6 +914,8 @@ async fn remove_repository_worktree(
                     path,
                     expected_head,
                     branch_full_name,
+                    mode,
+                    stash_message,
                 },
             )
             .map_err(CommandError::from)
@@ -906,6 +945,56 @@ async fn repository_fetch(
     .await
     .map_err(|error| CommandError {
         message: format!("fetch task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_maintenance_stats(
+    repository_id: String,
+    state: State<'_, AppState>,
+) -> Result<maintenance_stats::RepositoryMaintenanceStatisticsResponse, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let last_opened_by_path = lock_catalog(&state)?
+        .list()?
+        .into_iter()
+        .filter_map(|repository| {
+            let last_opened = repository.last_opened_at?;
+            std::fs::canonicalize(repository.canonical_path)
+                .ok()
+                .map(|path| (path, last_opened))
+        })
+        .collect::<HashMap<_, _>>();
+    let repositories = state.repositories.clone();
+    let scanned_at = unix_timestamp()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let navigation = repositories
+            .navigation(&repository_path)
+            .map_err(CommandError::from)?;
+        let repository_last_commit_at = repositories
+            .history_page(&repository_path, 1, None)
+            .ok()
+            .and_then(|page| page.commits.into_iter().next())
+            .map(|commit| commit.author.authored_at);
+        let worktrees = navigation.worktrees.into_iter().map(|worktree| {
+            let last_commit_at = repositories
+                .history_page(Path::new(&worktree.path), 1, None)
+                .ok()
+                .and_then(|page| page.commits.into_iter().next())
+                .map(|commit| commit.author.authored_at);
+            (worktree.path, worktree.branch, last_commit_at)
+        });
+        maintenance_stats::scan_repository_maintenance(
+            &repository_path,
+            repository_last_commit_at,
+            worktrees,
+            &last_opened_by_path,
+            scanned_at,
+        )
+        .map_err(|message| CommandError { message })
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("repository maintenance scan task failed: {error}"),
     })?
 }
 
@@ -996,6 +1085,34 @@ async fn remember_repository(
 }
 
 #[tauri::command]
+async fn clone_repository(
+    source_url: String,
+    destination_parent: String,
+    directory_name: String,
+    state: State<'_, AppState>,
+) -> Result<RememberedRepository, CommandError> {
+    let request = CloneRepositoryRequest {
+        source_url,
+        destination_parent,
+        directory_name,
+    };
+    let repositories = state.repositories.clone();
+    let clone_result = {
+        let _guard = state.clones.lock().await;
+        tauri::async_runtime::spawn_blocking(move || {
+            repositories
+                .clone_repository(&request)
+                .map_err(CommandError::from)
+        })
+        .await
+        .map_err(|error| CommandError {
+            message: format!("repository clone task failed: {error}"),
+        })??
+    };
+    remember_repository(clone_result.repository_path, state).await
+}
+
+#[tauri::command]
 fn set_repository_pinned(
     repository_id: String,
     pinned: bool,
@@ -1041,6 +1158,34 @@ async fn select_repository_directory(
     Ok(SelectRepositoryDirectoryResponse { path })
 }
 
+#[tauri::command]
+async fn select_clone_parent_directory(
+    app: AppHandle,
+    initial_path: Option<String>,
+) -> Result<SelectRepositoryDirectoryResponse, CommandError> {
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Select the parent folder for the clone");
+
+    if let Some(initial_path) = initial_path.filter(|path| Path::new(path).is_dir()) {
+        dialog = dialog.set_directory(initial_path);
+    }
+
+    let path = dialog
+        .blocking_pick_folder()
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|error| CommandError {
+                    message: format!("selected directory path is invalid: {error}"),
+                })
+        })
+        .transpose()?;
+
+    Ok(SelectRepositoryDirectoryResponse { path })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1049,7 +1194,9 @@ pub fn run() {
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
             let catalog = RepositoryCatalog::open(data_directory.join("repositories.sqlite3"))?;
-            app.manage(AppState::new(catalog));
+            let github_accounts =
+                app_store::GitHubAccountStore::open(data_directory.join("github.sqlite3"))?;
+            app.manage(AppState::new(catalog, github_accounts)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1080,11 +1227,20 @@ pub fn run() {
             delete_repository_branch,
             remove_repository_worktree,
             repository_fetch,
+            repository_maintenance_stats,
             select_repository_directory,
+            select_clone_parent_directory,
             list_remembered_repositories,
             remember_repository,
+            clone_repository,
             set_repository_pinned,
-            forget_repository
+            forget_repository,
+            github::github_list_accounts,
+            github::github_connect_pat,
+            github::github_disconnect_account,
+            github::github_list_repositories,
+            github::github_list_pull_requests,
+            github::github_pull_request_detail
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");

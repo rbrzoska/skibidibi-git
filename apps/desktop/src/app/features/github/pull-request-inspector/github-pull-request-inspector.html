@@ -1,0 +1,40 @@
+<section class="github-pr-inspector" aria-label="Pull request inspector">
+  @let state = store.detailState();
+  @if (state.kind === 'idle') {
+    <p class="inspector-state">Select a pull request to inspect its conversation and review threads.</p>
+  } @else if (state.kind === 'loading') {
+    <p class="inspector-state" role="status">Loading pull request #{{ state.number }}…</p>
+  } @else if (state.kind === 'error') {
+    <div class="inspector-state error" role="alert"><p>{{ state.message }}</p><button type="button" (click)="retry(state.number)">Try again</button></div>
+  } @else {
+    <header>
+      <div><small>Pull request #{{ state.detail.number }}</small><h2 id="github-pr-inspector-heading">{{ state.detail.title }}</h2></div>
+      <a [href]="state.detail.url" target="_blank" rel="noreferrer">Open on GitHub</a>
+    </header>
+    <p class="metadata">{{ state.detail.authorLogin }} · {{ state.detail.headRefName }} → {{ state.detail.baseRefName }} · {{ state.detail.state }} · {{ state.detail.changedFiles }} files · <b>+{{ state.detail.additions }}</b> <b>−{{ state.detail.deletions }}</b> · {{ state.detail.mergeability }}</p>
+    @if (state.detail.body) { <div class="body">{{ state.detail.body }}</div> }
+
+    <section aria-labelledby="github-pr-conversation-heading">
+      <h3 id="github-pr-conversation-heading">Conversation</h3>
+      @if (state.detail.comments.length === 0) { <p class="inspector-state">No conversation comments.</p> }
+      @if (state.detail.conversationTruncated) { <p class="inspector-state warning">Showing the first 250 conversation comments.</p> }
+      @for (comment of state.detail.comments; track comment.id) {
+        <article class="comment"><header><strong>{{ comment.authorLogin }}</strong><time [attr.datetime]="comment.createdAt">{{ comment.createdAt }}</time></header><p>{{ comment.body }}</p>@if (comment.url) { <a [href]="comment.url" target="_blank" rel="noreferrer">Open comment</a> }</article>
+      }
+    </section>
+
+    <section aria-labelledby="github-review-threads-heading">
+      <h3 id="github-review-threads-heading">Review threads</h3>
+      @if (state.detail.reviewThreads.length === 0) { <p class="inspector-state">No review threads.</p> }
+      @if (state.detail.reviewThreadsTruncated) { <p class="inspector-state warning">Showing the first 250 review threads.</p> }
+      @for (thread of state.detail.reviewThreads; track thread.id) {
+        <article class="thread" [class.resolved]="thread.resolved">
+          <header><strong>{{ thread.path }}{{ thread.line === null ? '' : ':' + thread.line }}</strong><span>{{ thread.outdated ? 'Outdated' : thread.resolved ? 'Resolved' : 'Open' }}</span></header>
+          @for (comment of thread.comments; track comment.id) {
+            <div class="comment"><header><strong>{{ comment.authorLogin }}</strong><time [attr.datetime]="comment.createdAt">{{ comment.createdAt }}</time></header><p>{{ comment.body }}</p></div>
+          }
+        </article>
+      }
+    </section>
+  }
+</section>

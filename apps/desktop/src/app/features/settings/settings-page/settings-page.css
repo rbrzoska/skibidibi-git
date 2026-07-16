@@ -1,0 +1,42 @@
+:host { display: block; }
+.settings { display: grid; gap: 1rem; max-width: 64rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+.back-link { justify-self: start; display: inline-flex; align-items: center; gap: .35rem; min-height: 1.8rem; border: 1px solid #388bfd; border-radius: .4rem; padding: 0 .6rem; color: #fff; background: #1f6feb; font-size: .72rem; font-weight: 700; text-decoration: none; }
+.back-link:hover, .back-link:focus-visible { background: #388bfd; outline: none; }
+.page-heading > p:last-child, .section-copy { color: #8b949e; }
+.eyebrow { margin: 0; color: #8b949e; font-size: .65rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.settings-card { min-width: 0; border: 1px solid #30363d; border-radius: .7rem; padding: 1rem; background: #161b22; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.section-heading h2 { margin-top: .2rem; font-size: .95rem; }
+.section-copy { max-width: 48rem; margin: .65rem 0 0; font-size: .78rem; line-height: 1.45; }
+.setting-list { display: grid; margin-top: .8rem; border-top: 1px solid #30363d; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 3.25rem; border-bottom: 1px solid #30363d; cursor: pointer; }
+.setting-row > span { display: grid; gap: .15rem; }
+.setting-row strong { font-size: .8rem; }
+.setting-row small, .repository-identity small, .repository-meta small { color: #8b949e; font-size: .7rem; }
+.compact-button { width: auto; min-width: 0; height: 1.55rem; border: 1px solid #30363d; border-radius: .35rem; padding: 0 .5rem; color: #c9d1d9; background: #21262d; font-size: .7rem; cursor: pointer; }
+.maintenance-actions { display: flex; gap: .35rem; }
+.catalog-message { margin: .75rem 0 0; border: 1px dashed #30363d; border-radius: .45rem; padding: .75rem; color: #8b949e; font-size: .75rem; text-align: center; }
+.catalog-message.error { color: #f85149; }
+.repository-list { display: grid; gap: .4rem; margin: .8rem 0 0; padding: 0; list-style: none; }
+.repository-maintenance-row { border: 1px solid #21262d; border-radius: .45rem; background: #0d1117; }
+.repository-summary { display: grid; grid-template-columns: 1.8rem minmax(0, 1fr) auto auto; align-items: center; gap: .65rem; padding: .5rem .6rem; }
+.repository-identity, .repository-meta { min-width: 0; display: grid; gap: .12rem; }
+.repository-identity strong, .repository-identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repository-identity strong, .repository-meta strong { font-size: .75rem; }
+.repository-meta { text-align: right; }
+.scan-error { margin: 0; border-top: 1px solid #21262d; padding: .55rem .65rem; color: #f85149; font-size: .72rem; }
+.scan-results { border-top: 1px solid #21262d; padding: .65rem; }
+.size-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem; margin: 0; }
+.size-summary dt { color: #8b949e; font-size: .62rem; }
+.size-summary dd { margin: .1rem 0 0; font-size: .72rem; }
+.size-summary .commit-age { grid-column: span 2; }
+.commit-age dd, .stale-label { display: flex; gap: .35rem; align-items: center; }
+.commit-age small, .stale-label { color: #d29922; font-size: .62rem; }
+.worktree-stats { display: grid; gap: .35rem; margin: .55rem 0 0; padding: 0; list-style: none; }
+.worktree-stats li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; border-top: 1px solid #21262d; padding-top: .45rem; }
+.worktree-stats li > span { display: grid; gap: .08rem; min-width: 0; }
+.worktree-stats strong { font-size: .7rem; }
+.worktree-stats small, .empty-worktrees { color: #8b949e; font-size: .65rem; }
+.worktree-identity strong, .worktree-identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worktree-stats li > span:last-child { text-align: right; }
+@media (max-width: 38rem) { .settings { padding: 1rem .65rem 2rem; } .section-heading { align-items: flex-start; } .repository-summary { grid-template-columns: 1.8rem minmax(0, 1fr) auto; } .repository-meta { grid-column: 2; text-align: left; } .scan-button { grid-column: 3; grid-row: 1 / span 2; } .size-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .worktree-stats li { grid-template-columns: 1fr; } .worktree-stats li > span:last-child { text-align: left; } }

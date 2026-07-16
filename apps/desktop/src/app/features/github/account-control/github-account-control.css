@@ -1,0 +1,16 @@
+:host { display: block; }
+.github-account-control { display: grid; gap: .65rem; min-width: 16rem; }
+header, li, form > div { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+header > div, li > span { display: grid; min-width: 0; }
+small { color: #8b949e; font-size: .68rem; }
+ul { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; }
+li { border: 1px solid #30363d; border-radius: .4rem; padding: .45rem; }
+img { width: 1.8rem; height: 1.8rem; border-radius: 50%; }
+li > span { flex: 1; }
+form { display: grid; gap: .3rem; }
+form label { color: #c9d1d9; font-size: .72rem; font-weight: 700; }
+input { min-width: 0; flex: 1; border: 1px solid #30363d; border-radius: .35rem; padding: .42rem .5rem; color: #e6edf3; background: #0d1117; }
+button { border: 1px solid #388bfd; border-radius: .35rem; padding: .38rem .55rem; color: #fff; background: #1f6feb; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+.state-message { margin: 0; color: #8b949e; font-size: .72rem; }
+.state-message.error { color: #ff7b72; }

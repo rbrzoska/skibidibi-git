@@ -22,6 +22,7 @@ const BRANCH_FORMAT: &str = "--format=%(refname)%00%(refname:short)%00%(objectna
 
 pub trait BranchCreationGitExecutor: Send + Sync {
     fn query_branches(&self, repository: &Path) -> Result<GitOutput, GitRunError>;
+    fn query_remotes(&self, repository: &Path) -> Result<GitOutput, GitRunError>;
     fn resolve_head(&self, repository: &Path) -> Result<GitOutput, GitRunError>;
     fn verify_commit(&self, repository: &Path, oid: &str) -> Result<GitOutput, GitRunError>;
     fn create_ref(
@@ -54,6 +55,15 @@ impl BranchCreationGitExecutor for GitRunner {
             )
             .with_output_limits(QUERY_OUTPUT_LIMIT, STDERR_LIMIT)
             .with_timeout(QUERY_TIMEOUT),
+        )
+    }
+
+    fn query_remotes(&self, repository: &Path) -> Result<GitOutput, GitRunError> {
+        self.run(
+            repository,
+            GitInvocation::new(GitInvocationPolicy::ReadOnly, ["remote"])
+                .with_output_limits(QUERY_OUTPUT_LIMIT, STDERR_LIMIT)
+                .with_timeout(QUERY_TIMEOUT),
         )
     }
 
@@ -148,6 +158,8 @@ impl BranchCreationGitExecutor for GitRunner {
 pub enum BranchCreationError {
     #[error("branch name is invalid")]
     InvalidBranchName,
+    #[error("the local branch name could not be derived from the configured remote")]
+    RemoteNameUnavailable,
     #[error("source object ID is invalid")]
     InvalidObjectId,
     #[error("a local branch with this name already exists")]
@@ -178,6 +190,7 @@ impl BranchCreationError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidBranchName | Self::InvalidObjectId => "invalidRequest",
+            Self::RemoteNameUnavailable => "sourceUnavailable",
             Self::BranchAlreadyExists => "branchAlreadyExists",
             Self::CurrentHeadChanged | Self::RemoteBranchChanged => "sourceChanged",
             Self::SourceNotCommit | Self::RemoteBranchNotFound | Self::SymbolicRemoteNotAllowed => {
@@ -199,9 +212,19 @@ where
         repository: &Path,
         request: &CreateBranchRequest,
     ) -> Result<CreateBranchResult, BranchCreationError> {
-        let full_name = validated_full_name(&request.name)?;
         let output = self.executor.query_branches(repository)?;
         let branches = parse_branch_records(&output.stdout)?;
+        let name = match &request.name {
+            Some(name) => name.clone(),
+            None => match &request.source {
+                BranchCreationSource::RemoteTracking { full_name, .. } => {
+                    let remotes = self.executor.query_remotes(repository)?;
+                    derive_local_name(full_name, &remotes.stdout)?
+                }
+                _ => return Err(BranchCreationError::InvalidBranchName),
+            },
+        };
+        let full_name = validated_full_name(&name)?;
         if branches.iter().any(|branch| branch.full_name == full_name) {
             return Err(BranchCreationError::BranchAlreadyExists);
         }
@@ -213,7 +236,7 @@ where
         let upstream = if let Some(upstream) = upstream {
             if let Err(tracking) =
                 self.executor
-                    .set_upstream(repository, &request.name, &upstream.full_name)
+                    .set_upstream(repository, &name, &upstream.full_name)
             {
                 return match self
                     .executor
@@ -233,7 +256,7 @@ where
 
         Ok(CreateBranchResult {
             full_name,
-            name: request.name.clone(),
+            name,
             head: oid,
             upstream,
         })
@@ -277,6 +300,23 @@ where
             }
         }
     }
+}
+
+fn derive_local_name(remote_full_name: &str, output: &[u8]) -> Result<String, BranchCreationError> {
+    let text =
+        std::str::from_utf8(output).map_err(|_| BranchCreationError::RemoteNameUnavailable)?;
+    let remote = text
+        .lines()
+        .filter(|name| !name.is_empty())
+        .filter(|name| remote_full_name.starts_with(&format!("refs/remotes/{name}/")))
+        .max_by_key(|name| name.len())
+        .ok_or(BranchCreationError::RemoteNameUnavailable)?;
+    let prefix = format!("refs/remotes/{remote}/");
+    let name = remote_full_name
+        .strip_prefix(&prefix)
+        .filter(|name| !name.is_empty())
+        .ok_or(BranchCreationError::RemoteNameUnavailable)?;
+    Ok(name.to_owned())
 }
 
 fn validated_full_name(name: &str) -> Result<String, BranchCreationError> {
@@ -361,6 +401,17 @@ mod tests {
         assert!(validated_oid(&"B".repeat(64)).is_ok());
         assert!(validated_oid(&"a".repeat(39)).is_err());
         assert!(validated_oid(&format!("{}g", "a".repeat(39))).is_err());
+    }
+
+    #[test]
+    fn remote_name_derivation_prefers_the_longest_configured_prefix() {
+        let name = derive_local_name(
+            "refs/remotes/team/origin/rb/feature",
+            b"team\nteam/origin\n",
+        )
+        .expect("derive local branch name");
+
+        assert_eq!(name, "rb/feature");
     }
 
     #[test]

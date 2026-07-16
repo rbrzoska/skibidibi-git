@@ -300,6 +300,8 @@ describe('DesktopIpc', () => {
       path: '/work/feature',
       expectedHead: 'abc123',
       branchFullName: 'refs/heads/feature',
+      mode: 'safe',
+      stashMessage: null,
     })).rejects.toThrow('unavailable outside the desktop application');
     await expect(service.invoke('repository_fetch', {
       repositoryId: 'example-repository',

@@ -3,3 +3,7 @@
 .app-bar a { display: inline-flex; align-items: center; gap: .5rem; color: #e6edf3; text-decoration: none; }
 .app-bar a span { color: #58a6ff; font-size: 1.35rem; }
 .preview { border: 1px solid #30363d; border-radius: 999px; padding: .15rem .45rem; color: #8b949e; font-size: .65rem; text-transform: uppercase; }
+.app-bar nav { margin-left: auto; }
+.app-bar nav a { height: 1.65rem; border: 1px solid #30363d; border-radius: .35rem; padding: 0 .5rem; color: #c9d1d9; font-size: .72rem; }
+.app-bar nav a:hover, .app-bar nav a:focus-visible { border-color: #388bfd; color: #fff; outline: none; }
+.app-bar nav a span { color: #8b949e; font-size: .8rem; }

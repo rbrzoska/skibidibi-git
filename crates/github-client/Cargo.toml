@@ -1,0 +1,17 @@
+[package]
+name = "github-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/rbrzoska/skibidibi-git"
+
+[dependencies]
+app-domain = { path = "../app-domain" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+zeroize = "1"
+

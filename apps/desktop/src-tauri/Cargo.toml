@@ -15,8 +15,16 @@ tauri-build.workspace = true
 [dependencies]
 app-domain.workspace = true
 app-store.workspace = true
+github-client.workspace = true
 repo-runtime.workspace = true
+secret-store.workspace = true
 serde.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
+tokio.workspace = true
+url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

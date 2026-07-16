@@ -15,6 +15,7 @@ export interface RepositoryCatalogEntry {
   readonly path: string;
   readonly provider: RepositoryProvider;
   readonly transport: RepositoryTransport;
+  readonly hostedIdentity: RememberedRepositoryResponse['hostedIdentity'];
   readonly remote: string | null;
   readonly integration: 'connected' | 'local-only' | 'attention' | 'unchecked';
   readonly availability: RepositoryAvailability;
@@ -68,6 +69,10 @@ export class RepositoryCatalog {
 
   async rememberPath(path: string): Promise<RepositoryCatalogEntry> {
     const remembered = await this.ipc.invoke('remember_repository', { repositoryPath: path });
+    return this.acceptRemembered(remembered);
+  }
+
+  acceptRemembered(remembered: RememberedRepositoryResponse): RepositoryCatalogEntry {
     const repository = mapRepository(remembered);
     this.entries.update((entries) => [
       repository,
@@ -115,6 +120,7 @@ function mapRepository(repository: RememberedRepositoryResponse): RepositoryCata
     path: repository.canonicalPath,
     provider: repository.provider,
     transport: repository.transport,
+    hostedIdentity: repository.hostedIdentity,
     remote: remote === null ? null : `${remote.host}/${remote.owner}/${remote.name}`,
     integration,
     availability: repository.availability,

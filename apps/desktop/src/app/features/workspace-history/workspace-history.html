@@ -1,4 +1,73 @@
 <main class="workspace">
+  @if (deletionConfirmation(); as confirmation) {
+      <dialog
+        #referenceDeletionDialog
+        class="reference-confirmation"
+        role="alertdialog"
+        aria-labelledby="reference-confirmation-title"
+        aria-describedby="reference-confirmation-description"
+        (cancel)="$event.preventDefault(); cancelReferenceDeletion()"
+      >
+        <p class="eyebrow destructive-eyebrow"><app-icon name="warning" /> destructive action</p>
+        <h2 id="reference-confirmation-title">
+          {{ confirmation.kind === 'branch' ? 'Delete local branch?' : 'Remove worktree?' }}
+        </h2>
+        <div id="reference-confirmation-description" class="reference-confirmation-description">
+          @if (confirmation.kind === 'branch') {
+            <p>The local branch <strong>{{ confirmation.branch.name }}</strong> will be permanently deleted.</p>
+          } @else {
+            <p>The worktree <strong>{{ confirmation.worktree.path }}</strong> will be removed.</p>
+            @if (confirmation.branchLabel) {
+              <p>Local branch to delete: <strong>{{ confirmation.branchLabel }}</strong></p>
+            } @else {
+              <p>No local branch will be deleted because this worktree is detached.</p>
+            }
+          }
+          <p>Unmerged commits may be lost. This action cannot be undone.</p>
+        </div>
+        @if (confirmation.kind === 'worktree') {
+          <fieldset class="worktree-removal-modes" [disabled]="removingWorktree() !== null">
+            <legend>Removal mode</legend>
+            <label>
+              <input type="radio" name="worktree-removal-mode" value="safe" [checked]="worktreeRemovalMode() === 'safe'" (change)="setWorktreeRemovalMode('safe')" />
+              <app-icon name="shield" />
+              <span><strong>Safe remove</strong><small>Recommended. Git refuses if modified or untracked files exist.</small></span>
+            </label>
+            <label>
+              <input type="radio" name="worktree-removal-mode" value="stashAndForce" [checked]="worktreeRemovalMode() === 'stashAndForce'" (change)="setWorktreeRemovalMode('stashAndForce')" />
+              <app-icon name="stash" />
+              <span><strong>Stash changes, then remove</strong><small>Saves staged, unstaged and untracked files, then removes only if the worktree stays clean.</small></span>
+            </label>
+            <label>
+              <input type="radio" name="worktree-removal-mode" value="force" [checked]="worktreeRemovalMode() === 'force'" (change)="setWorktreeRemovalMode('force')" />
+              <app-icon name="trash" />
+              <span><strong>Force remove</strong><small>Deletes local changes without saving them.</small></span>
+            </label>
+          </fieldset>
+          @if (worktreeRemovalMode() === 'stashAndForce') {
+            <div class="worktree-removal-warning">
+              <p>Stash to create: <code>{{ worktreeRemovalStashMessage() }}</code></p>
+              <p>Ignored files and changes inside nested repositories or submodules are not included in the stash and may still be deleted during removal.</p>
+            </div>
+          } @else if (worktreeRemovalMode() === 'force') {
+            <label class="force-removal-acknowledgement">
+              <input type="checkbox" [checked]="forceRemovalAcknowledged()" (change)="setForceRemovalAcknowledged($any($event.target).checked)" />
+              <span>I understand modified, untracked and ignored files can be permanently deleted.</span>
+            </label>
+          }
+          @if (worktreeRemovalDialogError()) {
+            <p id="worktree-removal-dialog-error" class="worktree-removal-dialog-error" role="alert" tabindex="-1">{{ worktreeRemovalDialogError() }}</p>
+          }
+        }
+        <div class="reference-confirmation-actions">
+          <button id="cancel-reference-deletion" type="button" [disabled]="deletingBranch() !== null || removingWorktree() !== null" (click)="cancelReferenceDeletion()"><app-icon name="close" />Cancel</button>
+          <button id="confirm-reference-deletion" type="button" class="danger" [disabled]="deletingBranch() !== null || removingWorktree() !== null || (confirmation.kind === 'worktree' && worktreeRemovalMode() === 'force' && !forceRemovalAcknowledged())" (click)="confirmReferenceDeletion()">
+            <app-icon [name]="confirmation.kind === 'branch' ? 'trash' : worktreeRemovalMode() === 'stashAndForce' ? 'stash' : 'folder-remove'" />
+            {{ deletingBranch() !== null || removingWorktree() !== null ? 'Deleting…' : confirmation.kind === 'branch' ? 'Delete branch' : worktreeRemovalMode() === 'safe' ? 'Remove safely' : worktreeRemovalMode() === 'stashAndForce' ? 'Stash & remove' : 'Force remove' }}
+          </button>
+        </div>
+      </dialog>
+  }
   <header class="workspace-bar">
     <a routerLink="/repositories" class="back" aria-label="Back to repositories">‹</a>
     <span class="repo-icon">{{ repository()?.provider === 'github' ? 'GH' : 'L' }}</span>
@@ -7,14 +76,14 @@
       <small>{{ repository()?.path ?? repositoryId }}</small>
     </span>
     <span class="branch-pill">⑂ {{ branchName() }}</span>
-    <button type="button" [disabled]="workspaceActionBusy()" (click)="startBranchFromCurrent($any($event.currentTarget))">New branch</button>
+    <button type="button" [disabled]="workspaceActionBusy()" (click)="startBranchFromCurrent($any($event.currentTarget))"><app-icon name="branch" />New branch</button>
     <button
       type="button"
       class="amend-entry"
       [disabled]="amendUnavailable()"
       title="Replace the current HEAD commit"
       (click)="startAmend($any($event.currentTarget))"
-    >Amend HEAD</button>
+    ><app-icon name="amend" />Amend</button>
     <div class="network-actions" aria-label="Remote synchronization">
       <label>
         <span>Pull strategy</span>
@@ -30,17 +99,17 @@
         </select>
       </label>
       <button type="button" [disabled]="workspaceActionBusy()" (click)="pullRepository()">
-        {{ networkMutation() === 'pull' ? 'Pulling…' : 'Pull' }}
+        <app-icon name="download" />{{ networkMutation() === 'pull' ? 'Pulling…' : 'Pull' }}
       </button>
       <button
         type="button"
         [disabled]="workspaceActionBusy() || pushDisabledReason() !== null"
         [title]="pushDisabledReason() ?? 'Push to the configured upstream'"
         (click)="pushRepository()"
-      >{{ networkMutation() === 'push' ? 'Pushing…' : 'Push' }}</button>
+      ><app-icon name="upload" />{{ networkMutation() === 'push' ? 'Pushing…' : 'Push' }}</button>
     </div>
     <button type="button" [disabled]="workspaceActionBusy()" (click)="refreshWorkspace()">
-      {{ refreshingWorkspace() ? 'Refreshing…' : 'Refresh' }}
+      <app-icon name="refresh" />{{ refreshingWorkspace() ? 'Refreshing…' : 'Refresh' }}
     </button>
   </header>
 
@@ -74,10 +143,10 @@
         </label>
       </div>
       @if (navigationActionError()) {
-        <p class="navigation-action-error" role="alert">{{ navigationActionError() }}</p>
+        <p id="navigation-action-error" class="navigation-action-error" role="alert" tabindex="-1">{{ navigationActionError() }}</p>
       }
       @if (navigationActionNotice()) {
-        <p class="navigation-action-notice" role="status">{{ navigationActionNotice() }}</p>
+        <p id="navigation-action-notice" class="navigation-action-notice" role="status" tabindex="-1">{{ navigationActionNotice() }}</p>
       }
       @if (networkError()) {
         <p class="navigation-action-error" role="alert">{{ networkError() }}</p>
@@ -87,7 +156,7 @@
       }
       @if (branchCreationTarget(); as target) {
         <form class="navigation-inline-form" (submit)="$event.preventDefault(); createBranch()">
-          <label for="new-branch-name">New branch from {{ target.kind === 'remote' ? target.branch.name : target.label }}</label>
+          <label for="new-branch-name">New branch from {{ target.label }}</label>
           <input
             id="new-branch-name"
             type="text"
@@ -166,7 +235,7 @@
                         </span>
                       }
                     </button>
-                    <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Delete local branch ' + node.branch.name" [title]="'Delete local branch ' + node.branch.name" (click)="deleteBranch(node.branch)">
+                    <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Delete local branch ' + node.branch.name" [title]="'Delete local branch ' + node.branch.name" (click)="requestBranchDeletion(node.branch, $any($event.currentTarget))">
                       {{ deletingBranch() === node.branch.fullName ? '…' : '×' }}
                     </button>
                   </div>
@@ -210,7 +279,9 @@
                       @if (canSetNaturalUpstream(node.branch)) {
                         <button type="button" class="reference-action" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Set ' + node.branch.name + ' as upstream'" title="Set as upstream" (click)="setNaturalUpstream(node.branch)">⇧</button>
                       }
-                      <button type="button" class="reference-action" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Create local branch from ' + node.branch.name" title="Create local tracking branch" (click)="startBranchFromRemote(node.branch, $any($event.currentTarget))">+</button>
+                      @if (node.branch.symbolicTarget === null) {
+                        <button type="button" class="reference-action" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Create local branch from ' + node.branch.name" [title]="'Create local branch with the same name, tracking ' + node.branch.name" (click)="createBranchFromRemote(node.branch)">+</button>
+                      }
                     </span>
                   </div>
                 }
@@ -240,7 +311,7 @@
                     @else if (worktree.locked) { <small>locked</small> }
                   </button>
                   @if (worktreeRemovalDisabledReason(worktree) === null) {
-                    <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Remove worktree ' + worktree.path" [title]="'Remove worktree ' + worktree.path" (click)="removeWorktree(worktree)">
+                    <button type="button" class="delete-reference" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Remove worktree ' + worktree.path" [title]="'Remove worktree ' + worktree.path" (click)="requestWorktreeRemoval(worktree, $any($event.currentTarget))">
                       {{ removingWorktree() === worktree.path ? '…' : '×' }}
                     </button>
                   }
@@ -288,11 +359,19 @@
             }
           </ul>
         </details>
-      <details>
-        <summary><span>Pull Requests</span><strong>—</strong></summary>
-        <p class="section-placeholder">GitHub integration is not connected yet.</p>
-      </details>
         }
+      <details>
+        <summary><span>Pull Requests</span><strong>GitHub</strong></summary>
+        @if (repository()?.provider === 'github') {
+          <app-github-pull-request-list
+            [repositoryId]="repositoryId"
+            [accountId]="githubAccountId()"
+            (pullRequestSelected)="selectPullRequest()"
+          />
+        } @else {
+          <p class="section-placeholder">This repository has no GitHub remote identity.</p>
+        }
+      </details>
       }
     </aside>
 
@@ -456,11 +535,13 @@
       }
     </section>
 
-    <aside class="inspector" [attr.aria-label]="historySelection() === 'working-tree' ? 'Working tree inspector' : historySelection() === 'stash' ? 'Stash inspector' : 'Commit inspector'">
+    <aside class="inspector" [attr.aria-label]="historySelection() === 'working-tree' ? 'Working tree inspector' : historySelection() === 'stash' ? 'Stash inspector' : historySelection() === 'pull-request' ? 'Pull request inspector' : 'Commit inspector'">
       <header class="inspector-heading">
-        <p class="eyebrow">{{ historySelection() === 'working-tree' ? 'working tree inspector' : historySelection() === 'stash' ? 'stash inspector' : 'commit inspector' }}</p>
+        <p class="eyebrow">{{ historySelection() === 'working-tree' ? 'working tree inspector' : historySelection() === 'stash' ? 'stash inspector' : historySelection() === 'pull-request' ? 'pull request inspector' : 'commit inspector' }}</p>
       </header>
-      @if (historySelection() === 'working-tree') {
+      @if (historySelection() === 'pull-request') {
+        <app-github-pull-request-inspector />
+      } @else if (historySelection() === 'working-tree') {
         @let working = workingTreeSummary();
         <section class="working-tree-overview" aria-labelledby="working-tree-title">
           <h2 id="working-tree-title">Working tree</h2>

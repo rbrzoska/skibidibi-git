@@ -1,0 +1,35 @@
+<section class="clone-card" aria-labelledby="clone-heading">
+  <header>
+    <div><p class="eyebrow">clone repository</p><h2 id="clone-heading">Create a local copy</h2></div>
+    <div class="mode-switch" role="group" aria-label="Clone source">
+      <button type="button" [class.active]="mode() === 'url'" (click)="setMode('url')">URL</button>
+      <button type="button" [class.active]="mode() === 'github'" (click)="setMode('github')">GitHub</button>
+    </div>
+  </header>
+
+  @if (mode() === 'url') {
+    <label><span>Repository URL</span><input type="text" autocomplete="off" spellcheck="false" placeholder="git@github.com:owner/repository.git" [value]="sourceUrl()" (input)="updateSourceUrl($any($event.target).value)" /></label>
+  } @else {
+    @let accountState = accounts.state();
+    @if (accountState.kind === 'ready' && accountState.accounts.length > 0) {
+      <div class="github-fields">
+        <label><span>GitHub account</span><select [value]="selectedAccountId()" (change)="selectAccount($any($event.target).value)"><option value="" disabled>Select account</option>@for (account of accountState.accounts; track account.id) { <option [value]="account.id">{{ account.login }}</option> }</select></label>
+        <label><span>Repository</span><select [value]="selectedRepositoryId()" [disabled]="loadingRepositories()" (change)="selectRepository($any($event.target).value)"><option value="" disabled>{{ loadingRepositories() ? 'Loading…' : 'Select repository' }}</option>@for (repository of repositories(); track repository.id) { <option [value]="repository.id">{{ repository.fullName }}{{ repository.private ? ' · private' : '' }}</option> }</select></label>
+        <fieldset><legend>Transport</legend><label><input type="radio" name="clone-transport" value="ssh" [checked]="transport() === 'ssh'" (change)="updateTransport('ssh')" />SSH</label><label><input type="radio" name="clone-transport" value="https" [checked]="transport() === 'https'" (change)="updateTransport('https')" />HTTPS</label></fieldset>
+        <p class="hint">Repository discovery uses the connected account. Clone authentication uses your system SSH agent or Git Credential Manager.</p>
+      </div>
+    } @else if (accountState.kind === 'loading' || accountState.kind === 'idle') {
+      <p class="hint">Loading connected GitHub accounts…</p>
+    } @else {
+      <p class="hint">Connect a GitHub account in Settings before choosing a repository here.</p>
+    }
+  }
+
+  <div class="destination">
+    <label><span>Destination parent</span><span class="path-control"><input type="text" autocomplete="off" spellcheck="false" placeholder="/Users/you/projects" [value]="destinationParent()" (input)="updateDestinationParent($any($event.target).value)" /><button type="button" [disabled]="selectingParent()" (click)="selectParent()">{{ selectingParent() ? 'Opening…' : 'Choose' }}</button></span></label>
+    <label><span>Directory name</span><input type="text" autocomplete="off" spellcheck="false" placeholder="repository" [value]="directoryName()" (input)="updateDirectoryName($any($event.target).value)" /></label>
+  </div>
+
+  @if (error()) { <p class="clone-error" role="alert">{{ error() }}</p> }
+  <footer><button type="button" class="clone-action" [disabled]="!canClone()" (click)="clone()">{{ cloning() ? 'Cloning…' : 'Clone repository' }}</button></footer>
+</section>

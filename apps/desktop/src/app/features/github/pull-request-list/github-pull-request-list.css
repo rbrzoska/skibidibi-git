@@ -1,0 +1,15 @@
+:host { display: block; min-width: 0; }
+.github-pull-requests { display: grid; gap: .35rem; }
+header { display: flex; justify-content: space-between; color: #c9d1d9; font-size: .75rem; text-transform: uppercase; }
+header small, .list-state, .title small { color: #8b949e; font-size: .66rem; }
+.list-state { margin: 0; padding: .5rem .25rem; }
+.list-state.error { color: #ff7b72; }
+.list-state p { margin: 0 0 .35rem; }
+ul { display: grid; gap: .2rem; margin: 0; padding: 0; list-style: none; }
+li button { display: grid; gap: .3rem; width: 100%; border: 1px solid transparent; border-radius: .35rem; padding: .45rem; color: #b1bac4; background: transparent; text-align: left; cursor: pointer; }
+li button:hover, li button:focus-visible, li button.selected { outline: 0; border-color: #24496f; background: #162334; }
+.title { display: grid; min-width: 0; }
+.title strong, .title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badges { display: flex; flex-wrap: wrap; gap: .25rem; }
+.badges small { border-radius: 999px; padding: .08rem .3rem; color: #79c0ff; background: #1f6feb29; font-size: .58rem; }
+.load-more, .list-state button { justify-self: center; border: 1px solid #30363d; border-radius: .35rem; padding: .35rem .55rem; color: #c9d1d9; background: #21262d; cursor: pointer; }

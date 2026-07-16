@@ -1,7 +1,9 @@
 mod branch_actions;
 mod branch_creation;
+mod clone;
 mod conflict_resolution;
 mod file_diff;
+mod github;
 mod history;
 mod maintenance;
 mod mutations;
@@ -15,19 +17,26 @@ mod working_tree;
 
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use branch_creation::{BranchCreationSource, CreateBranchRequest, CreateBranchResult};
+pub use clone::{CloneRepositoryRequest, CloneRepositoryResult};
 pub use conflict_resolution::{
     ConflictFileDetail, ConflictFileDetailRequest, ConflictFileSummary, ConflictListResult,
     ConflictResolution, ConflictStageIdentity, ConflictVersion, ResolveConflictRequest,
     ResolveConflictResult,
 };
 pub use file_diff::{FileDiff, FileDiffRequest};
+pub use github::{
+    GitHubAccountState, GitHubAccountSummary, GitHubApiResult, GitHubAuthKind, GitHubPage,
+    GitHubPatValidation, GitHubRateLimit, GitHubRepository, GitHubUser, IssueComment,
+    PullRequestDetail, PullRequestMergeability, PullRequestState, PullRequestSummary,
+    ReviewComment, ReviewCommentSide, ReviewThread,
+};
 pub use history::{
     ChangedFileStatus, ChangedFileSummary, CommitAuthor, CommitDetails, CommitHistoryPage,
     CommitListItem,
 };
 pub use maintenance::{
     DeleteBranchRequest, DeleteBranchResult, FetchRepositoryResult, RemoveWorktreeRequest,
-    RemoveWorktreeResult,
+    RemoveWorktreeResult, WorktreeRemovalMode,
 };
 pub use mutations::{
     AmendCommitRequest, AmendCommitResult, AmendCommitState, ApplyIndexChangeRequest,

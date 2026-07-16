@@ -9,6 +9,12 @@ const STORAGE_PREFIX: Record<WorkspaceRefreshSetting, string> = {
   liveChanges: 'skibidibi-git.workspace.live-changes',
 };
 
+const GLOBAL_STORAGE_PREFIX: Record<WorkspaceRefreshSetting, string> = {
+  currentOnly: 'skibidibi-git.workspace.defaults.current-only',
+  autoFetch: 'skibidibi-git.workspace.defaults.auto-fetch',
+  liveChanges: 'skibidibi-git.workspace.defaults.live-changes',
+};
+
 export type WorkspaceRefreshSetting = 'currentOnly' | 'autoFetch' | 'liveChanges';
 
 export interface WorkspaceRefreshPreferences {
@@ -50,6 +56,10 @@ export function workspaceRefreshStorageKey(
   return `${STORAGE_PREFIX[setting]}.${repositoryId}`;
 }
 
+export function globalWorkspaceRefreshStorageKey(setting: WorkspaceRefreshSetting): string {
+  return GLOBAL_STORAGE_PREFIX[setting];
+}
+
 export function parsePersistedBoolean(value: string | null, fallback = false): boolean {
   if (value === 'true') {
     return true;
@@ -63,13 +73,38 @@ export function parsePersistedBoolean(value: string | null, fallback = false): b
 export function readWorkspaceRefreshPreferences(
   storage: WorkspaceRefreshStorage | null,
   repositoryId: string,
+  fallback?: WorkspaceRefreshPreferences,
+): WorkspaceRefreshPreferences {
+  const resolvedFallback = fallback ?? readGlobalWorkspaceRefreshPreferences(storage);
+  return {
+    currentOnly: readSetting(storage, repositoryId, 'currentOnly', resolvedFallback.currentOnly),
+    autoFetch: readSetting(storage, repositoryId, 'autoFetch', resolvedFallback.autoFetch),
+    liveChanges: readSetting(storage, repositoryId, 'liveChanges', resolvedFallback.liveChanges),
+  };
+}
+
+export function readGlobalWorkspaceRefreshPreferences(
+  storage: WorkspaceRefreshStorage | null,
   fallback: WorkspaceRefreshPreferences = DEFAULT_WORKSPACE_REFRESH_PREFERENCES,
 ): WorkspaceRefreshPreferences {
   return {
-    currentOnly: readSetting(storage, repositoryId, 'currentOnly', fallback.currentOnly),
-    autoFetch: readSetting(storage, repositoryId, 'autoFetch', fallback.autoFetch),
-    liveChanges: readSetting(storage, repositoryId, 'liveChanges', fallback.liveChanges),
+    currentOnly: readGlobalSetting(storage, 'currentOnly', fallback.currentOnly),
+    autoFetch: readGlobalSetting(storage, 'autoFetch', fallback.autoFetch),
+    liveChanges: readGlobalSetting(storage, 'liveChanges', fallback.liveChanges),
   };
+}
+
+export function writeGlobalWorkspaceRefreshSetting(
+  storage: WorkspaceRefreshStorage | null,
+  setting: WorkspaceRefreshSetting,
+  enabled: boolean,
+): boolean {
+  try {
+    storage?.setItem(globalWorkspaceRefreshStorageKey(setting), String(enabled));
+  } catch {
+    // Persistence is best-effort; the active settings page remains usable.
+  }
+  return enabled;
 }
 
 /**
@@ -133,6 +168,21 @@ function readSetting(
   try {
     return parsePersistedBoolean(
       storage?.getItem(workspaceRefreshStorageKey(repositoryId, setting)) ?? null,
+      fallback,
+    );
+  } catch {
+    return fallback;
+  }
+}
+
+function readGlobalSetting(
+  storage: WorkspaceRefreshStorage | null,
+  setting: WorkspaceRefreshSetting,
+  fallback: boolean,
+): boolean {
+  try {
+    return parsePersistedBoolean(
+      storage?.getItem(globalWorkspaceRefreshStorageKey(setting)) ?? null,
       fallback,
     );
   } catch {

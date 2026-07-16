@@ -51,7 +51,7 @@ fn creates_a_local_branch_from_the_exact_current_head_without_switching() {
         .create_branch(
             repository.path(),
             &CreateBranchRequest {
-                name: "feature/current".to_owned(),
+                name: Some("feature/current".to_owned()),
                 source: BranchCreationSource::Current {
                     expected_oid: head.clone(),
                 },
@@ -83,7 +83,7 @@ fn creates_from_an_exact_historical_commit_and_rejects_non_commit_objects() {
         .create_branch(
             repository.path(),
             &CreateBranchRequest {
-                name: "from/base".to_owned(),
+                name: Some("from/base".to_owned()),
                 source: BranchCreationSource::Commit { oid: base.clone() },
             },
         )
@@ -98,7 +98,7 @@ fn creates_from_an_exact_historical_commit_and_rejects_non_commit_objects() {
         .create_branch(
             repository.path(),
             &CreateBranchRequest {
-                name: "from/blob".to_owned(),
+                name: Some("from/blob".to_owned()),
                 source: BranchCreationSource::Commit { oid: blob },
             },
         )
@@ -129,7 +129,7 @@ fn creates_an_exact_remote_tracking_branch() {
         .create_branch(
             repository,
             &CreateBranchRequest {
-                name: "tracking/main".to_owned(),
+                name: Some("tracking/main".to_owned()),
                 source: BranchCreationSource::RemoteTracking {
                     full_name: "refs/remotes/origin/main".to_owned(),
                     expected_oid: oid.clone(),
@@ -158,6 +158,38 @@ fn creates_an_exact_remote_tracking_branch() {
 }
 
 #[test]
+fn derives_the_same_local_name_when_the_remote_name_contains_slashes() {
+    let remote = repository();
+    git(remote.path(), &["branch", "rb/feature"]);
+    let clone_directory = tempfile::tempdir().unwrap();
+    git(
+        clone_directory.path(),
+        &["clone", "-q", remote.path().to_str().unwrap(), "."],
+    );
+    let repository = clone_directory.path();
+    git(repository, &["remote", "rename", "origin", "team/origin"]);
+    let remote_ref = "refs/remotes/team/origin/rb/feature";
+    let oid = output_text(repository, &["rev-parse", remote_ref]);
+
+    let result = RepositoryRuntime::default()
+        .create_branch(
+            repository,
+            &CreateBranchRequest {
+                name: None,
+                source: BranchCreationSource::RemoteTracking {
+                    full_name: remote_ref.to_owned(),
+                    expected_oid: oid,
+                },
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.name, "rb/feature");
+    assert_eq!(result.full_name, "refs/heads/rb/feature");
+    assert_eq!(result.upstream.as_deref(), Some("team/origin/rb/feature"));
+}
+
+#[test]
 fn rejects_stale_sources_duplicates_and_symbolic_remote_refs() {
     let remote = repository();
     let clone_directory = tempfile::tempdir().unwrap();
@@ -174,7 +206,7 @@ fn rejects_stale_sources_duplicates_and_symbolic_remote_refs() {
         .create_branch(
             repository,
             &CreateBranchRequest {
-                name: "stale/current".to_owned(),
+                name: Some("stale/current".to_owned()),
                 source: BranchCreationSource::Current {
                     expected_oid: stale.clone(),
                 },
@@ -190,7 +222,7 @@ fn rejects_stale_sources_duplicates_and_symbolic_remote_refs() {
         .create_branch(
             repository,
             &CreateBranchRequest {
-                name: "stale/remote".to_owned(),
+                name: Some("stale/remote".to_owned()),
                 source: BranchCreationSource::RemoteTracking {
                     full_name: "refs/remotes/origin/main".to_owned(),
                     expected_oid: stale,
@@ -208,7 +240,7 @@ fn rejects_stale_sources_duplicates_and_symbolic_remote_refs() {
         .create_branch(
             repository,
             &CreateBranchRequest {
-                name: "duplicate".to_owned(),
+                name: Some("duplicate".to_owned()),
                 source: BranchCreationSource::Commit { oid: head.clone() },
             },
         )
@@ -222,7 +254,7 @@ fn rejects_stale_sources_duplicates_and_symbolic_remote_refs() {
         .create_branch(
             repository,
             &CreateBranchRequest {
-                name: "from/origin-head".to_owned(),
+                name: Some("from/origin-head".to_owned()),
                 source: BranchCreationSource::RemoteTracking {
                     full_name: "refs/remotes/origin/HEAD".to_owned(),
                     expected_oid: head,

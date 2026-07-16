@@ -3,13 +3,16 @@ import { describe, expect, it } from 'vitest';
 import {
   AUTO_FETCH_INTERVAL_MS,
   buildWipStashMessage,
+  globalWorkspaceRefreshStorageKey,
   LIVE_STATUS_INTERVAL_MS,
   MAX_WIP_STASH_MESSAGE_LENGTH,
   parsePersistedBoolean,
+  readGlobalWorkspaceRefreshPreferences,
   readWorkspaceRefreshPreferences,
   workspaceRefreshStorageKey,
   writeWorkspaceRefreshPreferences,
   writeWorkspaceRefreshSetting,
+  writeGlobalWorkspaceRefreshSetting,
   type WorkspaceRefreshStorage,
 } from './workspace-refresh-policy';
 
@@ -57,6 +60,27 @@ describe('workspace refresh policy', () => {
     expect(workspaceRefreshStorageKey('repo/a', 'autoFetch')).not.toBe(
       workspaceRefreshStorageKey('repo/b', 'autoFetch'),
     );
+  });
+
+  it('uses global defaults only when a repository has no explicit preference', () => {
+    const storage = new MemoryStorage();
+    writeGlobalWorkspaceRefreshSetting(storage, 'currentOnly', true);
+    writeGlobalWorkspaceRefreshSetting(storage, 'autoFetch', true);
+
+    expect(readGlobalWorkspaceRefreshPreferences(storage)).toEqual({
+      currentOnly: true,
+      autoFetch: true,
+      liveChanges: false,
+    });
+    expect(readWorkspaceRefreshPreferences(storage, 'new-repository')).toEqual({
+      currentOnly: true,
+      autoFetch: true,
+      liveChanges: false,
+    });
+
+    writeWorkspaceRefreshSetting(storage, 'new-repository', 'autoFetch', false);
+    expect(readWorkspaceRefreshPreferences(storage, 'new-repository').autoFetch).toBe(false);
+    expect(storage.getItem(globalWorkspaceRefreshStorageKey('autoFetch'))).toBe('true');
   });
 
   it('only accepts exact persisted booleans and otherwise uses the fallback', () => {

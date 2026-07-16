@@ -7,10 +7,11 @@ import {
 } from '../../core/repositories/repository-catalog';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import { RepositoryStatus } from '../repository-status/repository-status/repository-status';
+import { CloneRepositoryDialog } from './clone-repository-dialog/clone-repository-dialog';
 
 @Component({
   selector: 'app-repository-launcher',
-  imports: [RepositoryStatus],
+  imports: [CloneRepositoryDialog, RepositoryStatus],
   templateUrl: './repository-launcher.html',
   styleUrl: './repository-launcher.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -36,6 +37,11 @@ export class RepositoryLauncher {
       return;
     }
     const repository = await this.catalog.rememberPath(path);
+    this.statusStore.setRepositoryPath(repository.path);
+    await this.router.navigate(['/workspace', repository.id, 'history']);
+  }
+
+  protected async openClonedRepository(repository: RepositoryCatalogEntry): Promise<void> {
     this.statusStore.setRepositoryPath(repository.path);
     await this.router.navigate(['/workspace', repository.id, 'history']);
   }

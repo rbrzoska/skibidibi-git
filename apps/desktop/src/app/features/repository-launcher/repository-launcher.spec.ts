@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 import { describe, expect, it, vi } from 'vitest';
 
+import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../core/github';
 import { DESKTOP_IPC, type DesktopIpcClient } from '../../core/ipc/desktop-ipc';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import { RepositoryLauncher } from './repository-launcher';
@@ -43,9 +44,22 @@ describe('RepositoryLauncher', () => {
     const ipc: DesktopIpcClient = {
       invoke: ipcInvoke as DesktopIpcClient['invoke'],
     };
+    const github: GitHubBridge = {
+      githubListAccounts: vi.fn().mockResolvedValue([]),
+      githubConnectPat: vi.fn(),
+      githubDisconnectAccount: vi.fn(),
+      githubListRepositories: vi.fn().mockResolvedValue({ repositories: [], nextCursor: null }),
+      githubListPullRequests: vi.fn(),
+      githubPullRequestDetail: vi.fn(),
+    };
     await TestBed.configureTestingModule({
       imports: [RepositoryLauncher],
-      providers: [provideRouter([]), { provide: DESKTOP_IPC, useValue: ipc }],
+      providers: [
+        provideRouter([]),
+        GitHubAccountStore,
+        { provide: DESKTOP_IPC, useValue: ipc },
+        { provide: GITHUB_BRIDGE, useValue: github },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(RepositoryLauncher);
