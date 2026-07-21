@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject, output, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, ElementRef, inject, output, signal, viewChild } from '@angular/core';
 
 import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubRepository } from '../../../core/github';
 import { DESKTOP_IPC } from '../../../core/ipc/desktop-ipc';
@@ -21,6 +21,7 @@ export class CloneRepositoryDialog {
   protected readonly accounts = inject(GitHubAccountStore);
 
   readonly cloned = output<RepositoryCatalogEntry>();
+  private readonly dialog = viewChild.required<ElementRef<HTMLDialogElement>>('dialog');
   protected readonly mode = signal<CloneMode>('url');
   protected readonly transport = signal<CloneTransport>('ssh');
   protected readonly sourceUrl = signal('');
@@ -33,6 +34,35 @@ export class CloneRepositoryDialog {
   protected readonly selectingParent = signal(false);
   protected readonly cloning = signal(false);
   protected readonly error = signal('');
+
+  open(): void {
+    this.error.set('');
+    const dialog = this.dialog().nativeElement;
+    if (dialog.open) {
+      return;
+    }
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute('open', '');
+    }
+  }
+
+  protected close(): void {
+    const dialog = this.dialog().nativeElement;
+    if (typeof dialog.close === 'function') {
+      dialog.close();
+    } else {
+      dialog.removeAttribute('open');
+    }
+  }
+
+  protected handleCancel(event: Event): void {
+    event.preventDefault();
+    if (!this.cloning()) {
+      this.close();
+    }
+  }
 
   protected setMode(mode: CloneMode): void {
     this.mode.set(mode);
@@ -131,6 +161,7 @@ export class CloneRepositoryDialog {
         directoryName: this.directoryName().trim(),
       });
       this.cloned.emit(this.catalog.acceptRemembered(remembered));
+      this.close();
     } catch (error) {
       this.error.set(errorMessage(error, 'The repository could not be cloned.'));
     } finally {

@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { describe, expect, it, vi } from 'vitest';
 
-import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../../core/github';
+import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubAccount, type GitHubBridge } from '../../../core/github';
 import { GitHubAccountControl } from './github-account-control';
 
 describe('GitHubAccountControl', () => {
@@ -19,6 +19,7 @@ describe('GitHubAccountControl', () => {
       githubCancelDeviceFlow: vi.fn().mockResolvedValue({ cancelled: true }),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -46,8 +47,8 @@ describe('GitHubAccountControl', () => {
   });
 
   it('clears the PAT field before the pending bridge call completes', async () => {
-    let resolveConnect!: (account: { id: string; login: string; host: string; avatarUrl: null; state: 'connected' }) => void;
-    const connect = new Promise<{ id: string; login: string; host: string; avatarUrl: null; state: 'connected' }>((resolve) => { resolveConnect = resolve; });
+    let resolveConnect!: (account: GitHubAccount) => void;
+    const connect = new Promise<GitHubAccount>((resolve) => { resolveConnect = resolve; });
     const bridge: GitHubBridge = {
       githubListAccounts: vi.fn().mockResolvedValue([]),
       githubStartDeviceFlow: vi.fn(),
@@ -55,6 +56,7 @@ describe('GitHubAccountControl', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn().mockReturnValue(connect),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -78,9 +80,52 @@ describe('GitHubAccountControl', () => {
 
     expect(input.value).toBe('');
     expect(bridge.githubConnectPat).toHaveBeenCalledWith({ token: 'github_pat_secret' });
-    resolveConnect({ id: '1', login: 'ada', host: 'github.com', avatarUrl: null, state: 'connected' });
+    resolveConnect({ id: '1', login: 'ada', host: 'github.com', avatarUrl: null, state: 'connected', authKind: 'personalAccessToken' });
     await fixture.whenStable();
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('ada');
+  });
+
+  it('detects GitHub CLI and renders it as an ephemeral account without Disconnect', async () => {
+    const cliAccount: GitHubAccount = {
+      id: 'github-cli:github.com:ada',
+      login: 'ada',
+      host: 'github.com',
+      avatarUrl: null,
+      state: 'connected',
+      authKind: 'gitHubCli',
+    };
+    const bridge: GitHubBridge = {
+      githubListAccounts: vi.fn().mockResolvedValue([]),
+      githubStartDeviceFlow: vi.fn(),
+      githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
+      githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn().mockResolvedValue(cliAccount),
+      githubDisconnectAccount: vi.fn(),
+      githubListRepositories: vi.fn(),
+      githubListPullRequests: vi.fn(),
+      githubPullRequestDetail: vi.fn(),
+    };
+    await TestBed.configureTestingModule({
+      imports: [GitHubAccountControl],
+      providers: [GitHubAccountStore, { provide: GITHUB_BRIDGE, useValue: bridge }],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(GitHubAccountControl);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const cliButton = [...fixture.nativeElement.querySelectorAll('button')]
+      .find((button: HTMLButtonElement) => button.textContent?.includes('Use GitHub CLI')) as HTMLButtonElement;
+    cliButton.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(bridge.githubConnectCli).toHaveBeenCalledOnce();
+    expect(fixture.nativeElement.querySelector('.auth-kind.cli')?.textContent).toContain('GitHub CLI');
+    expect(fixture.nativeElement.textContent).toContain('managed by gh');
+    expect(fixture.nativeElement.querySelector('[aria-label="Disconnect GitHub account ada"]')).toBeNull();
   });
 });

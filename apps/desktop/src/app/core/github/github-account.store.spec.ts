@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { GitHubAccountStore } from './github-account.store';
 import { GITHUB_BRIDGE, type GitHubAccount, type GitHubBridge } from './github-bridge';
 
-const account: GitHubAccount = { id: 'account-1', login: 'ada', host: 'github.com', avatarUrl: null, state: 'connected' };
+const account: GitHubAccount = { id: 'account-1', login: 'ada', host: 'github.com', avatarUrl: null, state: 'connected', authKind: 'personalAccessToken' };
+const cliAccount: GitHubAccount = { ...account, id: 'github-cli:github.com:ada', authKind: 'gitHubCli' };
 
 describe('GitHubAccountStore', () => {
   it('loads, connects, and disconnects accounts through the narrow bridge', async () => {
@@ -15,6 +16,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn().mockResolvedValue(account),
+      githubConnectCli: vi.fn().mockResolvedValue(cliAccount),
       githubDisconnectAccount: vi.fn().mockResolvedValue({ disconnected: true }),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -32,6 +34,13 @@ describe('GitHubAccountStore', () => {
     await store.disconnect(account.id);
     expect(bridge.githubDisconnectAccount).toHaveBeenCalledWith({ accountId: account.id });
     expect(store.state()).toEqual({ kind: 'ready', accounts: [] });
+
+    expect(await store.connectCli()).toBe(true);
+    expect(bridge.githubConnectCli).toHaveBeenCalledOnce();
+    expect(store.state()).toEqual({ kind: 'ready', accounts: [cliAccount] });
+    await store.disconnect(cliAccount.id);
+    expect(bridge.githubDisconnectAccount).toHaveBeenCalledTimes(1);
+    expect(store.state()).toEqual({ kind: 'ready', accounts: [cliAccount] });
   });
 
   it('ignores an obsolete account-list response', async () => {
@@ -46,6 +55,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -71,6 +81,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn().mockResolvedValue(account),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -96,6 +107,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn().mockReturnValue(new Promise((resolve) => { resolveConnect = resolve; })),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -132,6 +144,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -169,6 +182,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn().mockResolvedValue({ cancelled: true }),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -201,6 +215,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn().mockResolvedValue(undefined),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),
@@ -233,6 +248,7 @@ describe('GitHubAccountStore', () => {
       githubCancelDeviceFlow: vi.fn().mockResolvedValue({ cancelled: true }),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(),

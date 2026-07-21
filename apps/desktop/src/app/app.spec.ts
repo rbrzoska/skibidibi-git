@@ -7,6 +7,8 @@ import { DesktopGitHubBridge, GITHUB_BRIDGE, GitHubAccountStore } from './core/g
 
 describe('App', () => {
   beforeEach(async () => {
+    globalThis.localStorage.clear();
+    globalThis.document.documentElement.style.removeProperty('zoom');
     await TestBed.configureTestingModule({
       imports: [App],
       providers: [
@@ -16,6 +18,11 @@ describe('App', () => {
         GitHubAccountStore,
       ],
     }).compileComponents();
+  });
+
+  afterEach(() => {
+    globalThis.localStorage.clear();
+    globalThis.document.documentElement.style.removeProperty('zoom');
   });
 
   it('creates the application shell', () => {
@@ -34,5 +41,22 @@ describe('App', () => {
 
     const compiled = fixture.nativeElement as HTMLElement;
     expect(compiled.textContent).toContain('Skibidibi Git');
+  });
+
+  it('exposes compact font controls next to the account and increases the UI scale', async () => {
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    const increase = compiled.querySelector('[aria-label="Increase text size"]') as HTMLButtonElement;
+    const controls = compiled.querySelector('.app-controls');
+    expect(controls?.querySelector('.font-scale')).not.toBeNull();
+    expect(controls?.querySelector('.account-chip')).not.toBeNull();
+
+    increase.click();
+    fixture.detectChanges();
+    expect(compiled.textContent).toContain('110%');
   });
 });

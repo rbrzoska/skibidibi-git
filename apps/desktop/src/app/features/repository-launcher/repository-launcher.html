@@ -1,75 +1,207 @@
 <main class="launcher">
-  <header class="hero">
-    <p class="eyebrow">local-first desktop git client</p>
-    <h1>Choose a repository</h1>
-    <p>Continue where you left off, or open another working directory.</p>
+  <header class="launcher-toolbar">
+    <div class="launcher-title">
+      <h1>Repositories</h1>
+      <span>{{ catalog.groupCount() }} repositories · {{ catalog.count() }} worktrees</span>
+    </div>
+    <div class="launcher-actions">
+      <button type="button" [disabled]="localActionBusy()" (click)="selectLocalRepository(true)">
+        <span aria-hidden="true">⌘</span> Open folder
+      </button>
+      <button type="button" [disabled]="localActionBusy()" (click)="selectLocalRepository(false)">
+        <span aria-hidden="true">＋</span> Add local
+      </button>
+      <button type="button" class="primary" (click)="openCloneDialog()">
+        <span aria-hidden="true">↧</span> Clone…
+      </button>
+    </div>
   </header>
 
   <section class="recent" aria-labelledby="recent-heading">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">remembered repositories</p>
-        <h2 id="recent-heading">Recent</h2>
-      </div>
-      <span class="count">{{ catalog.count() }}</span>
-    </div>
-
+    <h2 id="recent-heading" class="visually-hidden">Remembered repositories</h2>
+    @if (localActionError()) {
+      <p class="local-action-error" role="alert">{{ localActionError() }}</p>
+    }
     <div class="repository-list">
-      @for (repository of catalog.repositories(); track repository.id) {
-        <button type="button" class="repository-row" (click)="openRepository(repository)">
-          <span class="provider-mark" [class.local]="repository.provider === 'local'">
-            {{ repository.provider === 'github' ? 'GH' : 'L' }}
-          </span>
-          <span class="repository-identity">
-            <strong>{{ repository.name }}</strong>
-            <small>{{ repository.path }}</small>
-          </span>
-          <span class="integration" [class.local]="repository.integration === 'local-only'">
-            <i aria-hidden="true"></i>
-            @if (repository.availability === 'missing') {
-              Missing locally
-            } @else if (repository.integration === 'connected') {
-              GitHub connected
-            } @else if (repository.integration === 'attention') {
-              Integration needs attention
-            } @else if (repository.integration === 'unchecked') {
-              {{ repository.transport.toUpperCase() }} · unchecked
-            } @else {
-              Local only
+      @for (group of catalog.groups(); track group.id) {
+        <article class="repository-group">
+          <div class="group-heading">
+            <button
+              type="button"
+              class="repository-row"
+              [disabled]="group.defaultRepository === null"
+              (click)="openGroup(group)"
+            >
+              <span
+                class="provider-mark"
+                [class.local]="
+                  (group.defaultRepository ?? group.representative).provider === 'local'
+                "
+              >
+                {{
+                  (group.defaultRepository ?? group.representative).provider === 'github'
+                    ? 'GH'
+                    : 'L'
+                }}
+              </span>
+              <span class="repository-identity">
+                <span class="repository-name-line">
+                  <strong>{{ group.displayName }}</strong>
+                  <em>{{ (group.defaultRepository ?? group.representative).provider === 'github' ? 'GitHub' : 'Local' }}</em>
+                  <span
+                    class="integration"
+                    [class.local]="(group.defaultRepository ?? group.representative).integration === 'local-only'"
+                    [class.attention]="(group.defaultRepository ?? group.representative).integration === 'attention'"
+                  >
+                    @if (group.defaultRepository === null) {
+                      Missing locally
+                    } @else if ((group.defaultRepository ?? group.representative).integration === 'connected') {
+                      PRs connected
+                    } @else if ((group.defaultRepository ?? group.representative).integration === 'attention') {
+                      Auth required
+                    } @else if ((group.defaultRepository ?? group.representative).integration === 'unchecked') {
+                      {{ (group.defaultRepository ?? group.representative).transport.toUpperCase() }} · unchecked
+                    } @else {
+                      No remote
+                    }
+                  </span>
+                </span>
+                <small>
+                  @if (group.submodulePath !== null) {
+                    submodule · {{ group.submodulePath }}
+                  } @else {
+                    {{ (group.defaultRepository ?? group.representative).path }}
+                  }
+                </small>
+              </span>
+              <span class="last-opened">
+                {{ (group.defaultRepository ?? group.representative).lastOpenedLabel }}
+              </span>
+              @if (group.grouped) {
+                <span class="worktree-count">
+                  {{ group.worktrees.length }} worktrees
+                </span>
+              }
+              <span class="mini-action">Open</span>
+            </button>
+            @if (group.grouped || group.submodules.length > 0) {
+              <button
+                type="button"
+                class="group-disclosure"
+                [attr.aria-expanded]="isExpanded(group)"
+                [attr.aria-controls]="'worktrees-' + group.id"
+                [attr.aria-label]="
+                  (isExpanded(group) ? 'Collapse repositories for ' : 'Expand repositories for ') +
+                  group.displayName
+                "
+                (click)="toggleGroup(group)"
+                (keydown)="handleDisclosureKeydown($event, group)"
+              >
+                <span aria-hidden="true">{{ isExpanded(group) ? '⌄' : '›' }}</span>
+              </button>
             }
-          </span>
-          <span class="last-opened">{{ repository.lastOpenedLabel }}</span>
-          <span class="chevron" aria-hidden="true">›</span>
-        </button>
+          </div>
+
+          @if (isExpanded(group)) {
+            <ul
+              class="worktree-list"
+              [id]="'worktrees-' + group.id"
+              [attr.aria-label]="'Repositories and worktrees for ' + group.displayName"
+            >
+              @for (worktree of group.worktrees; track worktree.id) {
+                <li>
+                  <button
+                    type="button"
+                    class="worktree-row"
+                    [disabled]="worktree.availability !== 'available'"
+                    [attr.aria-label]="'Open ' + worktree.worktreeRole + ' worktree at ' + worktree.path"
+                    (click)="openRepository(worktree)"
+                  >
+                    <span
+                      class="worktree-role"
+                      [class.main]="worktree.worktreeRole === 'main'"
+                      [class.missing]="worktree.availability !== 'available'"
+                    >
+                      {{ worktree.availability !== 'available' ? '⊘' : worktree.worktreeRole === 'main' ? '◉' : '○' }}
+                    </span>
+                    <span class="worktree-identity">
+                      <strong>
+                        {{ worktree.worktreeRole === 'main' ? 'main' : 'linked' }}
+                      </strong>
+                      <small>{{ worktree.path }}</small>
+                    </span>
+                    @if (worktree.availability === 'missing') {
+                      <span class="worktree-state missing">Missing</span>
+                    } @else {
+                      <span class="worktree-state">{{ worktree.worktreeRole }}</span>
+                    }
+                    <span class="last-opened">{{ worktree.lastOpenedLabel }}</span>
+                    <span class="mini-action">Open</span>
+                  </button>
+                </li>
+              }
+              @for (submodule of group.submodules; track submodule.id) {
+                <ng-container [ngTemplateOutlet]="submoduleGroup" [ngTemplateOutletContext]="{ $implicit: submodule }" />
+              }
+            </ul>
+          }
+        </article>
       }
       @let catalogState = catalog.state();
       @if (catalogState.kind === 'loading') {
-        <p class="catalog-message">Loading remembered repositories…</p>
+        <p class="catalog-message" role="status">Loading remembered repositories…</p>
       } @else if (catalogState.kind === 'error') {
-        <p class="catalog-message error">{{ catalogState.message }}</p>
-      } @else if (catalog.repositories().length === 0) {
-        <p class="catalog-message">No remembered repositories yet. Choose a folder below.</p>
+        <div class="catalog-message error" role="alert">
+          <span>{{ catalogState.message }}</span>
+          <button type="button" (click)="catalog.load()">Retry</button>
+        </div>
+      } @else if (catalog.groups().length === 0) {
+        <p class="catalog-message">No remembered repositories yet. Open a folder or clone one.</p>
       }
     </div>
   </section>
 
   <app-clone-repository-dialog (cloned)="openClonedRepository($event)" />
+</main>
 
-  <section class="open-repository" aria-labelledby="open-heading">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">open another</p>
-        <h2 id="open-heading">Repository directory</h2>
-      </div>
+<ng-template #submoduleGroup let-submodule>
+  <li class="submodule-group-row">
+    <span class="submodule-connector" aria-hidden="true">↳</span>
+    <div class="submodule-content">
       <button
         type="button"
-        class="open-workspace"
-        [disabled]="statusStore.repositoryPath().length === 0"
-        (click)="openSelectedRepository()"
+        class="worktree-row submodule-repository-row"
+        [disabled]="submodule.defaultRepository === null"
+        [attr.aria-label]="'Open submodule repository ' + submodule.displayName"
+        (click)="openGroup(submodule)"
       >
-        Open workspace
+        <span class="worktree-role">✦</span>
+        <span class="worktree-identity">
+          <strong>{{ submodule.displayName }}</strong>
+          <small>submodule · {{ submodule.submodulePath }}</small>
+        </span>
+        <span class="worktree-state">{{ submodule.worktrees.length }} worktrees</span>
+        <span class="last-opened">{{ (submodule.defaultRepository ?? submodule.representative).lastOpenedLabel }}</span>
+        <span class="mini-action">Open</span>
       </button>
+      @if (submodule.grouped || submodule.submodules.length > 0) {
+        <ul class="nested-submodule-worktrees" [attr.aria-label]="'Repositories and worktrees for submodule ' + submodule.displayName">
+          @for (worktree of submodule.worktrees; track worktree.id) {
+            <li>
+              <button type="button" class="worktree-row" [disabled]="worktree.availability !== 'available'" [attr.aria-label]="'Open ' + worktree.worktreeRole + ' worktree for submodule ' + submodule.displayName" (click)="openRepository(worktree)">
+                <span class="worktree-role" [class.main]="worktree.worktreeRole === 'main'">{{ worktree.worktreeRole === 'main' ? '◉' : '○' }}</span>
+                <span class="worktree-identity"><strong>{{ worktree.worktreeRole === 'main' ? 'main' : 'linked' }}</strong><small>{{ worktree.path }}</small></span>
+                <span class="worktree-state">{{ worktree.worktreeRole }}</span>
+                <span class="last-opened">{{ worktree.lastOpenedLabel }}</span>
+                <span class="mini-action">Open</span>
+              </button>
+            </li>
+          }
+          @for (child of submodule.submodules; track child.id) {
+            <ng-container [ngTemplateOutlet]="submoduleGroup" [ngTemplateOutletContext]="{ $implicit: child }" />
+          }
+        </ul>
+      }
     </div>
-    <app-repository-status />
-  </section>
-</main>
+  </li>
+</ng-template>

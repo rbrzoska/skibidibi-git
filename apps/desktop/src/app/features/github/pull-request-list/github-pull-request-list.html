@@ -1,42 +1,68 @@
-<section class="github-pull-requests" aria-labelledby="github-pr-list-heading">
+<section class="github-pull-requests" aria-label="GitHub pull requests">
   @let state = store.listState();
-  <header>
-    <strong id="github-pr-list-heading">Pull Requests</strong>
-    @if (state.kind === 'ready') { <small>{{ state.pullRequests.length }}</small> }
-  </header>
+  <div class="pr-controls">
+    <div class="pr-scope" role="group" aria-label="Pull request filter">
+      <button type="button" [class.active]="store.scope() === 'assignedToViewer'" [attr.aria-pressed]="store.scope() === 'assignedToViewer'" (click)="setScope('assignedToViewer')">Assigned to me</button>
+      <button type="button" [class.active]="store.scope() === 'authoredByViewer'" [attr.aria-pressed]="store.scope() === 'authoredByViewer'" (click)="setScope('authoredByViewer')">My PRs</button>
+    </div>
+    <span class="pr-count" [attr.aria-label]="state.kind === 'ready' ? state.pullRequests.length + ' pull requests loaded' : 'Pull request count unavailable'">
+      {{ state.kind === 'ready' ? state.pullRequests.length : '—' }}
+    </span>
+    <button
+      class="refresh-cli"
+      type="button"
+      [disabled]="accountBusy()"
+      title="Re-detect the current gh auth session and reload pull requests"
+      aria-label="Refresh GitHub CLI authentication and pull requests"
+      (click)="refreshGitHubCli()"
+    ><span aria-hidden="true">↻</span><span class="refresh-label">{{ accounts.connectingAuthKind() === 'gitHubCli' ? 'Detecting…' : 'Refresh CLI' }}</span></button>
+  </div>
+  @if (accounts.mutationError()) {
+    <p class="list-state error" role="alert">{{ accounts.mutationError() }}</p>
+  }
   @if (accountId() === null) {
-    <p class="list-state">Connect a GitHub account to load pull requests.</p>
+    <div class="list-state"><span class="state-icon" aria-hidden="true">GH</span><p>Connect a GitHub account to load pull requests.</p></div>
   } @else {
     @if (state.kind === 'idle' || state.kind === 'loading') {
-      <p class="list-state" role="status">Loading pull requests…</p>
+      <div class="list-state" role="status"><span class="spinner" aria-hidden="true"></span><p>Loading pull requests…</p></div>
     } @else if (state.kind === 'error') {
-      <div class="list-state error" role="alert"><p>{{ state.message }}</p><button type="button" (click)="retry()">Try again</button></div>
+      <div class="list-state error" role="alert"><span class="state-icon" aria-hidden="true">!</span><p>{{ state.message }}</p><button type="button" (click)="retry()"><span aria-hidden="true">↻</span> Retry</button></div>
     } @else if (state.pullRequests.length === 0) {
-      <p class="list-state">No pull requests found.</p>
+      <div class="list-state"><span class="state-icon" aria-hidden="true">⑂</span><p>No pull requests found for this filter.</p></div>
     } @else {
-      <ul>
+      <ul aria-label="Pull requests">
         @for (pullRequest of state.pullRequests; track pullRequest.number) {
-          <li>
+          <li class="pr-row">
             <button
+              class="select-pr"
               type="button"
               [class.selected]="store.selectedNumber() === pullRequest.number"
               [attr.aria-current]="store.selectedNumber() === pullRequest.number ? 'true' : null"
               (click)="select(pullRequest)"
             >
-              <span class="title"><strong>#{{ pullRequest.number }} {{ pullRequest.title }}</strong><small>{{ pullRequest.headRefName }} → {{ pullRequest.baseRefName }}</small></span>
+              <span class="title"><strong><span class="pr-number">#{{ pullRequest.number }}</span> {{ pullRequest.title }}</strong><small><span aria-hidden="true">⑂</span> {{ pullRequest.headRefName }} <span aria-hidden="true">→</span> {{ pullRequest.baseRefName }}</small></span>
               <span class="badges">
-                @if (pullRequest.draft) { <small>Draft</small> }
-                @if (pullRequest.authoredByViewer) { <small>Mine</small> }
-                @if (pullRequest.reviewRequestedFromViewer === true) { <small>Review requested</small> }
-                @if (pullRequest.unresolvedThreadCount !== null && pullRequest.unresolvedThreadCount > 0) { <small>{{ pullRequest.unresolvedThreadCount }} unresolved</small> }
+                <small class="comment-count" [attr.aria-label]="pullRequest.commentCount + ' comments'" [title]="pullRequest.commentCount + ' comments'"><span aria-hidden="true">◌</span>{{ pullRequest.commentCount }}</small>
+                @if (pullRequest.draft) { <small class="draft">Draft</small> }
+                @if (pullRequest.authoredByViewer) { <small class="mine">Mine</small> }
+                @if (pullRequest.reviewRequestedFromViewer === true) { <small class="review-requested">Review requested</small> }
+                @if (pullRequest.unresolvedThreadCount !== null && pullRequest.unresolvedThreadCount > 0) { <small class="unresolved">{{ pullRequest.unresolvedThreadCount }} unresolved</small> }
               </span>
             </button>
+            <a
+              class="open-pr"
+              [href]="pullRequest.url"
+              target="_blank"
+              rel="noreferrer"
+              [attr.aria-label]="'Open pull request #' + pullRequest.number + ' on GitHub'"
+              [title]="'Open pull request #' + pullRequest.number + ' on GitHub'"
+            ><span aria-hidden="true">↗</span></a>
           </li>
         }
       </ul>
       @if (state.nextCursor !== null) {
         <button class="load-more" type="button" [disabled]="store.loadingMore()" (click)="loadMore()">
-          {{ store.loadingMore() ? 'Loading…' : 'Load more' }}
+          <span aria-hidden="true">↓</span>{{ store.loadingMore() ? 'Loading…' : 'Load more' }}
         </button>
       }
       @if (store.paginationError()) { <p class="list-state error" role="alert">{{ store.paginationError() }}</p> }

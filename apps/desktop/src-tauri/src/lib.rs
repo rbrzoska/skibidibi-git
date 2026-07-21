@@ -15,26 +15,62 @@ use app_domain::{
     MergeBranchResult, PopStashRequest, PopStashResult, PullInactiveBranchRequest,
     PullInactiveBranchResult, PullRequest, PullResult, PushAnalysis, PushRequest, PushResult,
     PushStashRequest, PushStashResult, RememberRepositoryInput, RememberedRepository,
-    RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability, RepositoryHealthUpdate,
-    RepositoryNavigation, RepositoryProvider, RepositoryStatus, RepositoryTransport,
+    RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability, RepositoryGitIdentity,
+    RepositoryGroupRelation, RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider,
+    RepositoryStatus, RepositorySubmodules, RepositoryTransport, RepositoryWorktreeRole,
     ResolveConflictRequest, ResolveConflictResult, SetUpstreamRequest, SetUpstreamResult,
-    StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource, SwitchBranchRequest,
-    SwitchBranchResult, WorkingTreeFileDiff, WorktreeDirtyState, WorktreeRemovalMode,
+    StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource, SubmoduleCommitState,
+    SubmoduleWorktreeState, SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff,
+    WorktreeDirtyState, WorktreeRemovalMode,
 };
-use app_store::{CatalogError, RepositoryCatalog};
+use app_store::{CatalogError, RepositoryCatalog, RepositoryCatalogReconciliation};
 use repo_runtime::{
     BranchCreationError, BranchOperationError, BranchSwitchError, CloneRepositoryError,
     ConflictResolutionError, FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError,
     MutationRuntimeError, NavigationRuntimeError, NetworkOperationError, RepositoryRuntime,
-    RepositoryRuntimeError, StashActionError, StashInspectionError, WorkingTreeDiffRuntimeError,
+    RepositoryRuntimeError, StashActionError, StashInspectionError, SubmodulesRuntimeError,
+    WorkingTreeDiffRuntimeError,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
+mod ai;
+mod diagnostics;
 mod github;
 mod maintenance_stats;
+
+const MIN_APPLICATION_ZOOM: f64 = 1.0;
+const MAX_APPLICATION_ZOOM: f64 = 1.5;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplicationZoomResponse {
+    scale: f64,
+}
+
+fn validated_application_zoom(scale: f64) -> Result<f64, CommandError> {
+    if scale.is_finite() && (MIN_APPLICATION_ZOOM..=MAX_APPLICATION_ZOOM).contains(&scale) {
+        Ok(scale)
+    } else {
+        Err(CommandError {
+            message: "application zoom must be between 100% and 150%".to_owned(),
+        })
+    }
+}
+
+#[tauri::command]
+fn set_application_zoom(
+    window: tauri::WebviewWindow,
+    scale: f64,
+) -> Result<ApplicationZoomResponse, CommandError> {
+    let scale = validated_application_zoom(scale)?;
+    window.set_zoom(scale).map_err(|_| CommandError {
+        message: "application zoom could not be changed".to_owned(),
+    })?;
+    Ok(ApplicationZoomResponse { scale })
+}
 
 struct AppState {
     repositories: RepositoryRuntime,
@@ -44,24 +80,28 @@ struct AppState {
     github_config: github_client::GitHubClientConfig,
     github_transport: github_client::ReqwestTransport,
     github_device_flow: github_client::GitHubDeviceFlowClient,
+    github_cli: github_client::GitHubCliTransport,
     github_device_sessions: github::GitHubDeviceFlowSessions,
     github_mutations: tokio::sync::Mutex<()>,
+    github_cli_operations: tokio::sync::Mutex<()>,
     github_account_generations: Mutex<HashMap<String, u64>>,
     mutations: MutationLockRegistry,
     clones: tokio::sync::Mutex<()>,
+    diagnostics: diagnostics::DiagnosticsState,
 }
 
 impl AppState {
     fn new(
         catalog: RepositoryCatalog,
         github_accounts: app_store::GitHubAccountStore,
+        diagnostics: diagnostics::DiagnosticsState,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let api_base_url = url::Url::parse("https://api.github.com/")?;
         let github_config = github_client::GitHubClientConfig::new(
             api_base_url.clone(),
             url::Url::parse("https://api.github.com/graphql")?,
         )?;
-        let github_transport = github_client::ReqwestTransport::new(api_base_url)?;
+        let github_transport = github_client::ReqwestTransport::new(api_base_url.clone())?;
         let github_device_flow = github_client::GitHubDeviceFlowClient::new()?;
         Ok(Self {
             repositories: RepositoryRuntime::default(),
@@ -71,11 +111,14 @@ impl AppState {
             github_config,
             github_transport,
             github_device_flow,
+            github_cli: github_client::GitHubCliTransport::discover(api_base_url),
             github_device_sessions: github::GitHubDeviceFlowSessions::default(),
             github_mutations: tokio::sync::Mutex::new(()),
+            github_cli_operations: tokio::sync::Mutex::new(()),
             github_account_generations: Mutex::new(HashMap::new()),
             mutations: MutationLockRegistry::default(),
             clones: tokio::sync::Mutex::new(()),
+            diagnostics,
         })
     }
 }
@@ -245,6 +288,14 @@ impl From<MutationRuntimeError> for CommandError {
     }
 }
 
+impl From<SubmodulesRuntimeError> for CommandError {
+    fn from(error: SubmodulesRuntimeError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
 fn unix_timestamp() -> Result<i64, CommandError> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -291,13 +342,23 @@ fn read_small_git_pointer(path: &Path) -> Result<String, CommandError> {
     })
 }
 
-fn resolve_git_common_dir(repository: &Path) -> Result<PathBuf, CommandError> {
+#[derive(Debug)]
+struct ResolvedGitIdentity {
+    common_dir: PathBuf,
+    worktree_role: RepositoryWorktreeRole,
+}
+
+fn resolve_git_identity(repository: &Path) -> Result<ResolvedGitIdentity, CommandError> {
     let repository = std::fs::canonicalize(repository).map_err(|error| CommandError {
         message: format!("repository path is unavailable: {error}"),
     })?;
     let dot_git = repository.join(".git");
-    let git_dir = if dot_git.is_dir() {
-        std::fs::canonicalize(dot_git)
+    let (git_dir_result, worktree_role, pointer_git_dir) = if dot_git.is_dir() {
+        (
+            std::fs::canonicalize(dot_git),
+            RepositoryWorktreeRole::Main,
+            false,
+        )
     } else if dot_git.is_file() {
         let pointer = read_small_git_pointer(&dot_git)?;
         let value = pointer
@@ -308,36 +369,76 @@ fn resolve_git_common_dir(repository: &Path) -> Result<PathBuf, CommandError> {
                 message: "linked-worktree Git directory pointer is invalid".to_owned(),
             })?;
         let candidate = Path::new(value);
-        std::fs::canonicalize(if candidate.is_absolute() {
-            candidate.to_path_buf()
-        } else {
-            repository.join(candidate)
-        })
+        (
+            std::fs::canonicalize(if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                repository.join(candidate)
+            }),
+            RepositoryWorktreeRole::Main,
+            true,
+        )
     } else if repository.join("HEAD").is_file() && repository.join("objects").is_dir() {
-        Ok(repository)
+        (Ok(repository), RepositoryWorktreeRole::Bare, false)
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Git directory not found",
-        ))
-    }
-    .map_err(|error| CommandError {
+        (
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Git directory not found",
+            )),
+            RepositoryWorktreeRole::Unknown,
+            false,
+        )
+    };
+    let git_dir = git_dir_result.map_err(|error| CommandError {
         message: format!("Git directory is unavailable: {error}"),
     })?;
 
     let common_pointer = git_dir.join("commondir");
     if !common_pointer.is_file() {
-        return Ok(git_dir);
+        return Ok(ResolvedGitIdentity {
+            common_dir: git_dir,
+            worktree_role,
+        });
     }
     let value = read_small_git_pointer(&common_pointer)?;
     let candidate = Path::new(value.trim());
-    std::fs::canonicalize(if candidate.is_absolute() {
+    let common_dir = std::fs::canonicalize(if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
         git_dir.join(candidate)
     })
     .map_err(|error| CommandError {
         message: format!("Git common directory is unavailable: {error}"),
+    })?;
+    Ok(ResolvedGitIdentity {
+        common_dir,
+        worktree_role: if pointer_git_dir {
+            RepositoryWorktreeRole::Linked
+        } else {
+            worktree_role
+        },
+    })
+}
+
+fn resolve_git_common_dir(repository: &Path) -> Result<PathBuf, CommandError> {
+    Ok(resolve_git_identity(repository)?.common_dir)
+}
+
+fn catalog_git_identity(repository: &Path) -> Result<RepositoryGitIdentity, CommandError> {
+    let identity = resolve_git_identity(repository)?;
+    let canonical_common_dir =
+        identity
+            .common_dir
+            .into_os_string()
+            .into_string()
+            .map_err(|_| CommandError {
+                message: "Git common directory is not valid UTF-8".to_owned(),
+            })?;
+    Ok(RepositoryGitIdentity {
+        repository_group_id: Uuid::new_v4().to_string(),
+        canonical_common_dir,
+        worktree_role: identity.worktree_role,
     })
 }
 
@@ -1084,37 +1185,85 @@ async fn repository_maintenance_stats(
 }
 
 #[tauri::command]
-fn list_remembered_repositories(
+async fn list_remembered_repositories(
     state: State<'_, AppState>,
 ) -> Result<Vec<RememberedRepository>, CommandError> {
     let repositories = lock_catalog(&state)?.list()?;
-    let availability = repositories
-        .iter()
-        .map(|repository| {
-            (
-                repository.id.clone(),
-                repository_availability(&repository.canonical_path),
-            )
-        })
-        .collect::<Vec<_>>();
-    let catalog = lock_catalog(&state)?;
-    for (repository_id, availability) in availability {
-        catalog.set_availability(&repository_id, availability, unix_timestamp()?)?;
-    }
+    let refreshes = tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .into_iter()
+            .map(|repository| {
+                let availability = repository_availability(&repository.canonical_path);
+                let identity = (availability == RepositoryAvailability::Available)
+                    .then(|| catalog_git_identity(Path::new(&repository.canonical_path)).ok())
+                    .flatten();
+                RepositoryCatalogReconciliation {
+                    repository_id: repository.id,
+                    availability,
+                    git_identity: identity,
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("repository catalog refresh task failed: {error}"),
+    })?;
+    let mut catalog = lock_catalog(&state)?;
+    let now = unix_timestamp()?;
+    catalog.reconcile(&refreshes, now)?;
     catalog.list().map_err(CommandError::from)
 }
 
 #[tauri::command]
-async fn remember_repository(
-    repository_path: String,
+async fn repository_submodules(
+    repository_id: String,
     state: State<'_, AppState>,
+) -> Result<RepositorySubmodules, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .submodules(&repository_path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("repository submodule task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+fn list_repository_relations(
+    state: State<'_, AppState>,
+) -> Result<Vec<RepositoryGroupRelation>, CommandError> {
+    lock_catalog(&state)?
+        .list_relations()
+        .map_err(CommandError::from)
+}
+
+fn safe_submodule_relative_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+async fn remember_repository_internal(
+    repository_path: String,
+    state: &State<'_, AppState>,
 ) -> Result<RememberedRepository, CommandError> {
     let repositories = state.repositories.clone();
     let path_for_validation = repository_path.clone();
-    let metadata = tauri::async_runtime::spawn_blocking(move || {
+    let (metadata, git_identity) = tauri::async_runtime::spawn_blocking(move || {
         let path = Path::new(&path_for_validation);
         repositories.status(path).map_err(CommandError::from)?;
-        Ok::<_, CommandError>(repositories.metadata(path).ok())
+        Ok::<_, CommandError>((
+            repositories.metadata(path).ok(),
+            catalog_git_identity(path)?,
+        ))
     })
     .await
     .map_err(|error| CommandError {
@@ -1141,9 +1290,10 @@ async fn remember_repository(
         hosted_identity: metadata
             .as_ref()
             .and_then(|metadata| metadata.hosted_identity.clone()),
+        git_identity: Some(git_identity),
         now,
     };
-    let mut catalog = lock_catalog(&state)?;
+    let mut catalog = lock_catalog(state)?;
     let remembered = catalog.upsert(&input)?;
     catalog.touch_opened(&remembered.id, now)?;
     if metadata.is_none() {
@@ -1167,6 +1317,109 @@ async fn remember_repository(
         .ok_or_else(|| CommandError {
             message: "remembered repository could not be reloaded".to_owned(),
         })
+}
+
+#[tauri::command]
+async fn remember_repository(
+    repository_path: String,
+    state: State<'_, AppState>,
+) -> Result<RememberedRepository, CommandError> {
+    remember_repository_internal(repository_path, &state).await
+}
+
+#[tauri::command]
+async fn open_submodule_repository(
+    parent_repository_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<RememberedRepository, CommandError> {
+    if !safe_submodule_relative_path(&path) {
+        return Err(CommandError {
+            message: "submodule path must be a safe repository-relative path".to_owned(),
+        });
+    }
+    let mut parent = lock_catalog(&state)?
+        .get(&parent_repository_id)?
+        .ok_or_else(|| CommandError {
+            message: format!("remembered repository not found: {parent_repository_id}"),
+        })?;
+    if parent.repository_group_id.is_none() {
+        parent = remember_repository_internal(parent.canonical_path, &state).await?;
+    }
+    let parent_group_id = parent
+        .repository_group_id
+        .clone()
+        .ok_or_else(|| CommandError {
+            message: "parent repository identity is unavailable".to_owned(),
+        })?;
+    let canonical_parent = PathBuf::from(parent.canonical_path);
+    let repositories = state.repositories.clone();
+    let requested_path = path.clone();
+    let (submodule, child_path) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let submodules = repositories
+                .submodules(&canonical_parent)
+                .map_err(CommandError::from)?;
+            let submodule = submodules
+                .submodules
+                .into_iter()
+                .find(|submodule| submodule.path == requested_path)
+                .ok_or_else(|| CommandError {
+                    message: "submodule is not configured in the parent repository".to_owned(),
+                })?;
+            if !submodule.present || !submodule.initialized {
+                return Err(CommandError {
+                    message: "submodule must be present and initialized before it can be opened"
+                        .to_owned(),
+                });
+            }
+            if submodule.commit_state == SubmoduleCommitState::Unavailable
+                || submodule.worktree_state == SubmoduleWorktreeState::Unavailable
+            {
+                return Err(CommandError {
+                    message: "submodule repository state is unavailable".to_owned(),
+                });
+            }
+            let canonical_parent =
+                std::fs::canonicalize(&canonical_parent).map_err(|error| CommandError {
+                    message: format!("parent repository path is unavailable: {error}"),
+                })?;
+            let child_path = std::fs::canonicalize(canonical_parent.join(&submodule.path))
+                .map_err(|error| CommandError {
+                    message: format!("submodule repository path is unavailable: {error}"),
+                })?;
+            if !child_path.starts_with(&canonical_parent) || child_path == canonical_parent {
+                return Err(CommandError {
+                    message: "submodule repository path escapes the parent repository".to_owned(),
+                });
+            }
+            Ok::<_, CommandError>((submodule, child_path))
+        })
+        .await
+        .map_err(|error| CommandError {
+            message: format!("submodule validation task failed: {error}"),
+        })??;
+
+    let child_path = child_path
+        .into_os_string()
+        .into_string()
+        .map_err(|_| CommandError {
+            message: "submodule repository path is not valid UTF-8".to_owned(),
+        })?;
+    let remembered = remember_repository_internal(child_path, &state).await?;
+    let child_group_id = remembered
+        .repository_group_id
+        .as_deref()
+        .ok_or_else(|| CommandError {
+            message: "submodule repository identity is unavailable".to_owned(),
+        })?;
+    lock_catalog(&state)?.link_submodule(
+        &parent_group_id,
+        child_group_id,
+        &submodule.path,
+        unix_timestamp()?,
+    )?;
+    Ok(remembered)
 }
 
 #[tauri::command]
@@ -1194,7 +1447,7 @@ async fn clone_repository(
             message: format!("repository clone task failed: {error}"),
         })??
     };
-    remember_repository(clone_result.repository_path, state).await
+    remember_repository_internal(clone_result.repository_path, &state).await
 }
 
 #[tauri::command]
@@ -1279,13 +1532,25 @@ pub fn run() {
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
+            let diagnostics = diagnostics::DiagnosticsState::open(
+                app.path().home_dir()?.join(".skibidibi-git"),
+                app.path().app_config_dir()?.join("data-root.json"),
+            )?;
             let catalog = RepositoryCatalog::open(data_directory.join("repositories.sqlite3"))?;
             let github_accounts =
                 app_store::GitHubAccountStore::open(data_directory.join("github.sqlite3"))?;
-            app.manage(AppState::new(catalog, github_accounts)?);
+            app.manage(AppState::new(catalog, github_accounts, diagnostics)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            ai::ai_cli_status,
+            ai::ai_generate_commit_message,
+            diagnostics::diagnostics_settings,
+            diagnostics::diagnostics_update_settings,
+            diagnostics::diagnostics_read,
+            diagnostics::diagnostics_clear,
+            diagnostics::select_diagnostics_directory,
+            set_application_zoom,
             repository_status,
             repository_history,
             repository_commit_detail,
@@ -1320,7 +1585,10 @@ pub fn run() {
             select_repository_directory,
             select_clone_parent_directory,
             list_remembered_repositories,
+            repository_submodules,
+            list_repository_relations,
             remember_repository,
+            open_submodule_repository,
             clone_repository,
             set_repository_pinned,
             forget_repository,
@@ -1330,6 +1598,7 @@ pub fn run() {
             github::github_cancel_device_flow,
             github::github_open_device_verification,
             github::github_connect_pat,
+            github::github_connect_cli,
             github::github_disconnect_account,
             github::github_list_repositories,
             github::github_list_pull_requests,
@@ -1337,4 +1606,120 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    fn git(args: &[&str], current_dir: &Path) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(current_dir)
+            .output()
+            .expect("git should run in the identity fixture");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn application_zoom_accepts_only_the_supported_finite_range() {
+        assert_eq!(validated_application_zoom(1.0).unwrap(), 1.0);
+        assert_eq!(validated_application_zoom(1.5).unwrap(), 1.5);
+        assert!(validated_application_zoom(0.99).is_err());
+        assert!(validated_application_zoom(1.51).is_err());
+        assert!(validated_application_zoom(f64::NAN).is_err());
+        assert!(validated_application_zoom(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn main_and_linked_worktrees_share_the_common_directory() {
+        let fixture = tempdir().unwrap();
+        let main = fixture.path().join("main");
+        let linked = fixture.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        git(&["init"], &main);
+        std::fs::write(main.join("tracked.txt"), "fixture").unwrap();
+        git(&["add", "tracked.txt"], &main);
+        git(
+            &[
+                "-c",
+                "user.name=Skibidibi Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            &main,
+        );
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "codex/test-linked",
+                linked.to_str().unwrap(),
+            ],
+            &main,
+        );
+
+        let main_identity = resolve_git_identity(&main).unwrap();
+        let linked_identity = resolve_git_identity(&linked).unwrap();
+
+        assert_eq!(main_identity.worktree_role, RepositoryWorktreeRole::Main);
+        assert_eq!(
+            linked_identity.worktree_role,
+            RepositoryWorktreeRole::Linked
+        );
+        assert_eq!(main_identity.common_dir, linked_identity.common_dir);
+    }
+
+    #[test]
+    fn submodule_opening_accepts_only_normal_relative_paths() {
+        assert!(safe_submodule_relative_path("modules/client"));
+        assert!(!safe_submodule_relative_path(""));
+        assert!(!safe_submodule_relative_path("../outside"));
+        assert!(!safe_submodule_relative_path("modules/../outside"));
+        assert!(!safe_submodule_relative_path("/absolute/client"));
+    }
+
+    #[test]
+    fn bare_repository_is_its_own_common_directory() {
+        let fixture = tempdir().unwrap();
+        let bare = fixture.path().join("repository.git");
+        git(&["init", "--bare", bare.to_str().unwrap()], fixture.path());
+
+        let identity = resolve_git_identity(&bare).unwrap();
+
+        assert_eq!(identity.worktree_role, RepositoryWorktreeRole::Bare);
+        assert_eq!(identity.common_dir, std::fs::canonicalize(bare).unwrap());
+    }
+
+    #[test]
+    fn separate_git_directory_is_a_main_worktree() {
+        let fixture = tempdir().unwrap();
+        let worktree = fixture.path().join("worktree");
+        let git_dir = fixture.path().join("metadata.git");
+        git(
+            &[
+                "init",
+                "--separate-git-dir",
+                git_dir.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+            ],
+            fixture.path(),
+        );
+
+        let identity = resolve_git_identity(&worktree).unwrap();
+
+        assert_eq!(identity.worktree_role, RepositoryWorktreeRole::Main);
+        assert_eq!(identity.common_dir, std::fs::canonicalize(git_dir).unwrap());
+    }
 }

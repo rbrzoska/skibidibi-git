@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum GitHubAuthKind {
     PersonalAccessToken,
     OAuthDevice,
+    GitHubCli,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,5 +223,13 @@ mod tests {
         assert_eq!(value["intervalSeconds"], 5);
         assert!(value.get("deviceCode").is_none());
         assert!(value.get("accessToken").is_none());
+    }
+
+    #[test]
+    fn github_cli_auth_kind_has_a_stable_frontend_name() {
+        assert_eq!(
+            serde_json::to_string(&GitHubAuthKind::GitHubCli).unwrap(),
+            "\"gitHubCli\""
+        );
     }
 }

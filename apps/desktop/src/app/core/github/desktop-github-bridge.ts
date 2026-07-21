@@ -19,7 +19,7 @@ export class DesktopGitHubBridge implements GitHubBridge {
 
   async githubListAccounts(): Promise<readonly GitHubAccount[]> {
     const accounts = await this.ipc.invoke('github_list_accounts', {});
-    return accounts.map(({ id, login, host, avatarUrl, state }) => ({ id, login, host, avatarUrl, state }));
+    return accounts.map(({ id, login, host, avatarUrl, state, authKind }) => ({ id, login, host, avatarUrl, state, authKind }));
   }
 
   githubStartDeviceFlow(): Promise<GitHubDeviceFlowStart> {
@@ -41,8 +41,13 @@ export class DesktopGitHubBridge implements GitHubBridge {
   }
 
   async githubConnectPat(request: { readonly token: string }): Promise<GitHubAccount> {
-    const { id, login, host, avatarUrl, state } = await this.ipc.invoke('github_connect_pat', request);
-    return { id, login, host, avatarUrl, state };
+    const { id, login, host, avatarUrl, state, authKind } = await this.ipc.invoke('github_connect_pat', request);
+    return { id, login, host, avatarUrl, state, authKind };
+  }
+
+  async githubConnectCli(): Promise<GitHubAccount> {
+    const { id, login, host, avatarUrl, state, authKind } = await this.ipc.invoke('github_connect_cli', {});
+    return { id, login, host, avatarUrl, state, authKind };
   }
 
   githubDisconnectAccount(

@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT } from '../../../core/ai-support/ai-support.store';
 import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../../core/github';
 import { DESKTOP_IPC } from '../../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../../core/repositories/repository-catalog';
@@ -52,11 +53,27 @@ describe('SettingsPage', () => {
       githubOpenDeviceVerification: vi.fn(),
     githubListRepositories: vi.fn().mockResolvedValue({ repositories: [], nextCursor: null }),
     githubConnectPat: vi.fn(),
+    githubConnectCli: vi.fn(),
     githubDisconnectAccount: vi.fn(),
     githubListPullRequests: vi.fn(),
     githubPullRequestDetail: vi.fn(),
   };
   const maintenanceInvoke = vi.fn();
+  const aiSupport = {
+    providerStatuses: signal([
+      { provider: 'codex' as const, displayName: 'Codex', available: true, version: '1.2.3', detail: null },
+      { provider: 'claude' as const, displayName: 'Claude Code', available: false, version: null, detail: 'Not installed' },
+      { provider: 'cursor' as const, displayName: 'Cursor', available: true, version: '0.9.0', detail: null },
+    ]),
+    promptTemplate: signal(DEFAULT_AI_COMMIT_PROMPT),
+    availabilityLoading: signal(false),
+    availabilityError: signal<string | null>(null),
+    loadAvailability: vi.fn().mockResolvedValue(undefined),
+    isProviderEnabled: vi.fn().mockReturnValue(false),
+    setProviderEnabled: vi.fn(),
+    updatePromptTemplate: vi.fn(),
+    resetPromptTemplate: vi.fn(),
+  };
   const maintenanceStats = {
     repositoryBytes: 12_582_912,
     gitBytes: 2_097_152,
@@ -89,13 +106,23 @@ describe('SettingsPage', () => {
   };
 
   beforeEach(async () => {
-    maintenanceInvoke.mockReset().mockResolvedValue(maintenanceStats);
+    maintenanceInvoke.mockReset().mockImplementation((command: string) => Promise.resolve(
+      command === 'diagnostics_settings'
+        ? { dataDirectory: '/Users/test/.skibidibi-git', maxLogKilobytes: 256, logFile: '/Users/test/.skibidibi-git/diagnostics.jsonl' }
+        : maintenanceStats,
+    ));
+    aiSupport.loadAvailability.mockClear();
+    aiSupport.isProviderEnabled.mockClear().mockReturnValue(false);
+    aiSupport.setProviderEnabled.mockClear();
+    aiSupport.updatePromptTemplate.mockClear();
+    aiSupport.resetPromptTemplate.mockClear();
     await TestBed.configureTestingModule({
       imports: [SettingsPage],
       providers: [
         GitHubAccountStore,
         { provide: GITHUB_BRIDGE, useValue: githubBridge },
         { provide: RepositoryCatalog, useValue: catalog },
+        { provide: AiSupportStore, useValue: aiSupport },
         { provide: DESKTOP_IPC, useValue: { invoke: maintenanceInvoke } },
         provideRouter([]),
       ],
@@ -110,20 +137,83 @@ describe('SettingsPage', () => {
     expect(component).toBeTruthy();
   });
 
-  it('renders account, refresh, cloning, and repository maintenance sections', () => {
+  it('renders account, refresh defaults, AI Support, and repository maintenance sections', () => {
     fixture.detectChanges();
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
 
     expect(text).toContain('GitHub accounts');
-    expect(text).toContain('Refresh defaults');
-    expect(text).toContain('Cloning preferences');
-    expect(text).toContain('Repository maintenance');
+    expect(text).toContain('Defaults');
+    expect(text).toContain('AI Support');
+    expect(text).toContain('Commit prompt template');
+    expect(text).toContain('Codex');
+    expect(text).toContain('1.2.3');
+    expect(text).toContain('Claude Code');
+    expect(text).toContain('CLI not detected');
+    expect(text).toContain('Diagnostics & application data');
+    expect(text).toContain('/Users/test/.skibidibi-git');
+    expect(text).toContain('256 KiB');
+    expect(text).not.toContain('Cloning preferences');
+    expect(text).toContain('Storage — repository & worktree size / age');
     expect(text).toContain('skibidibi-git');
     expect(text).toContain('Available');
-    expect(text).toContain('on-demand scan');
-    expect(text).toContain('Back to repositories');
+    expect(text).toContain('Repositories');
     expect((fixture.nativeElement as HTMLElement).querySelector<HTMLAnchorElement>('.back-link')?.getAttribute('href'))
       .toBe('/repositories');
+  });
+
+  it('persists a selected diagnostic limit and opens the native bounded log viewer', async () => {
+    maintenanceInvoke.mockImplementation((command: string, request?: { dataDirectory: string; maxLogKilobytes: number }) => {
+      if (command === 'diagnostics_settings') {
+        return Promise.resolve({ dataDirectory: '/Users/test/.skibidibi-git', maxLogKilobytes: 256, logFile: '/Users/test/.skibidibi-git/diagnostics.jsonl' });
+      }
+      if (command === 'diagnostics_update_settings') {
+        return Promise.resolve({ ...request, logFile: `${request?.dataDirectory}/diagnostics.jsonl` });
+      }
+      if (command === 'diagnostics_read') {
+        return Promise.resolve({
+          totalBytes: 92,
+          truncated: false,
+          entries: [{ timestampMs: 1, severity: 'error', subsystem: 'aiSupport', eventCode: 'ai_generation_failed', message: 'Generation failed', fields: { provider: 'cursor' } }],
+        });
+      }
+      return Promise.resolve(maintenanceStats);
+    });
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const limit = host.querySelector<HTMLSelectElement>('.diagnostics-setting-row select');
+    limit!.value = '512';
+    limit!.dispatchEvent(new Event('change'));
+    await fixture.whenStable();
+    [...host.querySelectorAll<HTMLButtonElement>('.diagnostic-actions button')]
+      .find((button) => button.textContent?.includes('View log'))?.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(maintenanceInvoke).toHaveBeenCalledWith('diagnostics_update_settings', {
+      dataDirectory: '/Users/test/.skibidibi-git',
+      maxLogKilobytes: 512,
+    });
+    expect(maintenanceInvoke).toHaveBeenCalledWith('diagnostics_read', {});
+    expect(host.textContent).toContain('ai_generation_failed');
+    expect(host.textContent).toContain('cursor');
+  });
+
+  it('shows enable switches only for installed CLIs and forwards AI setting edits', () => {
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    const toggles = [...host.querySelectorAll<HTMLInputElement>('.provider-toggle input')];
+    const prompt = host.querySelector<HTMLTextAreaElement>('#ai-commit-prompt');
+
+    expect(toggles).toHaveLength(2);
+    toggles[0].click();
+    prompt!.value = 'Write a concise English summary.';
+    prompt!.dispatchEvent(new Event('input'));
+    host.querySelector<HTMLButtonElement>('.ai-prompt-actions button')?.click();
+
+    expect(aiSupport.setProviderEnabled).toHaveBeenCalledWith('codex', true);
+    expect(aiSupport.updatePromptTemplate).toHaveBeenCalledWith('Write a concise English summary.');
+    expect(aiSupport.resetPromptTemplate).toHaveBeenCalledOnce();
   });
 
   it('persists global refresh defaults without creating a repository override', () => {
@@ -186,7 +276,10 @@ describe('SettingsPage', () => {
   it('scans all repositories sequentially and orders scanned repositories by oldest commit', async () => {
     let activeScans = 0;
     let maximumActiveScans = 0;
-    maintenanceInvoke.mockImplementation(async (_command, request: { repositoryId: string }) => {
+    maintenanceInvoke.mockImplementation(async (command, request: { repositoryId: string }) => {
+      if (command === 'diagnostics_settings') {
+        return { dataDirectory: '/Users/test/.skibidibi-git', maxLogKilobytes: 256, logFile: '/Users/test/.skibidibi-git/diagnostics.jsonl' };
+      }
       activeScans += 1;
       maximumActiveScans = Math.max(maximumActiveScans, activeScans);
       await Promise.resolve();
@@ -205,9 +298,9 @@ describe('SettingsPage', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    const text = (fixture.nativeElement as HTMLElement).querySelector('.repository-list')?.textContent ?? '';
     expect(maximumActiveScans).toBe(1);
-    expect(maintenanceInvoke).toHaveBeenCalledTimes(2);
+    expect(maintenanceInvoke.mock.calls.filter(([command]) => command === 'repository_maintenance_stats')).toHaveLength(2);
     expect(text.indexOf('archive-repository')).toBeLessThan(text.indexOf('skibidibi-git'));
   });
 

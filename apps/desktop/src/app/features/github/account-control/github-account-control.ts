@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 
-import { GitHubAccountStore } from '../../../core/github';
+import { GitHubAccountStore, type GitHubAccount } from '../../../core/github';
 
 @Component({
   selector: 'app-github-account-control',
@@ -16,6 +16,12 @@ export class GitHubAccountControl {
   protected readonly oauthBusy = computed(() => {
     const state = this.store.deviceFlow();
     return state.kind === 'starting' || state.kind === 'waiting';
+  });
+  protected readonly cliConnected = computed(() => {
+    const state = this.store.state();
+    return state.kind === 'ready' && state.accounts.some(
+      (account) => account.authKind === 'gitHubCli' && account.state === 'connected',
+    );
   });
 
   constructor() {
@@ -55,6 +61,21 @@ export class GitHubAccountControl {
     const token = this.token();
     this.token.set('');
     await this.store.connectPat(token);
+  }
+
+  protected connectCli(): void {
+    void this.store.connectCli();
+  }
+
+  protected authKindLabel(authKind: GitHubAccount['authKind']): string {
+    switch (authKind) {
+      case 'gitHubCli':
+        return 'GitHub CLI';
+      case 'oAuthDevice':
+        return 'OAuth';
+      case 'personalAccessToken':
+        return 'Token';
+    }
   }
 
   protected disconnect(accountId: string): void {

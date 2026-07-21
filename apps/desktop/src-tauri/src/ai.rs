@@ -1,0 +1,696 @@
+use std::{
+    ffi::OsString,
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+use app_domain::{
+    AiCliStatus, AiCliStatuses, AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult,
+    AiProvider,
+};
+use repo_runtime::staged_ai_context_default;
+use serde_json::Value;
+use tauri::State;
+
+use crate::{AppState, CommandError, resolve_repository_path};
+
+const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const VERSION_LIMIT: usize = 8 * 1024;
+const STDOUT_LIMIT: usize = 32 * 1024;
+const STDERR_LIMIT: usize = 64 * 1024;
+const MAX_PROMPT_TEMPLATE: usize = 4 * 1024;
+
+#[derive(Debug, Clone)]
+struct ProviderExecutable {
+    path: PathBuf,
+    version: String,
+}
+
+#[derive(Debug)]
+struct ProcessOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[tauri::command]
+pub(crate) async fn ai_cli_status() -> AiCliStatuses {
+    let statuses = tauri::async_runtime::spawn_blocking(detect_all)
+        .await
+        .unwrap_or_else(|_| unavailable_statuses("CLI detection failed"));
+    AiCliStatuses { statuses }
+}
+
+#[tauri::command]
+pub(crate) async fn ai_generate_commit_message(
+    repository_id: String,
+    provider: AiProvider,
+    prompt_template: String,
+    expected_head: Option<String>,
+    index_fingerprint: String,
+    worktree_fingerprint: String,
+    state: State<'_, AppState>,
+) -> Result<AiGenerateCommitMessageResult, CommandError> {
+    let request = AiGenerateCommitMessageRequest {
+        repository_id,
+        provider,
+        prompt_template,
+        expected_head,
+        index_fingerprint,
+        worktree_fingerprint,
+    };
+    if request.prompt_template.is_empty() || request.prompt_template.len() > MAX_PROMPT_TEMPLATE {
+        return Err(command_error(
+            "AI prompt template must contain 1–4096 bytes",
+        ));
+    }
+    if request
+        .prompt_template
+        .chars()
+        .any(|character| character == '\0')
+    {
+        return Err(command_error(
+            "AI prompt template contains an invalid character",
+        ));
+    }
+    let repository = resolve_repository_path(&request.repository_id, &state)?;
+    let provider = request.provider;
+    state.diagnostics.record_ai_event(
+        "info",
+        "ai_generation_started",
+        "AI commit-message generation started",
+        provider_id(provider),
+    );
+    let result = tauri::async_runtime::spawn_blocking(move || generate(request, repository))
+        .await
+        .map_err(|_| command_error("AI generation task failed"))?;
+    match &result {
+        Ok(_) => state.diagnostics.record_ai_event(
+            "info",
+            "ai_generation_succeeded",
+            "AI commit-message generation completed",
+            provider_id(provider),
+        ),
+        Err(error) => state.diagnostics.record_ai_event(
+            "error",
+            diagnostic_event_code(&error.message),
+            "AI commit-message generation failed",
+            provider_id(provider),
+        ),
+    }
+    result
+}
+
+fn generate(
+    request: AiGenerateCommitMessageRequest,
+    repository: PathBuf,
+) -> Result<AiGenerateCommitMessageResult, CommandError> {
+    let context =
+        staged_ai_context_default(&repository).map_err(|error| command_error(error.to_string()))?;
+    if context.status.branch.oid != request.expected_head
+        || context.status.index_fingerprint != request.index_fingerprint
+        || context.status.worktree_fingerprint != request.worktree_fingerprint
+    {
+        return Err(command_error(
+            "repository state changed; refresh before generating a commit message",
+        ));
+    }
+
+    let executable = detect_provider(request.provider)
+        .ok_or_else(|| command_error("the selected AI CLI is not available"))?;
+    let input = format!(
+        "{}\n\nRequirements: Return exactly one concise English commit subject line. Do not include Markdown, descriptions, signatures, explanations, or multiple alternatives.\n\n{}",
+        request.prompt_template, context.text
+    );
+    let temporary = tempfile::tempdir()
+        .map_err(|_| command_error("could not create an isolated AI working directory"))?;
+    let arguments = provider_arguments(request.provider);
+    let output = run_bounded_process(
+        &executable.path,
+        &arguments,
+        input.into_bytes(),
+        temporary.path(),
+        GENERATION_TIMEOUT,
+        STDOUT_LIMIT,
+        STDERR_LIMIT,
+    )?;
+    if !output.success {
+        return Err(command_error(classify_cli_error(
+            request.provider,
+            &output.stdout,
+            &output.stderr,
+        )));
+    }
+    let message = normalize_response(&output.stdout)?;
+    Ok(AiGenerateCommitMessageResult {
+        message,
+        index_fingerprint: context.status.index_fingerprint,
+        worktree_fingerprint: context.status.worktree_fingerprint,
+    })
+}
+
+fn provider_arguments(provider: AiProvider) -> Vec<OsString> {
+    let arguments: &[&str] = match provider {
+        AiProvider::Codex => &[
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--json",
+            "-",
+        ],
+        AiProvider::Claude => &[
+            "-p",
+            "--safe-mode",
+            "--tools",
+            "",
+            "--no-session-persistence",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            "plan",
+        ],
+        AiProvider::Cursor => &[
+            "--print",
+            "--mode",
+            "plan",
+            "--sandbox",
+            "enabled",
+            "--trust",
+            "--output-format",
+            "json",
+        ],
+    };
+    arguments.iter().map(OsString::from).collect()
+}
+
+fn detect_all() -> Vec<AiCliStatus> {
+    [AiProvider::Codex, AiProvider::Claude, AiProvider::Cursor]
+        .into_iter()
+        .map(|provider| match detect_provider(provider) {
+            Some(executable) => AiCliStatus {
+                provider,
+                display_name: display_name(provider).to_owned(),
+                available: true,
+                version: Some(executable.version),
+                detail: None,
+            },
+            None => AiCliStatus {
+                provider,
+                display_name: display_name(provider).to_owned(),
+                available: false,
+                version: None,
+                detail: Some("CLI not found or its version probe failed".to_owned()),
+            },
+        })
+        .collect()
+}
+
+fn unavailable_statuses(detail: &str) -> Vec<AiCliStatus> {
+    [AiProvider::Codex, AiProvider::Claude, AiProvider::Cursor]
+        .into_iter()
+        .map(|provider| AiCliStatus {
+            provider,
+            display_name: display_name(provider).to_owned(),
+            available: false,
+            version: None,
+            detail: Some(detail.to_owned()),
+        })
+        .collect()
+}
+
+fn display_name(provider: AiProvider) -> &'static str {
+    match provider {
+        AiProvider::Codex => "Codex",
+        AiProvider::Claude => "Claude",
+        AiProvider::Cursor => "Cursor Agent",
+    }
+}
+
+fn detect_provider(provider: AiProvider) -> Option<ProviderExecutable> {
+    candidate_paths(provider).into_iter().find_map(|candidate| {
+        let path = trusted_executable(&candidate)?;
+        let output = run_bounded_process(
+            &path,
+            &[OsString::from("--version")],
+            Vec::new(),
+            std::env::temp_dir().as_path(),
+            VERSION_TIMEOUT,
+            VERSION_LIMIT,
+            VERSION_LIMIT,
+        )
+        .ok()?;
+        if !output.success {
+            return None;
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (!version.is_empty()).then_some(ProviderExecutable { path, version })
+    })
+}
+
+fn candidate_paths(provider: AiProvider) -> Vec<PathBuf> {
+    let names: &[&str] = match provider {
+        AiProvider::Codex => &["codex"],
+        AiProvider::Claude => &["claude"],
+        AiProvider::Cursor => &["cursor-agent", "agent"],
+    };
+    let mut paths = Vec::new();
+    if provider == AiProvider::Codex {
+        paths.push(PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+        ));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for directory in [home.join(".local/bin"), home.join(".npm-global/bin")] {
+            paths.extend(names.iter().map(|name| directory.join(name)));
+        }
+    }
+    for directory in [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ] {
+        paths.extend(names.iter().map(|name| directory.join(name)));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path).filter(|path| path.is_absolute()) {
+            paths.extend(names.iter().map(|name| directory.join(name)));
+        }
+    }
+    for variable in ["APPDATA", "LOCALAPPDATA", "ProgramFiles"] {
+        if let Some(directory) = std::env::var_os(variable).map(PathBuf::from) {
+            let directories = [
+                directory.clone(),
+                directory.join("npm"),
+                directory.join("Programs"),
+                directory.join("Programs/Cursor/resources/app/bin"),
+            ];
+            for directory in directories {
+                paths.extend(names.iter().flat_map(|name| {
+                    [directory.join(name), directory.join(format!("{name}.exe"))]
+                }));
+            }
+        }
+    }
+    paths
+}
+
+fn trusted_executable(candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let canonical = fs::canonicalize(candidate).ok()?;
+    let metadata = fs::metadata(&canonical).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+    }
+    Some(canonical)
+}
+
+fn run_bounded_process(
+    executable: &Path,
+    arguments: &[OsString],
+    stdin: Vec<u8>,
+    cwd: &Path,
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<ProcessOutput, CommandError> {
+    let mut command = Command::new(executable);
+    command
+        .args(arguments)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("LC_ALL", "C")
+        .env("NO_COLOR", "1");
+    configure_process_tree(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|_| command_error("could not start the AI CLI"))?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, stdout_limit));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, stderr_limit));
+    let stdin_writer = child
+        .stdin
+        .take()
+        .map(|mut writer| thread::spawn(move || writer.write_all(&stdin)));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // A CLI may leave a helper holding inherited output pipes. The main process has
+                // completed, so terminate the remaining isolated process group before joining
+                // readers; otherwise an abandoned helper could defeat the deadline forever.
+                terminate_process_tree(&mut child);
+                break status;
+            }
+            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                terminate_process_tree(&mut child);
+                let _ = child.wait();
+                return Err(command_error("AI CLI timed out"));
+            }
+            Err(_) => {
+                terminate_process_tree(&mut child);
+                let _ = child.wait();
+                return Err(command_error("could not monitor the AI CLI"));
+            }
+        }
+    };
+    if let Some(writer) = stdin_writer {
+        let _ = writer.join();
+    }
+    let (stdout, stdout_exceeded) = stdout_reader
+        .join()
+        .map_err(|_| command_error("could not read AI CLI output"))?;
+    let (stderr, stderr_exceeded) = stderr_reader
+        .join()
+        .map_err(|_| command_error("could not read AI CLI error output"))?;
+    if stdout_exceeded || stderr_exceeded {
+        return Err(command_error("AI CLI output exceeded the safety limit"));
+    }
+    Ok(ProcessOutput {
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
+    let mut retained = Vec::with_capacity(limit.min(8192));
+    let mut exceeded = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let remaining = limit.saturating_sub(retained.len());
+                retained.extend_from_slice(&buffer[..read.min(remaining)]);
+                exceeded |= read > remaining;
+            }
+        }
+    }
+    (retained, exceeded)
+}
+
+#[cfg(unix)]
+fn configure_process_tree(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_process_tree(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0000_0200);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_process_tree(_: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_process_tree(child: &mut Child) {
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    let _ = child.kill();
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(child: &mut Child) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(child: &mut Child) {
+    let _ = child.kill();
+}
+
+fn normalize_response(stdout: &[u8]) -> Result<String, CommandError> {
+    let raw =
+        std::str::from_utf8(stdout).map_err(|_| command_error("AI CLI returned invalid text"))?;
+    let mut candidate = parse_json_candidate(raw).unwrap_or_else(|| raw.to_owned());
+    candidate = candidate
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim()
+        .to_owned();
+    if let Some(rest) = candidate.strip_prefix("Commit message:") {
+        candidate = rest.trim().to_owned();
+    }
+    let lines = candidate
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() != 1 {
+        return Err(command_error(
+            "AI CLI must return exactly one commit subject line",
+        ));
+    }
+    let message = lines[0].trim();
+    let english_letters = message.bytes().filter(u8::is_ascii_alphabetic).count();
+    if message.is_empty()
+        || message.len() > 200
+        || english_letters < 3
+        || message.chars().any(char::is_control)
+        || !message.is_ascii()
+    {
+        return Err(command_error(
+            "AI CLI returned an invalid commit subject line",
+        ));
+    }
+    Ok(message.to_owned())
+}
+
+fn parse_json_candidate(raw: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return response_text(&value);
+    }
+    raw.lines().rev().find_map(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|value| response_text(&value))
+    })
+}
+
+fn response_text(value: &Value) -> Option<String> {
+    for key in ["result", "text", "message", "content"] {
+        if let Some(Value::String(text)) = value.get(key) {
+            return Some(text.clone());
+        }
+    }
+    if value.get("type").and_then(Value::as_str) == Some("item.completed") {
+        let item = value.get("item")?;
+        if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+            return item.get("text").and_then(Value::as_str).map(str::to_owned);
+        }
+    }
+    None
+}
+
+fn classify_cli_error(provider: AiProvider, stdout: &[u8], stderr: &[u8]) -> &'static str {
+    let lowercase = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+    .to_ascii_lowercase();
+    if [
+        "login",
+        "sign in",
+        "authentication",
+        "unauthorized",
+        "api key",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker))
+    {
+        match provider {
+            AiProvider::Claude => "Claude Code authentication is required; run `claude login`",
+            AiProvider::Cursor => {
+                "Cursor Agent authentication is required; run `cursor-agent login`"
+            }
+            AiProvider::Codex => "Codex authentication is required",
+        }
+    } else if lowercase.contains("rate limit") {
+        "AI CLI rate limit was reached"
+    } else {
+        "AI CLI exited unsuccessfully"
+    }
+}
+
+fn provider_id(provider: AiProvider) -> &'static str {
+    match provider {
+        AiProvider::Codex => "codex",
+        AiProvider::Claude => "claude",
+        AiProvider::Cursor => "cursor",
+    }
+}
+
+fn diagnostic_event_code(message: &str) -> &'static str {
+    if message.contains("authentication") {
+        "ai_cli_authentication_required"
+    } else if message.contains("timed out") {
+        "ai_cli_timeout"
+    } else if message.contains("safety limit") {
+        "ai_cli_output_limit"
+    } else if message.contains("repository state changed") {
+        "ai_generation_stale_repository"
+    } else {
+        "ai_generation_failed"
+    }
+}
+
+fn command_error(message: impl Into<String>) -> CommandError {
+    CommandError {
+        message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn fake_executable(script: &str) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("fake-ai");
+        fs::write(&path, script).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&path, permissions).unwrap();
+        (temporary, path)
+    }
+
+    #[test]
+    fn provider_arguments_are_tool_free_and_read_only() {
+        let codex = provider_arguments(AiProvider::Codex);
+        assert!(codex.contains(&OsString::from("read-only")));
+        assert!(codex.contains(&OsString::from("--ephemeral")));
+        let claude = provider_arguments(AiProvider::Claude);
+        assert!(claude.windows(2).any(|pair| pair == ["--tools", ""]));
+        let cursor = provider_arguments(AiProvider::Cursor);
+        assert!(cursor.contains(&OsString::from("plan")));
+        assert!(cursor.contains(&OsString::from("--trust")));
+        assert!(!cursor.iter().any(|argument| argument == "cursor"));
+    }
+
+    #[test]
+    fn normalizes_json_and_rejects_multiline_or_non_ascii_output() {
+        assert_eq!(
+            normalize_response(br#"{"result":"Fix checkout validation"}"#).unwrap(),
+            "Fix checkout validation"
+        );
+        assert!(normalize_response(b"Title\nDescription").is_err());
+        assert!(normalize_response("Napraw błędną walidację".as_bytes()).is_err());
+        assert!(normalize_response(&vec![b'x'; 201]).is_err());
+        assert_eq!(
+            normalize_response(br#"{"type":"item.completed","item":{"type":"agent_message","text":"Fix checkout validation"}}"#).unwrap(),
+            "Fix checkout validation"
+        );
+    }
+
+    #[test]
+    fn cli_errors_are_classified_without_returning_raw_stderr() {
+        assert_eq!(
+            classify_cli_error(AiProvider::Codex, b"", b"Unauthorized: secret prompt text"),
+            "Codex authentication is required"
+        );
+        assert_eq!(
+            classify_cli_error(AiProvider::Codex, b"", b"unexpected secret prompt text"),
+            "AI CLI exited unsuccessfully"
+        );
+        assert_eq!(
+            classify_cli_error(
+                AiProvider::Claude,
+                br#"{"is_error":true,"result":"Not logged in - Please run /login"}"#,
+                b""
+            ),
+            "Claude Code authentication is required; run `claude login`"
+        );
+    }
+
+    #[test]
+    fn cursor_candidates_never_include_the_cursor_ide_shim() {
+        let candidates = candidate_paths(AiProvider::Cursor);
+        assert!(candidates.iter().all(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "cursor-agent" || name == "agent")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_runner_sends_context_over_stdin_without_a_shell_command() {
+        let (temporary, executable) = fake_executable(
+            "#!/bin/sh\nread input\nprintf '{\"result\":\"Fix staged validation\"}'\n",
+        );
+        let output = run_bounded_process(
+            &executable,
+            &[],
+            b"private staged context\n".to_vec(),
+            temporary.path(),
+            Duration::from_secs(1),
+            1024,
+            1024,
+        )
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(
+            normalize_response(&output.stdout).unwrap(),
+            "Fix staged validation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_runner_does_not_wait_for_a_descendant_that_inherits_output_pipes() {
+        let (temporary, executable) =
+            fake_executable("#!/bin/sh\n(sleep 10) &\nprintf 'Done safely'\n");
+        let started = Instant::now();
+        let output = run_bounded_process(
+            &executable,
+            &[],
+            Vec::new(),
+            temporary.path(),
+            Duration::from_secs(1),
+            1024,
+            1024,
+        )
+        .unwrap();
+        assert!(output.success);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_validation_rejects_relative_and_non_executable_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("not-executable");
+        fs::write(&path, "fixture").unwrap();
+        assert!(trusted_executable(&path).is_none());
+        assert!(trusted_executable(Path::new("relative-cli")).is_none());
+    }
+}

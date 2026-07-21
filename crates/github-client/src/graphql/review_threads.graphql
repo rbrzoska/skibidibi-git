@@ -29,7 +29,6 @@ query ReviewThreads(
               body
               path
               line
-              diffSide
               createdAt
               updatedAt
               url

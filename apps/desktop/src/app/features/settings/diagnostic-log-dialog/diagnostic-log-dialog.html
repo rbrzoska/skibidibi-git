@@ -1,0 +1,40 @@
+<dialog #dialog class="diagnostic-dialog" aria-labelledby="diagnostic-log-title" (cancel)="close()">
+  <header>
+    <span>
+      <small>DIAGNOSTICS</small>
+      <h2 id="diagnostic-log-title">Application log</h2>
+    </span>
+    <button type="button" class="icon-button" aria-label="Close diagnostic log" (click)="close()">×</button>
+  </header>
+
+  <div class="log-summary">
+    <span>{{ entries().length }} entries</span>
+    <span>{{ formatBytes(totalBytes()) }} on disk</span>
+    @if (truncated()) { <span class="warning">Older or malformed entries omitted</span> }
+  </div>
+
+  <div class="log-entries" tabindex="0">
+    @if (entries().length === 0) {
+      <p class="empty-log">No diagnostic entries yet.</p>
+    } @else {
+      @for (entry of entries(); track entry.timestampMs + entry.eventCode + $index) {
+        <article class="log-entry" [class]="'severity-' + entry.severity">
+          <div class="entry-heading">
+            <time [attr.datetime]="timestampIso(entry.timestampMs)">{{ formattedTimestamp(entry.timestampMs) }}</time>
+            <span class="severity">{{ entry.severity }}</span>
+            <code>{{ entry.eventCode }}</code>
+          </div>
+          <p>{{ entry.message }}</p>
+          <dl>
+            <div><dt>Subsystem</dt><dd>{{ entry.subsystem }}</dd></div>
+            @for (field of entry.fields | keyvalue; track field.key) {
+              <div><dt>{{ field.key }}</dt><dd>{{ field.value }}</dd></div>
+            }
+          </dl>
+        </article>
+      }
+    }
+  </div>
+
+  <footer><button type="button" class="compact-button" (click)="close()">Close</button></footer>
+</dialog>

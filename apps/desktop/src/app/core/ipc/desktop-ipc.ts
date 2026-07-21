@@ -710,6 +710,8 @@ export interface HostedRepositoryIdentity {
 
 export interface RememberedRepositoryResponse {
   readonly id: string;
+  readonly repositoryGroupId: string | null;
+  readonly worktreeRole: 'main' | 'linked' | 'bare' | 'unknown';
   readonly canonicalPath: string;
   readonly displayName: string;
   readonly provider: RepositoryProvider;
@@ -725,13 +727,109 @@ export interface RememberedRepositoryResponse {
   readonly updatedAt: number;
 }
 
+/** A submodule declared by a remembered repository.  `currentOid` is null when
+ * the module has not been initialised locally. */
+export interface RepositorySubmodule {
+  readonly name: string;
+  readonly path: string;
+  readonly url: string | null;
+  readonly expectedOid: string | null;
+  readonly currentOid: string | null;
+  readonly present: boolean;
+  readonly initialized: boolean;
+  readonly commitState: 'atExpected' | 'different' | 'unavailable' | 'conflicted';
+  readonly worktreeState:
+    | 'clean'
+    | 'modified'
+    | 'untracked'
+    | 'modifiedAndUntracked'
+    | 'conflicted'
+    | 'unavailable';
+  readonly changeCount: number;
+}
+
+export interface RepositorySubmodulesResponse {
+  readonly submodules: readonly RepositorySubmodule[];
+}
+
+export interface RepositoryGroupRelationResponse {
+  readonly parentRepositoryGroupId: string;
+  readonly childRepositoryGroupId: string;
+  readonly kind: 'submodule';
+  readonly relativePath: string;
+}
+
+export interface ApplicationZoomResponse {
+  readonly scale: number;
+}
+
+export type AiCliProvider = 'codex' | 'claude' | 'cursor';
+
+export interface AiCliStatus {
+  readonly provider: AiCliProvider;
+  readonly displayName: string;
+  readonly available: boolean;
+  readonly version: string | null;
+  readonly detail: string | null;
+}
+
+export interface AiCliStatusResponse {
+  readonly statuses: readonly AiCliStatus[];
+}
+
+export interface GenerateAiCommitMessageRequest {
+  readonly repositoryId: string;
+  readonly provider: AiCliProvider;
+  readonly promptTemplate: string;
+  readonly expectedHead: string | null;
+  readonly indexFingerprint: string;
+  readonly worktreeFingerprint: string;
+}
+
+export interface GenerateAiCommitMessageResponse {
+  readonly message: string;
+  readonly indexFingerprint: string;
+  readonly worktreeFingerprint: string;
+}
+
+export interface DiagnosticsSettingsResponse {
+  readonly dataDirectory: string;
+  readonly maxLogKilobytes: number;
+  readonly logFile: string;
+}
+
+export interface DiagnosticEntry {
+  readonly timestampMs: number;
+  readonly severity: 'info' | 'warning' | 'error';
+  readonly subsystem: string;
+  readonly eventCode: string;
+  readonly message: string;
+  readonly fields: Readonly<Record<string, string>>;
+}
+
+export interface DiagnosticLogResponse {
+  readonly entries: readonly DiagnosticEntry[];
+  readonly totalBytes: number;
+  readonly truncated: boolean;
+}
+
+function unavailableAiCliStatus(provider: AiCliProvider, displayName: string): AiCliStatus {
+  return {
+    provider,
+    displayName,
+    available: false,
+    version: null,
+    detail: 'Unavailable outside the desktop application.',
+  };
+}
+
 export interface GitHubAccountResponse {
   readonly id: string;
   readonly host: string;
   readonly login: string;
   readonly displayName: string | null;
   readonly avatarUrl: string | null;
-  readonly authKind: 'personalAccessToken' | 'oAuthDevice';
+  readonly authKind: 'personalAccessToken' | 'oAuthDevice' | 'gitHubCli';
   readonly scopes: readonly string[];
   readonly state: 'unknown' | 'connected' | 'authenticationRequired' | 'unavailable';
   readonly lastValidatedAt: number | null;
@@ -773,6 +871,7 @@ export interface GitHubPullRequestSummaryResponse {
   readonly baseRefName: string;
   readonly updatedAt: string;
   readonly authoredByViewer: boolean;
+  readonly commentCount: number;
   readonly reviewRequestedFromViewer: boolean | null;
   readonly unresolvedThreadCount: number | null;
 }
@@ -811,6 +910,38 @@ export interface GitHubPullRequestDetailResponse extends GitHubPullRequestSummar
 }
 
 export interface DesktopIpcContract {
+  readonly set_application_zoom: {
+    readonly request: { readonly scale: number };
+    readonly response: ApplicationZoomResponse;
+  };
+  readonly ai_cli_status: {
+    readonly request: Record<string, never>;
+    readonly response: AiCliStatusResponse;
+  };
+  readonly ai_generate_commit_message: {
+    readonly request: GenerateAiCommitMessageRequest;
+    readonly response: GenerateAiCommitMessageResponse;
+  };
+  readonly diagnostics_settings: {
+    readonly request: Record<string, never>;
+    readonly response: DiagnosticsSettingsResponse;
+  };
+  readonly diagnostics_update_settings: {
+    readonly request: { readonly dataDirectory: string; readonly maxLogKilobytes: number };
+    readonly response: DiagnosticsSettingsResponse;
+  };
+  readonly diagnostics_read: {
+    readonly request: Record<string, never>;
+    readonly response: DiagnosticLogResponse;
+  };
+  readonly diagnostics_clear: {
+    readonly request: Record<string, never>;
+    readonly response: void;
+  };
+  readonly select_diagnostics_directory: {
+    readonly request: { readonly initialPath: string | null };
+    readonly response: SelectRepositoryDirectoryResponse;
+  };
   readonly repository_status: {
     readonly request: RepositoryStatusRequest;
     readonly response: RepositoryStatusResponse;
@@ -951,6 +1082,18 @@ export interface DesktopIpcContract {
     readonly request: Record<string, never>;
     readonly response: readonly RememberedRepositoryResponse[];
   };
+  readonly list_repository_relations: {
+    readonly request: Record<string, never>;
+    readonly response: readonly RepositoryGroupRelationResponse[];
+  };
+  readonly repository_submodules: {
+    readonly request: { readonly repositoryId: string };
+    readonly response: RepositorySubmodulesResponse;
+  };
+  readonly open_submodule_repository: {
+    readonly request: { readonly parentRepositoryId: string; readonly path: string };
+    readonly response: RememberedRepositoryResponse;
+  };
   readonly remember_repository: {
     readonly request: RepositoryStatusRequest;
     readonly response: RememberedRepositoryResponse;
@@ -987,6 +1130,10 @@ export interface DesktopIpcContract {
     readonly request: { readonly token: string };
     readonly response: GitHubAccountResponse;
   };
+  readonly github_connect_cli: {
+    readonly request: Record<string, never>;
+    readonly response: GitHubAccountResponse;
+  };
   readonly github_disconnect_account: {
     readonly request: { readonly accountId: string };
     readonly response: { readonly disconnected: boolean };
@@ -999,6 +1146,7 @@ export interface DesktopIpcContract {
     readonly request: {
       readonly accountId: string;
       readonly repositoryId: string;
+      readonly scope: 'assignedToViewer' | 'authoredByViewer';
       readonly cursor: string | null;
       readonly pageSize: number;
     };
@@ -1063,6 +1211,56 @@ export class DesktopIpc implements DesktopIpcClient {
     command: C,
     request: DesktopIpcContract[C]['request'],
   ): Promise<DesktopIpcContract[C]['response']> {
+    if (command === 'set_application_zoom') {
+      const scale = (request as { readonly scale: number }).scale;
+      return Promise.resolve({ scale } as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'ai_cli_status') {
+      const response: AiCliStatusResponse = {
+        statuses: [
+          unavailableAiCliStatus('codex', 'Codex'),
+          unavailableAiCliStatus('claude', 'Claude Code'),
+          unavailableAiCliStatus('cursor', 'Cursor'),
+        ],
+      };
+      return Promise.resolve(response as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'ai_generate_commit_message') {
+      return Promise.reject(
+        new Error('AI commit-message generation is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'diagnostics_settings') {
+      return Promise.resolve({
+        dataDirectory: '~/.skibidibi-git',
+        maxLogKilobytes: 256,
+        logFile: '~/.skibidibi-git/diagnostics.jsonl',
+      } as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'diagnostics_update_settings') {
+      const settings = request as { readonly dataDirectory: string; readonly maxLogKilobytes: number };
+      return Promise.resolve({
+        ...settings,
+        logFile: `${settings.dataDirectory}/diagnostics.jsonl`,
+      } as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'diagnostics_read') {
+      return Promise.resolve({ entries: [], totalBytes: 0, truncated: false } as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'diagnostics_clear') {
+      return Promise.resolve(undefined as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'select_diagnostics_directory') {
+      return Promise.resolve({ path: null } as DesktopIpcContract[C]['response']);
+    }
+
     if (command === 'repository_status') {
       const response: RepositoryStatusResponse = {
         indexFingerprint: 'browser-development-index',
@@ -1223,7 +1421,7 @@ export class DesktopIpc implements DesktopIpcClient {
       );
     }
 
-    if (command === 'list_remembered_repositories') {
+    if (command === 'list_remembered_repositories' || command === 'list_repository_relations') {
       return Promise.resolve([] as DesktopIpcContract[C]['response']);
     }
 
@@ -1233,6 +1431,8 @@ export class DesktopIpc implements DesktopIpcClient {
       const now = Math.floor(Date.now() / 1000);
       const response: RememberedRepositoryResponse = {
         id: `browser-${displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        repositoryGroupId: null,
+        worktreeRole: 'unknown',
         canonicalPath: repositoryPath,
         displayName,
         provider: 'local',
@@ -1260,12 +1460,15 @@ export class DesktopIpc implements DesktopIpcClient {
 
     if (
       command === 'clone_repository' ||
+      command === 'repository_submodules' ||
+      command === 'open_submodule_repository' ||
       command === 'repository_maintenance_stats' ||
       command === 'github_start_device_flow' ||
       command === 'github_poll_device_flow' ||
       command === 'github_cancel_device_flow' ||
       command === 'github_open_device_verification' ||
       command === 'github_connect_pat' ||
+      command === 'github_connect_cli' ||
       command === 'github_disconnect_account' ||
       command === 'github_list_repositories' ||
       command === 'github_list_pull_requests' ||

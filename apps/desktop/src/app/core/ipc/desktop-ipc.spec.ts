@@ -34,6 +34,46 @@ describe('DesktopIpc', () => {
     service = TestBed.inject(DesktopIpc);
   });
 
+  it('echoes the requested application zoom in browser development mode', async () => {
+    await expect(service.invoke('set_application_zoom', { scale: 1.2 })).resolves.toEqual({
+      scale: 1.2,
+    });
+  });
+
+  it('reports every AI CLI as unavailable outside the desktop application', async () => {
+    await expect(service.invoke('ai_cli_status', {})).resolves.toEqual({
+      statuses: [
+        expect.objectContaining({ provider: 'codex', displayName: 'Codex', available: false, version: null }),
+        expect.objectContaining({ provider: 'claude', displayName: 'Claude Code', available: false, version: null }),
+        expect.objectContaining({ provider: 'cursor', displayName: 'Cursor', available: false, version: null }),
+      ],
+    });
+  });
+
+  it('does not fabricate AI-generated commit messages outside the desktop application', async () => {
+    await expect(service.invoke('ai_generate_commit_message', {
+      repositoryId: 'example-repository',
+      provider: 'codex',
+      promptTemplate: 'Write one concise English sentence.',
+      expectedHead: 'abc123',
+      indexFingerprint: 'fixture-index',
+      worktreeFingerprint: 'fixture-worktree',
+    })).rejects.toThrow('unavailable outside the desktop application');
+  });
+
+  it('provides bounded development diagnostics without inventing log entries', async () => {
+    await expect(service.invoke('diagnostics_settings', {})).resolves.toEqual({
+      dataDirectory: '~/.skibidibi-git',
+      maxLogKilobytes: 256,
+      logFile: '~/.skibidibi-git/diagnostics.jsonl',
+    });
+    await expect(service.invoke('diagnostics_read', {})).resolves.toEqual({
+      entries: [], totalBytes: 0, truncated: false,
+    });
+    await expect(service.invoke('select_diagnostics_directory', { initialPath: null }))
+      .resolves.toEqual({ path: null });
+  });
+
   it('provides the repository-status DTO fallback outside Tauri', async () => {
     await expect(
       service.invoke('repository_status', { repositoryPath: '/work/skibidibi-git' }),

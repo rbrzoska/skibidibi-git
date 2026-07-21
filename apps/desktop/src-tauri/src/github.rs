@@ -16,9 +16,10 @@ use app_store::{
     GitHubAccount, GitHubAccountStore, UpsertGitHubAccount, UpsertGitHubRepositoryBinding,
 };
 use github_client::{
-    DeviceCode, DeviceFlowError, DeviceFlowErrorCode, DeviceFlowPoll, GitHubClient,
-    GitHubClientError, GitHubErrorCode, OAuthRefreshToken, OAuthTokenSet, PersonalAccessToken,
-    PullRequestListState,
+    DeviceCode, DeviceFlowError, DeviceFlowErrorCode, DeviceFlowPoll, GitHubCliTransport,
+    GitHubClient, GitHubClientError, GitHubErrorCode, GitHubRequest, GitHubResponse,
+    GitHubTransport, OAuthRefreshToken, OAuthTokenSet, PersonalAccessToken, PullRequestListScope,
+    ReqwestTransport, TransportError,
 };
 use secret_store::CredentialKey;
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,29 @@ const MAX_DEVICE_FLOW_SESSIONS: usize = 8;
 const DEVICE_FLOW_ACTIVE: u8 = 0;
 const DEVICE_FLOW_AUTHORIZED: u8 = 1;
 const DEVICE_FLOW_CANCELLED: u8 = 2;
+const CLI_ACCOUNT_PREFIX: &str = "github-cli:github.com:";
+const CLI_TRANSPORT_MARKER: &str = "github-cli-managed-credential";
+
+#[derive(Clone)]
+enum AppGitHubTransport {
+    Direct(ReqwestTransport),
+    Cli(GitHubCliTransport),
+}
+
+impl GitHubTransport for AppGitHubTransport {
+    fn execute(
+        &self,
+        request: GitHubRequest,
+        credential: &PersonalAccessToken,
+    ) -> Result<GitHubResponse, TransportError> {
+        match self {
+            Self::Direct(transport) => transport.execute(request, credential),
+            Self::Cli(transport) => transport.execute(request, credential),
+        }
+    }
+}
+
+type AppGitHubClient = GitHubClient<AppGitHubTransport>;
 
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +180,22 @@ pub(crate) struct GitHubPullRequestListResponse {
     next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum GitHubPullRequestScope {
+    AssignedToViewer,
+    AuthoredByViewer,
+}
+
+impl From<GitHubPullRequestScope> for PullRequestListScope {
+    fn from(scope: GitHubPullRequestScope) -> Self {
+        match scope {
+            GitHubPullRequestScope::AssignedToViewer => Self::AssignedToViewer,
+            GitHubPullRequestScope::AuthoredByViewer => Self::AuthoredByViewer,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GitHubRepositoryListResponse {
@@ -176,6 +216,7 @@ struct GitHubPullRequestSummaryResponse {
     base_ref_name: String,
     updated_at: String,
     authored_by_viewer: bool,
+    comment_count: u64,
     review_requested_from_viewer: Option<bool>,
     unresolved_thread_count: Option<usize>,
 }
@@ -222,15 +263,29 @@ struct GitHubReviewThreadResponse {
 }
 
 #[tauri::command]
-pub(crate) fn github_list_accounts(
+pub(crate) async fn github_list_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<GitHubAccountSummary>, GitHubCommandError> {
-    Ok(lock_accounts(&state)?
+    let mut accounts = lock_accounts(&state)?
         .list_accounts()
         .map_err(command_error)?
         .iter()
         .map(GitHubAccount::summary)
-        .collect())
+        .collect::<Vec<_>>();
+    if let Ok(cli_account) = probe_cli_account(&state).await {
+        accounts.retain(|account| account.id != cli_account.id);
+        accounts.insert(0, cli_account.summary());
+    }
+    Ok(accounts)
+}
+
+#[tauri::command]
+pub(crate) async fn github_connect_cli(
+    state: State<'_, AppState>,
+) -> Result<GitHubAccountSummary, GitHubCommandError> {
+    probe_cli_account(&state)
+        .await
+        .map(|account| account.summary())
 }
 
 #[tauri::command]
@@ -598,12 +653,12 @@ pub(crate) async fn github_list_repositories(
     page_size: u16,
     state: State<'_, AppState>,
 ) -> Result<GitHubRepositoryListResponse, GitHubCommandError> {
-    let account = lock_accounts(&state)?
-        .get_account(&account_id)
-        .map_err(command_error)?
-        .ok_or_else(|| CommandError {
-            message: "GitHub account is not connected".to_owned(),
-        })?;
+    let account = resolve_account(&state, &account_id)?;
+    let _cli_operation_guard = if account.auth_kind == GitHubAuthKind::GitHubCli {
+        Some(state.github_cli_operations.lock().await)
+    } else {
+        None
+    };
     let expected_generation = account_generation(&state, &account.id);
     let client = load_client(&state, &account, expected_generation).await?;
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -613,6 +668,7 @@ pub(crate) async fn github_list_repositories(
     .map_err(|error| CommandError {
         message: format!("GitHub repository list task failed: {error}"),
     })?;
+    verify_cli_account(&state, &account).await?;
     let _finalize_guard = state.github_mutations.lock().await;
     if account_generation(&state, &account.id) != expected_generation {
         return Err(stale_account_error());
@@ -652,12 +708,19 @@ pub(crate) async fn github_list_repositories(
 pub(crate) async fn github_list_pull_requests(
     account_id: String,
     repository_id: String,
+    scope: GitHubPullRequestScope,
     cursor: Option<String>,
     page_size: u16,
     state: State<'_, AppState>,
 ) -> Result<GitHubPullRequestListResponse, GitHubCommandError> {
     let context = request_context(&state, &account_id, &repository_id)?;
+    let _cli_operation_guard = if context.account.auth_kind == GitHubAuthKind::GitHubCli {
+        Some(state.github_cli_operations.lock().await)
+    } else {
+        None
+    };
     let viewer_login = context.account.login.clone();
+    let query_viewer_login = viewer_login.clone();
     let owner = context.owner.clone();
     let name = context.name.clone();
     let client = match load_client(&state, &context.account, context.account_generation).await {
@@ -681,7 +744,8 @@ pub(crate) async fn github_list_pull_requests(
         client.list_pull_requests(
             &owner,
             &name,
-            PullRequestListState::Open,
+            &query_viewer_login,
+            scope.into(),
             page_size,
             cursor.as_deref(),
         )
@@ -690,6 +754,7 @@ pub(crate) async fn github_list_pull_requests(
     .map_err(|error| CommandError {
         message: format!("GitHub pull request task failed: {error}"),
     })?;
+    verify_cli_account(&state, &context.account).await?;
     let _finalize_guard = state.github_mutations.lock().await;
     if account_generation(&state, &context.account.id) != context.account_generation {
         return Err(stale_account_error());
@@ -740,6 +805,11 @@ pub(crate) async fn github_pull_request_detail(
     state: State<'_, AppState>,
 ) -> Result<GitHubPullRequestDetailResponse, GitHubCommandError> {
     let context = request_context(&state, &account_id, &repository_id)?;
+    let _cli_operation_guard = if context.account.auth_kind == GitHubAuthKind::GitHubCli {
+        Some(state.github_cli_operations.lock().await)
+    } else {
+        None
+    };
     let viewer_login = context.account.login.clone();
     let owner = context.owner.clone();
     let name = context.name.clone();
@@ -778,6 +848,7 @@ pub(crate) async fn github_pull_request_detail(
     .map_err(|error| CommandError {
         message: format!("GitHub pull request detail task failed: {error}"),
     })?;
+    verify_cli_account(&state, &context.account).await?;
     let _finalize_guard = state.github_mutations.lock().await;
     if account_generation(&state, &context.account.id) != context.account_generation {
         return Err(stale_account_error());
@@ -832,12 +903,7 @@ fn request_context(
     account_id: &str,
     repository_id: &str,
 ) -> Result<GitHubRequestContext, CommandError> {
-    let account = lock_accounts(state)?
-        .get_account(account_id)
-        .map_err(command_error)?
-        .ok_or_else(|| CommandError {
-            message: "GitHub account is not connected".to_owned(),
-        })?;
+    let account = resolve_account(state, account_id)?;
     let repository = lock_catalog(state)?
         .get(repository_id)?
         .ok_or_else(|| CommandError {
@@ -987,7 +1053,10 @@ async fn load_client(
     state: &State<'_, AppState>,
     account: &GitHubAccount,
     account_generation: u64,
-) -> Result<GitHubClient<github_client::ReqwestTransport>, GitHubCommandError> {
+) -> Result<AppGitHubClient, GitHubCommandError> {
+    if account.auth_kind == GitHubAuthKind::GitHubCli {
+        return load_cli_client(state, account).await;
+    }
     let key = credential_key(&account.provider_user_id)?;
     let credentials = Arc::clone(&state.github_credentials);
     let token = tauri::async_runtime::spawn_blocking(move || credentials.read(&key))
@@ -1020,12 +1089,153 @@ async fn load_client(
         GitHubAuthKind::OAuthDevice => {
             load_oauth_access_token(state, account, account_generation, token).await?
         }
+        GitHubAuthKind::GitHubCli => unreachable!("handled before credential-store lookup"),
     };
     Ok(GitHubClient::new(
         state.github_config.clone(),
-        state.github_transport.clone(),
+        AppGitHubTransport::Direct(state.github_transport.clone()),
         PersonalAccessToken::new(token).map_err(command_error)?,
     ))
+}
+
+async fn probe_cli_account(
+    state: &State<'_, AppState>,
+) -> Result<GitHubAccount, GitHubCommandError> {
+    let cli = state.github_cli.clone();
+    let config = state.github_config.clone();
+    let (validation, now) = tauri::async_runtime::spawn_blocking(move || {
+        let credential =
+            PersonalAccessToken::new(CLI_TRANSPORT_MARKER.to_owned()).map_err(command_error)?;
+        let client = GitHubClient::new(config, AppGitHubTransport::Cli(cli), credential);
+        let validation = client.validate_pat().map_err(client_command_error)?;
+        Ok::<_, GitHubCommandError>((validation, unix_timestamp()?))
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("GitHub CLI validation task failed: {error}"),
+    })??;
+    let provider_user_id = validation
+        .user
+        .id
+        .ok_or_else(|| CommandError {
+            message: "GitHub CLI did not return a stable user identifier".to_owned(),
+        })?
+        .to_string();
+    Ok(GitHubAccount {
+        id: cli_account_id(&provider_user_id, &validation.user.login),
+        host: GITHUB_HOST.to_owned(),
+        provider_user_id,
+        login: validation.user.login,
+        display_name: validation.user.display_name,
+        avatar_url: validation.user.avatar_url,
+        auth_kind: GitHubAuthKind::GitHubCli,
+        scopes: validation.scopes,
+        state: GitHubAccountState::Connected,
+        access_token_expires_at: None,
+        last_validated_at: Some(now),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+async fn load_cli_client(
+    state: &State<'_, AppState>,
+    account: &GitHubAccount,
+) -> Result<AppGitHubClient, GitHubCommandError> {
+    let cli = state.github_cli.clone();
+    let config = state.github_config.clone();
+    let expected_provider_user_id = account.provider_user_id.clone();
+    let expected_login = account.login.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let credential =
+            PersonalAccessToken::new(CLI_TRANSPORT_MARKER.to_owned()).map_err(command_error)?;
+        let client = GitHubClient::new(config, AppGitHubTransport::Cli(cli), credential);
+        let validation = client.validate_pat().map_err(client_command_error)?;
+        let provider_user_id = validation.user.id.map(|id| id.to_string());
+        if provider_user_id.as_deref() != Some(expected_provider_user_id.as_str())
+            || validation.user.login != expected_login
+        {
+            return Err(GitHubCommandError {
+                message: "The active GitHub CLI account changed; refresh accounts before retrying"
+                    .to_owned(),
+                code: "staleAccount".to_owned(),
+                retryable: true,
+                request_id: None,
+                rate_limit: None,
+            });
+        }
+        Ok(client)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("GitHub CLI credential task failed: {error}"),
+    })?
+}
+
+async fn verify_cli_account(
+    state: &State<'_, AppState>,
+    expected: &GitHubAccount,
+) -> Result<(), GitHubCommandError> {
+    if expected.auth_kind != GitHubAuthKind::GitHubCli {
+        return Ok(());
+    }
+    let active = probe_cli_account(state).await?;
+    if active.provider_user_id != expected.provider_user_id || active.login != expected.login {
+        return Err(stale_account_error());
+    }
+    Ok(())
+}
+
+fn cli_account_id(provider_user_id: &str, login: &str) -> String {
+    format!("{CLI_ACCOUNT_PREFIX}{provider_user_id}:{login}")
+}
+
+fn cli_account_from_id(account_id: &str) -> Option<GitHubAccount> {
+    let suffix = account_id.strip_prefix(CLI_ACCOUNT_PREFIX)?;
+    let (provider_user_id, login) = suffix.split_once(':')?;
+    let valid_provider_id = !provider_user_id.is_empty()
+        && provider_user_id.len() <= 32
+        && provider_user_id.bytes().all(|byte| byte.is_ascii_digit());
+    let valid_login = !login.is_empty()
+        && login.len() <= 39
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !valid_provider_id || !valid_login {
+        return None;
+    }
+    Some(GitHubAccount {
+        id: account_id.to_owned(),
+        host: GITHUB_HOST.to_owned(),
+        provider_user_id: provider_user_id.to_owned(),
+        login: login.to_owned(),
+        display_name: None,
+        avatar_url: None,
+        auth_kind: GitHubAuthKind::GitHubCli,
+        scopes: Vec::new(),
+        state: GitHubAccountState::Connected,
+        access_token_expires_at: None,
+        last_validated_at: None,
+        created_at: 0,
+        updated_at: 0,
+    })
+}
+
+fn resolve_account(
+    state: &State<'_, AppState>,
+    account_id: &str,
+) -> Result<GitHubAccount, CommandError> {
+    if let Some(account) = cli_account_from_id(account_id) {
+        return Ok(account);
+    }
+    lock_accounts(state)?
+        .get_account(account_id)
+        .map_err(command_error)?
+        .ok_or_else(|| CommandError {
+            message: "GitHub account is not connected".to_owned(),
+        })
 }
 
 async fn load_oauth_access_token(
@@ -1198,6 +1408,9 @@ fn update_account_state_locked(
     expected_generation: u64,
     account_state: GitHubAccountState,
 ) -> Result<bool, GitHubCommandError> {
+    if account.auth_kind == GitHubAuthKind::GitHubCli {
+        return Ok(true);
+    }
     if account_generation(state, &account.id) != expected_generation {
         return Ok(false);
     }
@@ -1232,6 +1445,9 @@ fn bind_repository(
     repository_id: &str,
     context: &GitHubRequestContext,
 ) -> Result<(), CommandError> {
+    if context.account.auth_kind == GitHubAuthKind::GitHubCli {
+        return Ok(());
+    }
     lock_accounts(state)?
         .upsert_repository_binding(&UpsertGitHubRepositoryBinding {
             repository_id: repository_id.to_owned(),
@@ -1328,6 +1544,7 @@ fn summary_response(
         head_ref_name: pull.head_ref,
         base_ref_name: pull.base_ref,
         updated_at: pull.updated_at,
+        comment_count: pull.comment_count,
         review_requested_from_viewer: None,
         unresolved_thread_count,
     }
@@ -1357,7 +1574,7 @@ fn detail_response(
 }
 
 fn collect_issue_comments(
-    client: &GitHubClient<github_client::ReqwestTransport>,
+    client: &AppGitHubClient,
     owner: &str,
     repository: &str,
     number: u64,
@@ -1382,7 +1599,7 @@ fn collect_issue_comments(
 }
 
 fn collect_review_threads(
-    client: &GitHubClient<github_client::ReqwestTransport>,
+    client: &AppGitHubClient,
     owner: &str,
     repository: &str,
     number: u64,
@@ -1605,6 +1822,19 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn pull_request_scope_accepts_only_the_frozen_camel_case_values() {
+        assert_eq!(
+            serde_json::from_str::<GitHubPullRequestScope>(r#""assignedToViewer""#).unwrap(),
+            GitHubPullRequestScope::AssignedToViewer
+        );
+        assert_eq!(
+            serde_json::from_str::<GitHubPullRequestScope>(r#""authoredByViewer""#).unwrap(),
+            GitHubPullRequestScope::AuthoredByViewer
+        );
+        assert!(serde_json::from_str::<GitHubPullRequestScope>(r#""assignee:attacker""#).is_err());
+    }
+
     fn pull_request() -> PullRequestSummary {
         PullRequestSummary {
             number: 42,
@@ -1724,5 +1954,25 @@ mod tests {
         assert_eq!(future_timestamp(100, 5).unwrap(), 105);
         assert!(future_timestamp(i64::MAX, 1).is_err());
         assert!(future_timestamp(0, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn cli_account_ids_are_strict_and_reconstruct_only_public_metadata() {
+        let id = cli_account_id("9517020", "rbrzoska");
+        let account = cli_account_from_id(&id).unwrap();
+        assert_eq!(account.id, id);
+        assert_eq!(account.provider_user_id, "9517020");
+        assert_eq!(account.login, "rbrzoska");
+        assert_eq!(account.auth_kind, GitHubAuthKind::GitHubCli);
+        assert!(account.scopes.is_empty());
+
+        for invalid in [
+            "github-cli:github.com::rbrzoska",
+            "github-cli:github.com:9517020:-invalid",
+            "github-cli:github.com:9517020:invalid:name",
+            "github-cli:example.com:9517020:rbrzoska",
+        ] {
+            assert!(cli_account_from_id(invalid).is_none(), "{invalid}");
+        }
     }
 }

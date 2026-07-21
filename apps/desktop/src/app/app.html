@@ -1,8 +1,28 @@
 <header class="app-bar">
-  <a routerLink="/repositories" aria-label="Skibidibi Git repositories"><span aria-hidden="true">⑂</span><strong>Skibidibi Git</strong></a>
-  <span class="preview">preview</span>
-  <nav aria-label="Application navigation">
-    <a routerLink="/settings"><span aria-hidden="true">⚙</span>Settings</a>
+  <a class="product" routerLink="/repositories" aria-label="Skibidibi Git repositories">
+    <span class="product-mark" aria-hidden="true"></span>
+    <strong>Skibidibi Git</strong>
+  </a>
+  <nav class="screen-tabs" aria-label="Application navigation">
+    @if (workspaceUrl(); as workspace) {
+      <a [routerLink]="workspace" routerLinkActive="active" ariaCurrentWhenActive="page">Workspace</a>
+    }
+    <a routerLink="/repositories" routerLinkActive="active" ariaCurrentWhenActive="page">Repositories</a>
+    <a routerLink="/settings" routerLinkActive="active" ariaCurrentWhenActive="page">Settings</a>
   </nav>
+  <div class="app-controls">
+    <div class="font-scale" role="group" aria-label="Interface text size">
+      <button type="button" [disabled]="!uiScale.canDecrease()" aria-label="Decrease text size" title="Decrease text size (Ctrl/Cmd −)" (click)="uiScale.decrease()">A−</button>
+      <output [attr.aria-label]="'Text size ' + uiScale.percent() + ' percent'">{{ uiScale.percent() }}%</output>
+      <button type="button" [disabled]="!uiScale.canIncrease()" aria-label="Increase text size" title="Increase text size (Ctrl/Cmd +)" (click)="uiScale.increase()">A+</button>
+    </div>
+    <a class="account-chip" routerLink="/settings" aria-label="Open GitHub account settings">
+      <i [class.connected]="accountConnected()" aria-hidden="true"></i>
+      <span>{{ accountLabel() }}</span>
+    </a>
+  </div>
+  @if (uiScale.error()) {
+    <span class="visually-hidden" role="status">{{ uiScale.error() }}</span>
+  }
 </header>
 <router-outlet />

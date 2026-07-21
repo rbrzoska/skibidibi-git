@@ -455,6 +455,7 @@ fn auth_kind_str(value: GitHubAuthKind) -> &'static str {
     match value {
         GitHubAuthKind::PersonalAccessToken => "personal_access_token",
         GitHubAuthKind::OAuthDevice => "oauth_device",
+        GitHubAuthKind::GitHubCli => "github_cli",
     }
 }
 
@@ -462,6 +463,7 @@ fn parse_auth_kind(value: String) -> Result<GitHubAuthKind, GitHubAccountStoreEr
     match value.as_str() {
         "personal_access_token" => Ok(GitHubAuthKind::PersonalAccessToken),
         "oauth_device" => Ok(GitHubAuthKind::OAuthDevice),
+        "github_cli" => Ok(GitHubAuthKind::GitHubCli),
         _ => Err(GitHubAccountStoreError::InvalidStoredValue { field: "auth_kind" }),
     }
 }

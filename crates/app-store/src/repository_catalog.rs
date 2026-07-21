@@ -2,13 +2,14 @@ use std::path::Path;
 
 use app_domain::{
     HostedRepositoryIdentity, IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState,
-    RememberRepositoryInput, RememberedRepository, RepositoryAvailability, RepositoryHealthUpdate,
-    RepositoryProvider, RepositoryTransport,
+    RememberRepositoryInput, RememberedRepository, RepositoryAvailability, RepositoryGitIdentity,
+    RepositoryGroupRelation, RepositoryHealthUpdate, RepositoryProvider, RepositoryRelationKind,
+    RepositoryTransport, RepositoryWorktreeRole,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -22,10 +23,26 @@ pub enum CatalogError {
     InvalidStoredValue { field: &'static str, value: String },
     #[error("repository catalog contains an invalid open count: {0}")]
     InvalidOpenCount(i64),
+    #[error("repository group does not exist: {0}")]
+    MissingRepositoryGroup(String),
+    #[error("repository groups cannot be related to themselves")]
+    SelfRelation,
+    #[error("repository relation would create a cycle")]
+    RelationCycle,
+    #[error("repository relation path must be a safe relative path")]
+    InvalidRelationPath,
 }
 
 pub struct RepositoryCatalog {
     connection: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryCatalogReconciliation {
+    pub repository_id: String,
+    pub availability: RepositoryAvailability,
+    /// `None` preserves the last known identity, which is required for missing paths.
+    pub git_identity: Option<RepositoryGitIdentity>,
 }
 
 impl RepositoryCatalog {
@@ -58,7 +75,7 @@ impl RepositoryCatalog {
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        if current_version < SCHEMA_VERSION {
+        if current_version < 1 {
             transaction.execute_batch(
                 "CREATE TABLE remembered_repositories (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -88,8 +105,45 @@ impl RepositoryCatalog {
                     ON remembered_repositories(pinned DESC, last_opened_at DESC, display_name ASC);",
             )?;
             transaction.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 0)",
-                [SCHEMA_VERSION],
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (1, 0)",
+                [],
+            )?;
+        }
+        if current_version < 2 {
+            transaction.execute_batch(
+                "CREATE TABLE repository_groups (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    canonical_common_dir TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                ALTER TABLE remembered_repositories
+                    ADD COLUMN repository_group_id TEXT REFERENCES repository_groups(id) ON DELETE SET NULL;
+                ALTER TABLE remembered_repositories
+                    ADD COLUMN worktree_role TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (worktree_role IN ('main', 'linked', 'bare', 'unknown'));
+                CREATE INDEX remembered_repositories_group_idx
+                    ON remembered_repositories(repository_group_id);
+                INSERT INTO schema_migrations(version, applied_at) VALUES (2, 0);",
+            )?;
+        }
+        if current_version < SCHEMA_VERSION {
+            transaction.execute_batch(
+                "CREATE TABLE repository_group_relations (
+                    parent_group_id TEXT NOT NULL
+                        REFERENCES repository_groups(id) ON DELETE CASCADE,
+                    child_group_id TEXT NOT NULL
+                        REFERENCES repository_groups(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK (kind IN ('submodule')),
+                    relative_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (parent_group_id, kind, relative_path),
+                    CHECK (parent_group_id <> child_group_id)
+                );
+                CREATE INDEX repository_group_relations_child_idx
+                    ON repository_group_relations(child_group_id, kind);
+                INSERT INTO schema_migrations(version, applied_at) VALUES (3, 0);",
             )?;
         }
         transaction.commit()?;
@@ -102,16 +156,46 @@ impl RepositoryCatalog {
     ) -> Result<RememberedRepository, CatalogError> {
         let canonical_path = canonical_path(&input.path)?;
         let (host, owner, name) = hosted_parts(input.hosted_identity.as_ref());
-        self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let repository_group_id = if let Some(identity) = input.git_identity.as_ref() {
+            transaction.execute(
+                "INSERT INTO repository_groups (id, canonical_common_dir, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)
+                 ON CONFLICT(canonical_common_dir) DO UPDATE SET updated_at = excluded.updated_at",
+                params![
+                    identity.repository_group_id,
+                    identity.canonical_common_dir,
+                    input.now
+                ],
+            )?;
+            Some(transaction.query_row(
+                "SELECT id FROM repository_groups WHERE canonical_common_dir = ?1",
+                [&identity.canonical_common_dir],
+                |row| row.get::<_, String>(0),
+            )?)
+        } else {
+            None
+        };
+        let worktree_role = input
+            .git_identity
+            .as_ref()
+            .map_or(RepositoryWorktreeRole::Unknown, |identity| {
+                identity.worktree_role
+            });
+        transaction.execute(
             "INSERT INTO remembered_repositories (
                 id, canonical_path, display_name, provider, transport,
-                hosted_host, hosted_owner, hosted_name, availability, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'available', ?9, ?9)
+                hosted_host, hosted_owner, hosted_name, availability, created_at, updated_at,
+                repository_group_id, worktree_role
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'available', ?9, ?9, ?10, ?11)
             ON CONFLICT(canonical_path) DO UPDATE SET
                 display_name = excluded.display_name, provider = excluded.provider,
                 transport = excluded.transport, hosted_host = excluded.hosted_host,
                 hosted_owner = excluded.hosted_owner, hosted_name = excluded.hosted_name,
-                availability = 'available', updated_at = excluded.updated_at",
+                availability = 'available', updated_at = excluded.updated_at,
+                repository_group_id = COALESCE(excluded.repository_group_id, remembered_repositories.repository_group_id),
+                worktree_role = CASE WHEN excluded.repository_group_id IS NULL
+                    THEN remembered_repositories.worktree_role ELSE excluded.worktree_role END",
             params![
                 input.id,
                 canonical_path,
@@ -121,9 +205,12 @@ impl RepositoryCatalog {
                 host,
                 owner,
                 name,
-                input.now
+                input.now,
+                repository_group_id,
+                worktree_role_str(worktree_role),
             ],
         )?;
+        transaction.commit()?;
         self.get_by_path(&canonical_path)?
             .ok_or_else(|| CatalogError::Database(rusqlite::Error::QueryReturnedNoRows))
     }
@@ -137,6 +224,93 @@ impl RepositoryCatalog {
             .query_map([], map_repository)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    pub fn list_relations(&self) -> Result<Vec<RepositoryGroupRelation>, CatalogError> {
+        let mut statement = self.connection.prepare(
+            "SELECT parent_group_id, child_group_id, kind, relative_path
+             FROM repository_group_relations
+             ORDER BY parent_group_id, kind, relative_path",
+        )?;
+        statement
+            .query_map([], |row| {
+                let kind = parse_relation_kind(row.get(2)?).map_err(sql_conversion_error)?;
+                Ok(RepositoryGroupRelation {
+                    parent_repository_group_id: row.get(0)?,
+                    child_repository_group_id: row.get(1)?,
+                    kind,
+                    relative_path: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn link_submodule(
+        &mut self,
+        parent_group_id: &str,
+        child_group_id: &str,
+        relative_path: &str,
+        now: i64,
+    ) -> Result<RepositoryGroupRelation, CatalogError> {
+        if parent_group_id == child_group_id {
+            return Err(CatalogError::SelfRelation);
+        }
+        if !is_safe_relation_path(relative_path) {
+            return Err(CatalogError::InvalidRelationPath);
+        }
+
+        let transaction = self.connection.transaction()?;
+        for group_id in [parent_group_id, child_group_id] {
+            let exists = transaction.query_row(
+                "SELECT EXISTS (SELECT 1 FROM repository_groups WHERE id = ?1)",
+                [group_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(CatalogError::MissingRepositoryGroup(group_id.to_owned()));
+            }
+        }
+        let creates_cycle = transaction.query_row(
+            "WITH RECURSIVE descendants(group_id) AS (
+                SELECT child_group_id FROM repository_group_relations
+                 WHERE parent_group_id = ?1 AND kind = 'submodule'
+                UNION
+                SELECT relation.child_group_id
+                  FROM repository_group_relations relation
+                  JOIN descendants ON relation.parent_group_id = descendants.group_id
+                 WHERE relation.kind = 'submodule'
+             )
+             SELECT EXISTS (SELECT 1 FROM descendants WHERE group_id = ?2)",
+            params![child_group_id, parent_group_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if creates_cycle {
+            return Err(CatalogError::RelationCycle);
+        }
+
+        transaction.execute(
+            "INSERT INTO repository_group_relations (
+                parent_group_id, child_group_id, kind, relative_path, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(parent_group_id, kind, relative_path) DO UPDATE SET
+                child_group_id = excluded.child_group_id,
+                updated_at = excluded.updated_at",
+            params![
+                parent_group_id,
+                child_group_id,
+                relation_kind_str(RepositoryRelationKind::Submodule),
+                relative_path,
+                now
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(RepositoryGroupRelation {
+            parent_repository_group_id: parent_group_id.to_owned(),
+            child_repository_group_id: child_group_id.to_owned(),
+            kind: RepositoryRelationKind::Submodule,
+            relative_path: relative_path.to_owned(),
+        })
     }
 
     pub fn get(&self, id: &str) -> Result<Option<RememberedRepository>, CatalogError> {
@@ -182,6 +356,119 @@ impl RepositoryCatalog {
             "UPDATE remembered_repositories SET availability = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, availability_str(availability), now],
         )? > 0)
+    }
+
+    pub fn set_git_identity(
+        &mut self,
+        id: &str,
+        identity: &RepositoryGitIdentity,
+        now: i64,
+    ) -> Result<bool, CatalogError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO repository_groups (id, canonical_common_dir, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(canonical_common_dir) DO UPDATE SET updated_at = excluded.updated_at",
+            params![
+                identity.repository_group_id,
+                identity.canonical_common_dir,
+                now
+            ],
+        )?;
+        let group_id = transaction.query_row(
+            "SELECT id FROM repository_groups WHERE canonical_common_dir = ?1",
+            [&identity.canonical_common_dir],
+            |row| row.get::<_, String>(0),
+        )?;
+        let changed = transaction.execute(
+            "UPDATE remembered_repositories SET repository_group_id = ?2, worktree_role = ?3,
+             updated_at = ?4 WHERE id = ?1",
+            params![id, group_id, worktree_role_str(identity.worktree_role), now],
+        )? > 0;
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    /// Reconciles a launcher scan in one transaction and writes only changed rows.
+    pub fn reconcile(
+        &mut self,
+        updates: &[RepositoryCatalogReconciliation],
+        now: i64,
+    ) -> Result<usize, CatalogError> {
+        let transaction = self.connection.transaction()?;
+        let mut changed = 0;
+        for update in updates {
+            let availability = availability_str(update.availability);
+            let Some(identity) = update.git_identity.as_ref() else {
+                changed += transaction.execute(
+                    "UPDATE remembered_repositories SET availability = ?2, updated_at = ?3
+                     WHERE id = ?1 AND availability <> ?2",
+                    params![update.repository_id, availability, now],
+                )?;
+                continue;
+            };
+
+            let repository_exists = transaction.query_row(
+                "SELECT EXISTS (SELECT 1 FROM remembered_repositories WHERE id = ?1)",
+                [&update.repository_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !repository_exists {
+                continue;
+            }
+
+            let identity_matches = transaction.query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM remembered_repositories repository
+                    JOIN repository_groups repository_group
+                      ON repository_group.id = repository.repository_group_id
+                    WHERE repository.id = ?1
+                      AND repository.availability = ?2
+                      AND repository_group.canonical_common_dir = ?3
+                      AND repository.worktree_role = ?4
+                 )",
+                params![
+                    update.repository_id,
+                    availability,
+                    identity.canonical_common_dir,
+                    worktree_role_str(identity.worktree_role),
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if identity_matches {
+                continue;
+            }
+
+            transaction.execute(
+                "INSERT INTO repository_groups (id, canonical_common_dir, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)
+                 ON CONFLICT(canonical_common_dir) DO NOTHING",
+                params![
+                    identity.repository_group_id,
+                    identity.canonical_common_dir,
+                    now
+                ],
+            )?;
+            let group_id = transaction.query_row(
+                "SELECT id FROM repository_groups WHERE canonical_common_dir = ?1",
+                [&identity.canonical_common_dir],
+                |row| row.get::<_, String>(0),
+            )?;
+            changed += transaction.execute(
+                "UPDATE remembered_repositories
+                 SET availability = ?2, repository_group_id = ?3, worktree_role = ?4, updated_at = ?5
+                 WHERE id = ?1",
+                params![
+                    update.repository_id,
+                    availability,
+                    group_id,
+                    worktree_role_str(identity.worktree_role),
+                    now,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(changed)
     }
 
     pub fn refresh_availability(&self, id: &str, now: i64) -> Result<bool, CatalogError> {
@@ -249,7 +536,8 @@ const SELECT_REPOSITORY: &str = "SELECT id, canonical_path, display_name, provid
         hosted_host, hosted_owner, hosted_name, availability,
         git_health_state, git_health_issue, git_health_checked_at,
         github_health_state, github_health_issue, github_health_checked_at,
-        pinned, open_count, last_opened_at, created_at, updated_at FROM remembered_repositories";
+        pinned, open_count, last_opened_at, created_at, updated_at,
+        repository_group_id, worktree_role FROM remembered_repositories";
 
 fn canonical_path(path: &str) -> Result<String, CatalogError> {
     std::fs::canonicalize(path)
@@ -290,6 +578,8 @@ fn map_repository(row: &rusqlite::Row<'_>) -> rusqlite::Result<RememberedReposit
         provider: parse_provider(row.get(3)?).map_err(sql_conversion_error)?,
         transport: parse_transport(row.get(4)?).map_err(sql_conversion_error)?,
         hosted_identity: hosted,
+        repository_group_id: row.get(20)?,
+        worktree_role: parse_worktree_role(row.get(21)?).map_err(sql_conversion_error)?,
         availability: parse_availability(row.get(8)?).map_err(sql_conversion_error)?,
         git_health: IntegrationHealth {
             state: parse_health_state(row.get(9)?).map_err(sql_conversion_error)?,
@@ -340,6 +630,21 @@ string_enum!(health_state_str, parse_health_state, IntegrationHealthState, {
 string_enum!(health_issue_str, parse_health_issue, IntegrationHealthIssue, {
     IntegrationHealthIssue::Authentication => "authentication", IntegrationHealthIssue::Authorization => "authorization", IntegrationHealthIssue::Network => "network", IntegrationHealthIssue::NotFound => "not_found", IntegrationHealthIssue::InvalidConfiguration => "invalid_configuration", IntegrationHealthIssue::OperationFailed => "operation_failed"
 });
+string_enum!(worktree_role_str, parse_worktree_role, RepositoryWorktreeRole, {
+    RepositoryWorktreeRole::Main => "main", RepositoryWorktreeRole::Linked => "linked", RepositoryWorktreeRole::Bare => "bare", RepositoryWorktreeRole::Unknown => "unknown"
+});
+string_enum!(relation_kind_str, parse_relation_kind, RepositoryRelationKind, {
+    RepositoryRelationKind::Submodule => "submodule"
+});
+
+fn is_safe_relation_path(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
 
 fn parse_optional_issue(
     value: Option<String>,
@@ -364,7 +669,20 @@ mod tests {
                 owner: "owner".into(),
                 name: name.into(),
             }),
+            git_identity: None,
             now,
+        }
+    }
+
+    fn git_identity(
+        group_id: &str,
+        common_dir: &Path,
+        worktree_role: RepositoryWorktreeRole,
+    ) -> RepositoryGitIdentity {
+        RepositoryGitIdentity {
+            repository_group_id: group_id.into(),
+            canonical_common_dir: common_dir.to_string_lossy().into_owned(),
+            worktree_role,
         }
     }
 
@@ -502,5 +820,276 @@ mod tests {
             Err(CatalogError::Canonicalize(_))
         ));
         assert!(catalog.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn repositories_with_the_same_common_dir_reuse_the_group() {
+        let dirs = [tempdir().unwrap(), tempdir().unwrap()];
+        let common_dir = tempdir().unwrap();
+        let mut catalog = RepositoryCatalog::open_in_memory().unwrap();
+
+        let mut main = input(dirs[0].path(), "main", "main", 1);
+        main.git_identity = Some(git_identity(
+            "first-group",
+            common_dir.path(),
+            RepositoryWorktreeRole::Main,
+        ));
+        let first = catalog.upsert(&main).unwrap();
+
+        let mut linked = input(dirs[1].path(), "linked", "linked", 2);
+        linked.git_identity = Some(git_identity(
+            "ignored-candidate",
+            common_dir.path(),
+            RepositoryWorktreeRole::Linked,
+        ));
+        let second = catalog.upsert(&linked).unwrap();
+
+        assert_eq!(first.repository_group_id.as_deref(), Some("first-group"));
+        assert_eq!(second.repository_group_id, first.repository_group_id);
+        assert_eq!(first.worktree_role, RepositoryWorktreeRole::Main);
+        assert_eq!(second.worktree_role, RepositoryWorktreeRole::Linked);
+    }
+
+    #[test]
+    fn lazy_identity_update_preserves_existing_catalog_metadata() {
+        let directory = tempdir().unwrap();
+        let common_dir = tempdir().unwrap();
+        let mut catalog = RepositoryCatalog::open_in_memory().unwrap();
+        catalog
+            .upsert(&input(directory.path(), "repo", "repo", 1))
+            .unwrap();
+        catalog.touch_opened("repo", 2).unwrap();
+        catalog.set_pinned("repo", true, 3).unwrap();
+
+        catalog
+            .set_git_identity(
+                "repo",
+                &git_identity("group", common_dir.path(), RepositoryWorktreeRole::Linked),
+                4,
+            )
+            .unwrap();
+        let repository = catalog.get("repo").unwrap().unwrap();
+
+        assert_eq!(repository.repository_group_id.as_deref(), Some("group"));
+        assert_eq!(repository.worktree_role, RepositoryWorktreeRole::Linked);
+        assert_eq!(repository.open_count, 1);
+        assert_eq!(repository.last_opened_at, Some(2));
+        assert!(repository.pinned);
+    }
+
+    #[test]
+    fn unchanged_batch_reconciliation_does_not_write_or_touch_updated_at() {
+        let directory = tempdir().unwrap();
+        let common_dir = tempdir().unwrap();
+        let mut catalog = RepositoryCatalog::open_in_memory().unwrap();
+        let identity = git_identity("group", common_dir.path(), RepositoryWorktreeRole::Main);
+        let mut repository_input = input(directory.path(), "repo", "repo", 10);
+        repository_input.git_identity = Some(identity.clone());
+        let original = catalog.upsert(&repository_input).unwrap();
+
+        let changed = catalog
+            .reconcile(
+                &[RepositoryCatalogReconciliation {
+                    repository_id: "repo".into(),
+                    availability: RepositoryAvailability::Available,
+                    git_identity: Some(RepositoryGitIdentity {
+                        repository_group_id: "unused-candidate".into(),
+                        ..identity
+                    }),
+                }],
+                99,
+            )
+            .unwrap();
+        let reconciled = catalog.get("repo").unwrap().unwrap();
+
+        assert_eq!(changed, 0);
+        assert_eq!(reconciled.updated_at, original.updated_at);
+        assert_eq!(reconciled.repository_group_id, original.repository_group_id);
+    }
+
+    #[test]
+    fn missing_reconciliation_changes_availability_but_preserves_identity() {
+        let directory = tempdir().unwrap();
+        let common_dir = tempdir().unwrap();
+        let mut catalog = RepositoryCatalog::open_in_memory().unwrap();
+        let mut repository_input = input(directory.path(), "repo", "repo", 10);
+        repository_input.git_identity = Some(git_identity(
+            "group",
+            common_dir.path(),
+            RepositoryWorktreeRole::Linked,
+        ));
+        catalog.upsert(&repository_input).unwrap();
+
+        let changed = catalog
+            .reconcile(
+                &[RepositoryCatalogReconciliation {
+                    repository_id: "repo".into(),
+                    availability: RepositoryAvailability::Missing,
+                    git_identity: None,
+                }],
+                99,
+            )
+            .unwrap();
+        let reconciled = catalog.get("repo").unwrap().unwrap();
+
+        assert_eq!(changed, 1);
+        assert_eq!(reconciled.availability, RepositoryAvailability::Missing);
+        assert_eq!(reconciled.repository_group_id.as_deref(), Some("group"));
+        assert_eq!(reconciled.worktree_role, RepositoryWorktreeRole::Linked);
+        assert_eq!(reconciled.updated_at, 99);
+    }
+
+    #[test]
+    fn v1_catalog_migrates_without_losing_repository_metadata() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("catalog.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+                 INSERT INTO schema_migrations VALUES (1, 0);
+                 CREATE TABLE remembered_repositories (
+                    id TEXT PRIMARY KEY NOT NULL, canonical_path TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL, provider TEXT NOT NULL, transport TEXT NOT NULL,
+                    hosted_host TEXT, hosted_owner TEXT, hosted_name TEXT,
+                    availability TEXT NOT NULL DEFAULT 'available',
+                    git_health_state TEXT NOT NULL DEFAULT 'unknown', git_health_issue TEXT,
+                    git_health_checked_at INTEGER, github_health_state TEXT NOT NULL DEFAULT 'unknown',
+                    github_health_issue TEXT, github_health_checked_at INTEGER,
+                    pinned INTEGER NOT NULL DEFAULT 0, open_count INTEGER NOT NULL DEFAULT 0,
+                    last_opened_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO remembered_repositories VALUES (
+                    'legacy', '/legacy/repo', 'Legacy', 'local', 'local', NULL, NULL, NULL,
+                    'missing', 'unknown', NULL, NULL, 'unknown', NULL, NULL, 1, 7, 42, 1, 43
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let catalog = RepositoryCatalog::open(&database).unwrap();
+        let repository = catalog.get("legacy").unwrap().unwrap();
+
+        assert_eq!(repository.open_count, 7);
+        assert_eq!(repository.last_opened_at, Some(42));
+        assert!(repository.pinned);
+        assert_eq!(repository.repository_group_id, None);
+        assert_eq!(repository.worktree_role, RepositoryWorktreeRole::Unknown);
+    }
+
+    #[test]
+    fn submodule_relations_are_upserted_and_listed_by_relative_path() {
+        let dirs = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
+        let common_dirs = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
+        let mut catalog = RepositoryCatalog::open_in_memory().unwrap();
+        for index in 0..3 {
+            let mut repository_input = input(
+                dirs[index].path(),
+                &format!("repo-{index}"),
+                &format!("repo-{index}"),
+                1,
+            );
+            repository_input.git_identity = Some(git_identity(
+                &format!("group-{index}"),
+                common_dirs[index].path(),
+                RepositoryWorktreeRole::Main,
+            ));
+            catalog.upsert(&repository_input).unwrap();
+        }
+
+        catalog
+            .link_submodule("group-0", "group-1", "vendor/library", 10)
+            .unwrap();
+        catalog
+            .link_submodule("group-0", "group-2", "vendor/library", 11)
+            .unwrap();
+
+        assert_eq!(
+            catalog.list_relations().unwrap(),
+            vec![RepositoryGroupRelation {
+                parent_repository_group_id: "group-0".into(),
+                child_repository_group_id: "group-2".into(),
+                kind: RepositoryRelationKind::Submodule,
+                relative_path: "vendor/library".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn submodule_relations_reject_self_links_cycles_and_unsafe_paths() {
+        let dirs = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
+        let common_dirs = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
+        let mut catalog = RepositoryCatalog::open_in_memory().unwrap();
+        for index in 0..3 {
+            let mut repository_input = input(
+                dirs[index].path(),
+                &format!("repo-{index}"),
+                &format!("repo-{index}"),
+                1,
+            );
+            repository_input.git_identity = Some(git_identity(
+                &format!("group-{index}"),
+                common_dirs[index].path(),
+                RepositoryWorktreeRole::Main,
+            ));
+            catalog.upsert(&repository_input).unwrap();
+        }
+
+        assert!(matches!(
+            catalog.link_submodule("group-0", "group-0", "self", 2),
+            Err(CatalogError::SelfRelation)
+        ));
+        assert!(matches!(
+            catalog.link_submodule("group-0", "group-1", "../escape", 2),
+            Err(CatalogError::InvalidRelationPath)
+        ));
+        catalog
+            .link_submodule("group-0", "group-1", "one", 2)
+            .unwrap();
+        catalog
+            .link_submodule("group-1", "group-2", "two", 3)
+            .unwrap();
+        assert!(matches!(
+            catalog.link_submodule("group-2", "group-0", "cycle", 4),
+            Err(CatalogError::RelationCycle)
+        ));
+    }
+
+    #[test]
+    fn v2_catalog_migrates_relations_without_recreating_group_tables() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("catalog.sqlite");
+        let mut catalog = RepositoryCatalog::open(&database).unwrap();
+        let repository_dir = tempdir().unwrap();
+        let common_dir = tempdir().unwrap();
+        let mut repository_input = input(repository_dir.path(), "repo", "repo", 1);
+        repository_input.git_identity = Some(git_identity(
+            "group",
+            common_dir.path(),
+            RepositoryWorktreeRole::Main,
+        ));
+        catalog.upsert(&repository_input).unwrap();
+        drop(catalog);
+
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute("DELETE FROM schema_migrations WHERE version = 3", [])
+            .unwrap();
+        connection
+            .execute("DROP TABLE repository_group_relations", [])
+            .unwrap();
+        drop(connection);
+
+        let catalog = RepositoryCatalog::open(&database).unwrap();
+        assert_eq!(
+            catalog
+                .get("repo")
+                .unwrap()
+                .unwrap()
+                .repository_group_id
+                .as_deref(),
+            Some("group")
+        );
+        assert!(catalog.list_relations().unwrap().is_empty());
     }
 }

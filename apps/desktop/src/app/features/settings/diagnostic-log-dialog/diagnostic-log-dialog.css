@@ -1,0 +1,63 @@
+.diagnostic-dialog {
+  width: min(760px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 32px));
+  padding: 0;
+  color: var(--text-primary);
+  background: var(--surface-raised, #171b21);
+  border: 1px solid var(--border-strong, #39414d);
+  border-radius: 8px;
+  box-shadow: 0 20px 70px rgb(0 0 0 / 55%);
+}
+
+.diagnostic-dialog::backdrop { background: rgb(4 7 11 / 76%); }
+.diagnostic-dialog[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+
+header,
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle, #2b313a);
+}
+
+footer { justify-content: flex-end; border-top: 1px solid var(--border-subtle, #2b313a); border-bottom: 0; }
+h2 { margin: 2px 0 0; font-size: 15px; }
+header small { color: var(--text-muted); font-size: 9px; letter-spacing: .12em; }
+
+.icon-button,
+.compact-button {
+  min-width: 28px;
+  min-height: 26px;
+  padding: 3px 8px;
+  color: inherit;
+  background: var(--surface-control, #20252d);
+  border: 1px solid var(--border-strong, #39414d);
+  border-radius: 4px;
+}
+
+.icon-button { padding: 2px 8px; font-size: 17px; }
+.log-summary { display: flex; gap: 12px; padding: 8px 14px; color: var(--text-muted); font-size: 11px; border-bottom: 1px solid var(--border-subtle, #2b313a); }
+.warning { color: var(--warning, #e9aa38); }
+.log-entries { min-height: 0; overflow: auto; padding: 8px 10px; }
+.empty-log { color: var(--text-muted); text-align: center; padding: 48px 12px; }
+
+.log-entry {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  background: var(--surface-control, #20252d);
+  border-left: 3px solid var(--border-strong, #39414d);
+  border-radius: 4px;
+}
+
+.log-entry.severity-warning { border-left-color: var(--warning, #e9aa38); }
+.log-entry.severity-error { border-left-color: var(--danger, #ef5c61); }
+.entry-heading { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 10px; }
+.entry-heading code { color: var(--text-secondary); }
+.severity { text-transform: uppercase; font-weight: 700; }
+.log-entry p { margin: 5px 0; font-size: 12px; }
+dl { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 0; font-size: 10px; }
+dl div { display: flex; gap: 4px; }
+dt { color: var(--text-muted); }
+dd { margin: 0; color: var(--text-secondary); font-family: var(--font-mono, monospace); }

@@ -16,6 +16,7 @@ function summary(number: number): GitHubPullRequestSummary {
     baseRefName: 'main',
     updatedAt: '2026-07-15T12:00:00Z',
     authoredByViewer: number === 1,
+    commentCount: 3,
     reviewRequestedFromViewer: false,
     unresolvedThreadCount: 0,
   };
@@ -38,6 +39,7 @@ describe('GitHubRepositoryPullRequestStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn()
@@ -56,7 +58,7 @@ describe('GitHubRepositoryPullRequestStore', () => {
     expect(state).toMatchObject({ kind: 'ready', nextCursor: null });
     expect(state.kind === 'ready' ? state.pullRequests.map(({ number }) => number) : []).toEqual([1, 2]);
     expect(bridge.githubListPullRequests).toHaveBeenNthCalledWith(2, {
-      repositoryId: 'repo-1', accountId: 'account-1', cursor: 'page-2', pageSize: 30,
+      repositoryId: 'repo-1', accountId: 'account-1', scope: 'assignedToViewer', cursor: 'page-2', pageSize: 30,
     });
   });
 
@@ -70,6 +72,7 @@ describe('GitHubRepositoryPullRequestStore', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn()
@@ -95,5 +98,52 @@ describe('GitHubRepositoryPullRequestStore', () => {
     const state = store.listState();
     expect(state.kind === 'ready' ? state.pullRequests[0].number : null).toBe(2);
     expect(store.detailState()).toEqual({ kind: 'ready', detail: detail(2) });
+  });
+
+  it('defaults to assigned PRs and ignores list/detail responses from the previous scope', async () => {
+    let resolveAssignedList!: (value: { pullRequests: readonly GitHubPullRequestSummary[]; nextCursor: null }) => void;
+    let resolveAssignedDetail!: (value: GitHubPullRequestDetail) => void;
+    const bridge: GitHubBridge = {
+      githubListAccounts: vi.fn(),
+      githubStartDeviceFlow: vi.fn(),
+      githubPollDeviceFlow: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(),
+      githubOpenDeviceVerification: vi.fn(),
+      githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
+      githubDisconnectAccount: vi.fn(),
+      githubListRepositories: vi.fn(),
+      githubListPullRequests: vi.fn()
+        .mockReturnValueOnce(new Promise((resolve) => { resolveAssignedList = resolve; }))
+        .mockResolvedValueOnce({ pullRequests: [summary(2)], nextCursor: null }),
+      githubPullRequestDetail: vi.fn()
+        .mockReturnValueOnce(new Promise((resolve) => { resolveAssignedDetail = resolve; })),
+    };
+    TestBed.configureTestingModule({ providers: [GitHubRepositoryPullRequestStore, { provide: GITHUB_BRIDGE, useValue: bridge }] });
+    const store = TestBed.inject(GitHubRepositoryPullRequestStore);
+    store.configure('repo-1', 'account-1');
+    expect(store.scope()).toBe('assignedToViewer');
+    const assignedList = store.load();
+    const assignedDetail = store.select(1);
+
+    expect(store.setScope('authoredByViewer')).toBe(true);
+    expect(store.listState()).toEqual({ kind: 'idle' });
+    expect(store.detailState()).toEqual({ kind: 'idle' });
+    expect(store.selectedNumber()).toBeNull();
+    await store.load();
+
+    resolveAssignedList({ pullRequests: [summary(1)], nextCursor: null });
+    resolveAssignedDetail(detail(1));
+    await Promise.all([assignedList, assignedDetail]);
+
+    expect(bridge.githubListPullRequests).toHaveBeenNthCalledWith(1, {
+      repositoryId: 'repo-1', accountId: 'account-1', scope: 'assignedToViewer', cursor: null, pageSize: 30,
+    });
+    expect(bridge.githubListPullRequests).toHaveBeenNthCalledWith(2, {
+      repositoryId: 'repo-1', accountId: 'account-1', scope: 'authoredByViewer', cursor: null, pageSize: 30,
+    });
+    const state = store.listState();
+    expect(state.kind === 'ready' ? state.pullRequests.map(({ number }) => number) : []).toEqual([2]);
+    expect(store.detailState()).toEqual({ kind: 'idle' });
   });
 });

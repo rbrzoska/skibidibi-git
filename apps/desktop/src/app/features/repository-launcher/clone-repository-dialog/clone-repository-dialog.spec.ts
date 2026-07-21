@@ -33,6 +33,7 @@ describe('CloneRepositoryDialog', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn().mockResolvedValue({ repositories: [], nextCursor: null }),
       githubListPullRequests: vi.fn(),
@@ -57,7 +58,7 @@ describe('CloneRepositoryDialog', () => {
 
   it('selects a parent and submits the exact URL clone request', async () => {
     const buttons = fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>;
-    [...buttons].find((button) => button.textContent?.includes('Choose'))?.click();
+    [...buttons].find((button) => button.textContent?.includes('Browse'))?.click();
     await fixture.whenStable();
     const inputs = fixture.nativeElement.querySelectorAll('input[type="text"]') as NodeListOf<HTMLInputElement>;
     inputs[0].value = 'git@github.com:owner/demo.git';

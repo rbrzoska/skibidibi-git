@@ -8,11 +8,13 @@ import {
   type RepositoryCommitDetailResponse,
   type RepositoryCommitSummary,
 } from '../../core/ipc/desktop-ipc';
+import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT } from '../../core/ai-support/ai-support.store';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../core/github';
+import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
 import { branchExpansionStorageKey } from './branch-expansion-state';
 import { releaseBranchStorageKey } from './release-branch-state';
-import { WorkspaceHistory } from './workspace-history';
+import { selectPreferredGitHubAccountId, WorkspaceHistory } from './workspace-history';
 
 const rememberedRepository = {
   id: 'skibidibi-git',
@@ -157,6 +159,16 @@ function conflictDetail(binary = false) {
 }
 
 describe('WorkspaceHistory', () => {
+  it('prefers a connected GitHub CLI account for the repository host', () => {
+    expect(selectPreferredGitHubAccountId([
+      { id: 'pat', login: 'ada', host: 'github.com', avatarUrl: null, state: 'connected', authKind: 'personalAccessToken' },
+      { id: 'oauth', login: 'ada', host: 'github.com', avatarUrl: null, state: 'connected', authKind: 'oAuthDevice' },
+      { id: 'cli-other', login: 'ada', host: 'enterprise.example', avatarUrl: null, state: 'connected', authKind: 'gitHubCli' },
+      { id: 'cli', login: 'ada', host: 'GITHUB.COM', avatarUrl: null, state: 'connected', authKind: 'gitHubCli' },
+      { id: 'cli-stale', login: 'ada', host: 'github.com', avatarUrl: null, state: 'authenticationRequired', authKind: 'gitHubCli' },
+    ], 'github.com')).toBe('cli');
+  });
+
   beforeEach(() => {
     globalThis.localStorage.removeItem(branchExpansionStorageKey('skibidibi-git', 'local'));
     globalThis.localStorage.removeItem(branchExpansionStorageKey('skibidibi-git', 'remote'));
@@ -164,6 +176,7 @@ describe('WorkspaceHistory', () => {
     globalThis.localStorage.removeItem('skibidibi-git.workspace.auto-fetch.skibidibi-git');
     globalThis.localStorage.removeItem('skibidibi-git.workspace.live-changes.skibidibi-git');
     globalThis.localStorage.removeItem(releaseBranchStorageKey('skibidibi-git'));
+    globalThis.localStorage.removeItem('skibidibi-git.ai-support.v1');
   });
 
   async function createFixture(
@@ -178,6 +191,7 @@ describe('WorkspaceHistory', () => {
       githubCancelDeviceFlow: async () => ({ cancelled: false }),
       githubOpenDeviceVerification: async () => undefined,
       githubConnectPat: async () => { throw new Error('not used'); },
+      githubConnectCli: async () => { throw new Error('not used'); },
       githubDisconnectAccount: async () => ({ disconnected: false }),
       githubListRepositories: async () => ({ repositories: [], nextCursor: null }),
       githubListPullRequests: async () => ({ pullRequests: [], nextCursor: null }),
@@ -215,9 +229,59 @@ describe('WorkspaceHistory', () => {
     return fixture.debugElement.injector.get(RepositoryStatusStore);
   }
 
+  function aiSupportFor(fixture: ComponentFixture<WorkspaceHistory>): AiSupportStore {
+    return fixture.debugElement.injector.get(AiSupportStore);
+  }
+
+  function enableCodexCommitGeneration(fixture: ComponentFixture<WorkspaceHistory>): void {
+    const aiSupport = aiSupportFor(fixture);
+    aiSupport.providerStatuses.set([
+      { provider: 'codex', displayName: 'Codex', available: true, version: '1.0.0', detail: null },
+      { provider: 'claude', displayName: 'Claude Code', available: false, version: null, detail: null },
+      { provider: 'cursor', displayName: 'Cursor', available: false, version: null, detail: null },
+    ]);
+    aiSupport.setProviderEnabled('codex', true);
+    fixture.detectChanges();
+  }
+
+  function showStagedCommitComposer(fixture: ComponentFixture<WorkspaceHistory>) {
+    const stagedStatus = {
+      ...repositoryStatus(),
+      entries: [{
+        kind: 'ordinary' as const,
+        path: 'app.ts',
+        originalPath: null,
+        indexStatus: 'modified' as const,
+        worktreeStatus: 'unmodified' as const,
+        submodule: null,
+      }],
+    };
+    statusStoreFor(fixture).state.set({ kind: 'ready', status: stagedStatus });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    return stagedStatus;
+  }
+
   function defaultIpc(command: string, request: unknown): Promise<unknown> {
+    if (command === 'ai_cli_status') {
+      return Promise.resolve({ statuses: [] });
+    }
+    if (command === 'ai_generate_commit_message') {
+      return Promise.resolve({
+        message: 'Update staged changes',
+        indexFingerprint: 'index-before',
+        worktreeFingerprint: 'worktree-before',
+      });
+    }
     if (command === 'list_remembered_repositories') {
       return Promise.resolve([rememberedRepository]);
+    }
+    if (command === 'list_repository_relations') {
+      return Promise.resolve([]);
+    }
+    if (command === 'repository_submodules') {
+      return Promise.resolve({ submodules: [] });
     }
     if (command === 'repository_status') {
       return Promise.resolve(repositoryStatus());
@@ -491,6 +555,92 @@ describe('WorkspaceHistory', () => {
     return Promise.reject(new Error(`Unexpected command: ${command}`));
   }
 
+  it('hides AI commit-message generators until a locally available CLI is enabled', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    showStagedCommitComposer(fixture);
+
+    expect(fixture.nativeElement.querySelector('.ai-commit-action')).toBeNull();
+  });
+
+  it('shows an enabled locally available AI commit-message generator', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    showStagedCommitComposer(fixture);
+    enableCodexCommitGeneration(fixture);
+
+    const button = fixture.nativeElement.querySelector(
+      '[data-ai-provider="codex"]',
+    ) as HTMLButtonElement;
+    expect(button.textContent).toContain('Generate with Codex');
+    expect(button.disabled).toBe(false);
+  });
+
+  it('sends the current repository state to the enabled AI CLI and fills only the commit message', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    showStagedCommitComposer(fixture);
+    enableCodexCommitGeneration(fixture);
+
+    (fixture.nativeElement.querySelector('[data-ai-provider="codex"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('ai_generate_commit_message', {
+      repositoryId: 'skibidibi-git',
+      provider: 'codex',
+      promptTemplate: DEFAULT_AI_COMMIT_PROMPT,
+      expectedHead: 'abc',
+      indexFingerprint: 'index-before',
+      worktreeFingerprint: 'worktree-before',
+    });
+    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value)
+      .toBe('Update staged changes');
+  });
+
+  it('rejects an AI result when the staged changes changed while it was generating', async () => {
+    let resolveGeneration: ((value: unknown) => void) | undefined;
+    const { fixture } = await createFixture((command, request) =>
+      command === 'ai_generate_commit_message'
+        ? new Promise((resolve) => { resolveGeneration = resolve; })
+        : defaultIpc(command, request),
+    );
+    showStagedCommitComposer(fixture);
+    enableCodexCommitGeneration(fixture);
+
+    (fixture.nativeElement.querySelector('[data-ai-provider="codex"]') as HTMLButtonElement).click();
+    statusStoreFor(fixture).state.set({
+      kind: 'ready',
+      status: { ...repositoryStatus(), indexFingerprint: 'index-after' },
+    });
+    resolveGeneration?.({
+      message: 'This response is stale',
+      indexFingerprint: 'index-before',
+      worktreeFingerprint: 'worktree-before',
+    });
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value).toBe('');
+    expect(fixture.nativeElement.querySelector('.commit-message-generation-error')?.textContent)
+      .toContain('staged changes changed');
+  });
+
+  it('shows the AI CLI generation error without attempting to create a commit', async () => {
+    const { fixture, invoke } = await createFixture((command, request) =>
+      command === 'ai_generate_commit_message'
+        ? Promise.reject(new Error('Codex is not signed in'))
+        : defaultIpc(command, request),
+    );
+    showStagedCommitComposer(fixture);
+    enableCodexCommitGeneration(fixture);
+
+    (fixture.nativeElement.querySelector('[data-ai-provider="codex"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.commit-message-generation-error')?.textContent)
+      .toContain('Codex is not signed in');
+    expect(invoke).not.toHaveBeenCalledWith('repository_create_commit', expect.anything());
+  });
+
   it('renders real commit summaries in the three-column workspace', async () => {
     const { fixture } = await createFixture(defaultIpc);
     const element = fixture.nativeElement as HTMLElement;
@@ -662,12 +812,16 @@ describe('WorkspaceHistory', () => {
     ) as NodeListOf<HTMLButtonElement>;
     const workingRow = historyItems[0];
     expect(workingRow.classList).toContain('working-tree-history-row');
-    expect(workingRow.textContent).toContain('2 added');
-    expect(workingRow.textContent).toContain('1 modified');
-    expect(workingRow.textContent).toContain('1 renamed');
-    expect(workingRow.textContent).toContain('4 deleted');
-    expect(workingRow.querySelector('time')).toBeNull();
-    expect(workingRow.querySelector('code')).toBeNull();
+    expect(workingRow.textContent).toContain('Working Tree');
+    expect(workingRow.textContent).toContain('+2');
+    expect(workingRow.textContent).toContain('±1');
+    expect(workingRow.textContent).toContain('→1');
+    expect(workingRow.textContent).toContain('−4');
+    expect(workingRow.textContent).toContain('8 uncommitted · 6 staged');
+    expect(workingRow.querySelector('.commit-author')?.textContent).toContain('you');
+    expect(workingRow.querySelector('time')?.textContent).toContain('now');
+    expect(workingRow.querySelector('code')?.textContent).toContain('—');
+    expect(workingRow.getAttribute('aria-current')).toBe('true');
 
     workingRow.click();
     fixture.detectChanges();
@@ -678,6 +832,10 @@ describe('WorkspaceHistory', () => {
     expect(inspector.querySelector('.commit-message')).toBeNull();
     expect(inspector.textContent).not.toContain('Ada');
     expect(inspector.textContent).not.toContain(commits[0].summary);
+    expect(inspector.querySelector('[aria-label="Staged files"]')?.textContent).toContain('renamed.ts');
+    expect(inspector.querySelector('[aria-label="Unstaged files"]')?.textContent).toContain('modified.ts');
+    expect(inspector.querySelectorAll('.working-tree-file-group')).toHaveLength(2);
+    expect(inspector.lastElementChild?.classList).toContain('commit-composer');
 
     (inspector.querySelector('.changed-file') as HTMLButtonElement).click();
     await fixture.whenStable();
@@ -871,6 +1029,37 @@ describe('WorkspaceHistory', () => {
     await Promise.resolve();
 
     expect(statusStore.state()).toEqual({ kind: 'ready', status: repositoryStatus() });
+  });
+
+  it('stages one unstaged file directly from its section action', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const status = repositoryStatus();
+    statusStoreFor(fixture).state.set({ kind: 'ready', status });
+    fixture.detectChanges();
+
+    const stageFile = fixture.nativeElement.querySelector(
+      '[aria-label="Stage new.ts"]',
+    ) as HTMLButtonElement;
+    expect(stageFile).toBeTruthy();
+    stageFile.click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_apply_index_change', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        action: 'stage',
+        selection: {
+          scope: 'selected',
+          entries: [{ path: 'new.ts', oldPath: null, entryKind: 'untracked' }],
+        },
+        expectedHead: 'abc',
+        expectedHeadName: 'main',
+        expectedDetached: false,
+        expectedUnborn: false,
+        expectedIndexFingerprint: 'index-before',
+        expectedWorktreeFingerprint: 'worktree-before',
+      },
+    });
   });
 
   it('keeps the commit message and reconciles file selection after commit creation fails', async () => {
@@ -1477,8 +1666,11 @@ describe('WorkspaceHistory', () => {
   });
 
   it('confirms and switches a non-current local branch, then refreshes workspace data', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
-    const { fixture, invoke } = await createFixture(defaultIpc);
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_status'
+        ? Promise.resolve({ ...repositoryStatus(), entries: [] })
+        : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
@@ -1487,10 +1679,16 @@ describe('WorkspaceHistory', () => {
     );
 
     branch?.click();
+    fixture.detectChanges();
+
+    const dialog = fixture.nativeElement.querySelector('.switch-confirmation') as HTMLDialogElement;
+    expect(dialog.textContent).toContain('main');
+    expect(dialog.textContent).toContain('rb/feature');
+    expect(invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch')).toHaveLength(0);
+    (dialog.querySelector('#confirm-branch-switch') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(confirm).toHaveBeenCalledWith('Switch the active worktree to “rb/feature”?');
     expect(invoke).toHaveBeenCalledWith('switch_repository_branch', {
       repositoryId: 'skibidibi-git',
       operation: {
@@ -1501,7 +1699,6 @@ describe('WorkspaceHistory', () => {
       },
     });
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
-    confirm.mockRestore();
   });
 
   it('creates a local branch from current HEAD without checking it out', async () => {
@@ -1663,7 +1860,6 @@ describe('WorkspaceHistory', () => {
   });
 
   it('offers to stash a dirty working tree and retries the branch switch with a WIP message', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const ipc = (command: string, request: unknown): Promise<unknown> => {
       if (command !== 'switch_repository_branch') {
         return defaultIpc(command, request);
@@ -1699,27 +1895,28 @@ describe('WorkspaceHistory', () => {
     );
 
     branch?.click();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('.switch-confirmation') as HTMLDialogElement;
+    expect((dialog.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(true);
+    (dialog.querySelector('#confirm-branch-switch') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
     const switchCalls = invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch');
-    expect(switchCalls).toHaveLength(2);
-    expect(switchCalls[0][1]).toMatchObject({ operation: { stashOnDirty: false, stashMessage: null } });
-    expect(switchCalls[1][1]).toMatchObject({
+    expect(switchCalls).toHaveLength(1);
+    expect(switchCalls[0][1]).toMatchObject({
       operation: {
         fullName: 'refs/heads/rb/feature',
         expectedOid: 'def',
         stashOnDirty: true,
       },
     });
-    expect((switchCalls[1][1] as { operation: { stashMessage: string } }).operation.stashMessage)
+    expect((switchCalls[0][1] as { operation: { stashMessage: string } }).operation.stashMessage)
       .toMatch(/^WIP \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} main$/);
     expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
-    confirm.mockRestore();
   });
 
   it('surfaces a resolved partial auto-stash switch result and refreshes all repository slices', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const ipc = (command: string, request: unknown): Promise<unknown> =>
       command === 'switch_repository_branch'
         ? Promise.resolve({
@@ -1747,6 +1944,8 @@ describe('WorkspaceHistory', () => {
     fixture.detectChanges();
     ([...local.querySelectorAll<HTMLButtonElement>('button.branch-row')]
       .find((button) => button.title.includes('rb/feature')) as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#confirm-branch-switch') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -1761,7 +1960,6 @@ describe('WorkspaceHistory', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_history').length).toBeGreaterThan(1);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
-    confirm.mockRestore();
   });
 
   it('creates a manual stash including untracked files with a full state precondition', async () => {
@@ -2296,21 +2494,113 @@ describe('WorkspaceHistory', () => {
     vi.useRealTimers();
   });
 
-  it('remembers a selected worktree and navigates to its workspace', async () => {
-    const worktreeRepository = { ...rememberedRepository, id: 'feature-tree', canonicalPath: '/work/feature-tree', displayName: 'feature-tree' };
+  it('opens a worktree as a grouped repository from its dropdown menu', async () => {
+    const worktreeRepository = {
+      ...rememberedRepository,
+      id: 'feature-tree',
+      repositoryGroupId: 'shared-git-directory',
+      worktreeRole: 'linked' as const,
+      canonicalPath: '/work/feature-tree',
+      displayName: 'feature-tree',
+    };
     const ipc = (command: string, request: unknown): Promise<unknown> =>
       command === 'remember_repository' ? Promise.resolve(worktreeRepository) : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const router = TestBed.inject(Router);
+    const catalog = TestBed.inject(RepositoryCatalog);
+    const navigateByUrl = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+
+    const trigger = fixture.nativeElement.querySelector(
+      '[aria-label="Worktree actions /work/feature-tree"]',
+    ) as HTMLButtonElement;
+    trigger.click();
+    fixture.detectChanges();
+    const menu = fixture.nativeElement.querySelector('#worktree-context-menu') as HTMLElement;
+    expect(menu).not.toBeNull();
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(menu.textContent).toContain('Open as new repository');
+
+    (menu.querySelector('[role="menuitem"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('remember_repository', { repositoryPath: '/work/feature-tree' });
+    expect(catalog.find('feature-tree')).toMatchObject({
+      repositoryGroupId: 'shared-git-directory',
+      worktreeRole: 'linked',
+      path: '/work/feature-tree',
+    });
+    expect(navigateByUrl).toHaveBeenCalledWith('/repositories', { skipLocationChange: true });
+    expect(navigate).toHaveBeenCalledWith(['/workspace', 'feature-tree', 'history']);
+  });
+
+  it('shows submodule status and opens its repository through the dedicated IPC command', async () => {
+    const submoduleRepository = {
+      ...rememberedRepository,
+      id: 'vendor-module',
+      repositoryGroupId: 'vendor-module-group',
+      canonicalPath: '/work/skibidibi-git/vendor/module',
+      displayName: 'module',
+    };
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_submodules') {
+        return Promise.resolve({
+          submodules: [{
+            name: 'module',
+            path: 'vendor/module',
+            url: 'git@github.com:example/module.git',
+            expectedOid: 'expected',
+            currentOid: 'current',
+            present: true,
+            initialized: true,
+            commitState: 'different',
+            worktreeState: 'modified',
+            changeCount: 2,
+          }],
+        });
+      }
+      if (command === 'open_submodule_repository') {
+        return Promise.resolve(submoduleRepository);
+      }
+      return defaultIpc(command, request);
+    };
     const { fixture, invoke } = await createFixture(ipc);
     const router = TestBed.inject(Router);
     const navigateByUrl = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
     const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
 
-    (fixture.nativeElement.querySelector('.worktree-row') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(fixture.nativeElement.textContent).toContain('commit differs');
+    });
+    const open = fixture.nativeElement.querySelector(
+      '[aria-label="Open submodule module"]',
+    ) as HTMLButtonElement;
+    expect(open.textContent).toContain('modified · 2');
+    open.click();
     await fixture.whenStable();
 
-    expect(invoke).toHaveBeenCalledWith('remember_repository', { repositoryPath: '/work/feature-tree' });
+    expect(invoke).toHaveBeenCalledWith('open_submodule_repository', {
+      parentRepositoryId: 'skibidibi-git',
+      path: 'vendor/module',
+    });
     expect(navigateByUrl).toHaveBeenCalledWith('/repositories', { skipLocationChange: true });
-    expect(navigate).toHaveBeenCalledWith(['/workspace', 'feature-tree', 'history']);
+    expect(navigate).toHaveBeenCalledWith(['/workspace', 'vendor-module', 'history']);
+  });
+
+  it('closes the worktree dropdown with Escape and restores focus', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    const trigger = fixture.nativeElement.querySelector(
+      '[aria-label="Worktree actions /work/feature-tree"]',
+    ) as HTMLButtonElement;
+
+    trigger.click();
+    fixture.detectChanges();
+    globalThis.document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('#worktree-context-menu')).toBeNull();
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(trigger));
   });
 
   it('labels and disables the current, bare, and prunable worktrees', async () => {
@@ -2333,12 +2623,15 @@ describe('WorkspaceHistory', () => {
 
     expect(rows).toHaveLength(3);
     expect(rows[0].disabled).toBe(true);
+    expect(rows[0].querySelector('.worktree-identity > strong')?.textContent).toBe('skibidibi-git');
     expect(rows[0].textContent).toContain('main');
     expect(rows[0].textContent).not.toContain('refs/heads');
     expect(rows[0].textContent).toContain('current');
     expect(rows[1].disabled).toBe(true);
+    expect(rows[1].querySelector('.worktree-identity > strong')?.textContent).toBe('bare.git');
     expect(rows[1].textContent).toContain('bare');
     expect(rows[2].disabled).toBe(true);
+    expect(rows[2].querySelector('.worktree-identity > strong')?.textContent).toBe('gone');
     expect(rows[2].textContent).toContain('prunable');
 
     rows.forEach((row) => row.click());
@@ -2346,38 +2639,66 @@ describe('WorkspaceHistory', () => {
   });
 
   it('resizes the sidebar from the keyboard and persists the width defensively', async () => {
-    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width');
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width.v2');
     const { fixture } = await createFixture(defaultIpc);
     const separator = fixture.nativeElement.querySelector('.sidebar-resizer') as HTMLElement;
 
     separator.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
     fixture.detectChanges();
 
-    expect(separator.getAttribute('aria-valuenow')).toBe('304');
-    expect(globalThis.localStorage.getItem('skibidibi-git.workspace.sidebar-width')).toBe('304');
-    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width');
+    expect(separator.getAttribute('aria-valuenow')).toBe('266');
+    expect(globalThis.localStorage.getItem('skibidibi-git.workspace.sidebar-width.v2')).toBe('266');
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width.v2');
   });
 
-  it('reserves the history and inspector columns near the 68rem breakpoint', async () => {
+  it('reserves the history and inspector columns near the 58rem breakpoint', async () => {
     const originalWidth = globalThis.innerWidth;
     Object.defineProperty(globalThis, 'innerWidth', { configurable: true, value: 1200 });
-    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width');
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width.v2');
     const { fixture } = await createFixture(defaultIpc);
     const separator = fixture.nativeElement.querySelector('.sidebar-resizer') as HTMLElement;
     separator.dispatchEvent(new KeyboardEvent('keydown', { key: 'End' }));
     fixture.detectChanges();
-    expect(separator.getAttribute('aria-valuenow')).toBe('537');
+    expect(separator.getAttribute('aria-valuenow')).toBe('600');
 
     Object.defineProperty(globalThis, 'innerWidth', { configurable: true, value: 1100 });
     globalThis.dispatchEvent(new Event('resize'));
     fixture.detectChanges();
     const clampedWidth = Number(separator.getAttribute('aria-valuenow'));
 
-    expect(clampedWidth).toBe(437);
-    expect(clampedWidth + 24 * 16 + 17 * 16 + 0.4 * 16).toBeLessThanOrEqual(1100);
+    expect(clampedWidth).toBe(527);
+    expect(clampedWidth + 18 * 16 + 17 * 16 + 2 * 0.4 * 16).toBeLessThanOrEqual(1100);
     fixture.destroy();
     Object.defineProperty(globalThis, 'innerWidth', { configurable: true, value: originalWidth });
-    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width');
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.sidebar-width.v2');
+  });
+
+  it('resizes, persists, maximizes, and restores the inspector independently', async () => {
+    const originalWidth = globalThis.innerWidth;
+    Object.defineProperty(globalThis, 'innerWidth', { configurable: true, value: 1440 });
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.inspector-width.v2');
+    const { fixture } = await createFixture(defaultIpc);
+    const separator = fixture.nativeElement.querySelector('.inspector-resizer') as HTMLElement;
+
+    expect(separator.getAttribute('aria-valuenow')).toBe('296');
+    separator.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    fixture.detectChanges();
+    expect(separator.getAttribute('aria-valuenow')).toBe('312');
+    expect(globalThis.localStorage.getItem('skibidibi-git.workspace.inspector-width.v2')).toBe('312');
+
+    const maximize = fixture.nativeElement.querySelector('.inspector-maximize') as HTMLButtonElement;
+    maximize.click();
+    fixture.detectChanges();
+    expect(maximize.getAttribute('aria-pressed')).toBe('true');
+    expect(maximize.getAttribute('aria-label')).toBe('Restore inspector size');
+    expect(fixture.nativeElement.querySelector('.workspace-grid').classList).toContain('inspector-maximized');
+    maximize.click();
+    fixture.detectChanges();
+    expect(maximize.getAttribute('aria-pressed')).toBe('false');
+
+    fixture.destroy();
+    Object.defineProperty(globalThis, 'innerWidth', { configurable: true, value: originalWidth });
+    globalThis.localStorage.removeItem('skibidibi-git.workspace.inspector-width.v2');
   });
 
   it('loads and displays selected commit details with changed-file totals', async () => {
@@ -2390,6 +2711,8 @@ describe('WorkspaceHistory', () => {
     expect(inspector.textContent).toContain('Add repository history');
     expect(inspector.textContent).toContain('1 changed file');
     expect(inspector.textContent).toContain('src/history.ts');
+    expect(inspector.querySelector('.file-directory')?.textContent).toBe('src');
+    expect(inspector.querySelector('.file-name')?.textContent).toBe('history.ts');
     expect(inspector.textContent).toContain('+12');
     expect(inspector.querySelector('.commit-meta')?.textContent).toContain('Author');
     expect(inspector.querySelector('.commit-meta')?.textContent).toContain('Email');

@@ -6,18 +6,19 @@ import { GitHubPullRequestInspector } from './github-pull-request-inspector';
 
 describe('GitHubPullRequestInspector', () => {
   it('renders conversation comments and review-thread state', async () => {
-    const comment = { id: 'comment-1', authorLogin: 'grace', body: 'Please adjust this.', createdAt: '2026-07-15T12:00:00Z', updatedAt: '2026-07-15T12:00:00Z', url: null, path: null, line: null, side: null };
+    const comment = { id: 'comment-1', authorLogin: 'grace', body: '**Please** adjust this.', createdAt: '2026-07-15T12:00:00Z', updatedAt: '2026-07-15T12:00:00Z', url: null, path: null, line: null, side: null };
     const detail = {
       number: 4, title: 'Review me', url: 'https://github.com/o/r/pull/4', state: 'open' as const, draft: false,
       authorLogin: 'ada', headRefName: 'feature', baseRefName: 'main', updatedAt: '2026-07-15T12:00:00Z',
       authoredByViewer: false, reviewRequestedFromViewer: true, unresolvedThreadCount: 1,
-      body: 'Description', additions: 4, deletions: 2, changedFiles: 3, mergeability: 'mergeable' as const,
+      commentCount: 3,
+      body: '## Description', additions: 4, deletions: 2, changedFiles: 3, mergeability: 'mergeable' as const,
       conversationTruncated: false, reviewThreadsTruncated: false, comments: [comment],
       reviewThreads: [{ id: 'thread-1', path: 'src/app.ts', line: 12, resolved: false, outdated: true, comments: [comment] }],
     };
     const bridge: GitHubBridge = {
       githubListAccounts: vi.fn(), githubStartDeviceFlow: vi.fn(), githubPollDeviceFlow: vi.fn(),
-      githubCancelDeviceFlow: vi.fn(), githubConnectPat: vi.fn(), githubDisconnectAccount: vi.fn(),
+      githubCancelDeviceFlow: vi.fn(), githubConnectPat: vi.fn(), githubConnectCli: vi.fn(), githubDisconnectAccount: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubListRepositories: vi.fn(),
       githubListPullRequests: vi.fn(), githubPullRequestDetail: vi.fn().mockResolvedValue(detail),
@@ -36,5 +37,23 @@ describe('GitHubPullRequestInspector', () => {
     expect(fixture.nativeElement.textContent).toContain('Please adjust this.');
     expect(fixture.nativeElement.textContent).toContain('src/app.ts:12');
     expect(fixture.nativeElement.textContent).toContain('Outdated');
+    expect(fixture.nativeElement.querySelector('.body h2')?.textContent).toBe('Description');
+    expect(fixture.nativeElement.querySelector('.comment-body strong')?.textContent).toBe('Please');
+    expect(fixture.nativeElement.querySelector('.metadata [aria-label="3 comments"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('.metadata .branch-route')?.textContent).toContain('feature');
+    expect(fixture.nativeElement.querySelector('.metadata .branch-route')?.textContent).toContain('main');
+    expect(fixture.nativeElement.querySelector('.state-badge')?.getAttribute('data-state')).toBe('open');
+    expect(fixture.nativeElement.querySelector('.mergeability')?.getAttribute('data-mergeability')).toBe('mergeable');
+    expect(fixture.nativeElement.querySelector('.avatar')?.textContent.trim()).toBe('G');
+    expect(fixture.nativeElement.querySelector('.thread-state')?.classList.contains('outdated')).toBe(true);
+    expect(fixture.nativeElement.querySelector('#github-pr-conversation-heading')?.textContent).toContain('1');
+    expect(fixture.nativeElement.querySelector('#github-review-threads-heading')?.textContent).toContain('1');
+    const open = fixture.nativeElement.querySelector('.open-pr') as HTMLAnchorElement;
+    expect(open.href).toBe('https://github.com/o/r/pull/4');
+    expect(open.target).toBe('_blank');
+    expect(open.getAttribute('aria-label')).toBe('Open pull request #4 on GitHub');
+    expect(fixture.nativeElement.textContent).not.toContain('Reply to review thread');
+    expect(fixture.nativeElement.textContent).not.toContain('Check out branch');
+    expect(fixture.nativeElement.textContent).not.toContain('Checks');
   });
 });

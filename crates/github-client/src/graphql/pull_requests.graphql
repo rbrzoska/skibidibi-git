@@ -1,0 +1,31 @@
+query PullRequestSummaries($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        state
+        isDraft
+        author {
+          login
+          avatarUrl
+          ... on User {
+            databaseId
+            name
+          }
+        }
+        headRefName
+        baseRefName
+        url
+        updatedAt
+        comments {
+          totalCount
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

@@ -33,26 +33,40 @@ import {
   type RepositoryStashDetailResponse,
   type RepositoryStatusResponse,
   type RepositoryStash,
+  type RepositorySubmodule,
   type RepositoryWorktree,
   type StashChangedFile,
   type StashFileSource,
   type SwitchRepositoryBranchResponse,
+  type AiCliProvider,
   type WorktreeDirtyStateResponse,
   type WorktreeDirtyStatesResponse,
   type WorktreeRemovalMode,
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
-import { GitHubAccountStore, GitHubRepositoryPullRequestStore } from '../../core/github';
+import { AiSupportStore } from '../../core/ai-support/ai-support.store';
+import {
+  GitHubAccountStore,
+  GitHubRepositoryPullRequestStore,
+  type GitHubAccount,
+} from '../../core/github';
 import { AppIcon } from '../../shared/app-icon/app-icon';
-import { GitHubPullRequestInspector, GitHubPullRequestList } from '../github';
+import { GitHubPullRequestInspector } from '../github/pull-request-inspector/github-pull-request-inspector';
+import { GitHubPullRequestList } from '../github/pull-request-list/github-pull-request-list';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import {
   BranchExpansionState,
   branchFolderPaths,
   type BranchExpansionScope,
 } from './branch-expansion-state';
-import { buildBranchTree, visibleBranchTree } from './branch-tree';
+import {
+  buildBranchTree,
+  visibleBranchTree,
+  type BranchTreeNode,
+  type VisibleBranchTreeNode,
+} from './branch-tree';
 import { createContextualDiffRows } from './contextual-diff';
+import { splitFilePath } from './file-path-parts';
 import { parseUnifiedDiff } from './unified-diff';
 import {
   planWorkingTreeMutation,
@@ -124,6 +138,10 @@ type NavigationState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly navigation: RepositoryNavigationResponse }
   | { readonly kind: 'error'; readonly message: string };
+type SubmoduleState =
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'ready'; readonly submodules: readonly RepositorySubmodule[] }
+  | { readonly kind: 'error'; readonly message: string };
 type FileDiffState =
   | { readonly kind: 'idle' }
   | { readonly kind: 'loading'; readonly path: string; readonly oldPath: string | null }
@@ -138,6 +156,12 @@ interface BranchContextMenu {
   readonly y: number;
   readonly returnFocus: HTMLElement;
 }
+interface WorktreeContextMenu {
+  readonly worktree: RepositoryWorktree;
+  readonly x: number;
+  readonly y: number;
+  readonly returnFocus: HTMLElement;
+}
 interface MergeConfirmation {
   readonly source: RepositoryBranch;
   readonly target: RepositoryBranch;
@@ -145,19 +169,87 @@ interface MergeConfirmation {
   readonly dirty: boolean;
   readonly returnFocus: HTMLElement;
 }
+interface SwitchConfirmation {
+  readonly branch: RepositoryBranch;
+  readonly dirty: boolean;
+  readonly returnFocus: HTMLElement;
+}
+interface RemoteBranchGroup {
+  readonly remote: string;
+  readonly count: number;
+  readonly collapsed: boolean;
+  readonly tree: readonly VisibleBranchTreeNode[];
+}
 
 const HISTORY_PAGE_SIZE = 50;
 const MAX_RENDERED_DIFF_ROWS = 20_000;
-const SIDEBAR_WIDTH_KEY = 'skibidibi-git.workspace.sidebar-width';
+const SIDEBAR_WIDTH_KEY = 'skibidibi-git.workspace.sidebar-width.v2';
+const INSPECTOR_WIDTH_KEY = 'skibidibi-git.workspace.inspector-width.v2';
 const SIDEBAR_MIN_WIDTH = 220;
-const SIDEBAR_DEFAULT_WIDTH = 288;
+const SIDEBAR_DEFAULT_WIDTH = 250;
 const SIDEBAR_KEYBOARD_STEP = 16;
+const INSPECTOR_MIN_WIDTH = 272;
+const INSPECTOR_DEFAULT_WIDTH = 296;
+const INSPECTOR_KEYBOARD_STEP = 16;
 const ROOT_FONT_SIZE = 16;
 const COMPACT_LAYOUT_BREAKPOINT = 48 * ROOT_FONT_SIZE;
-const INSPECTOR_LAYOUT_BREAKPOINT = 68 * ROOT_FONT_SIZE;
-const HISTORY_MIN_WIDTH = 24 * ROOT_FONT_SIZE;
-const INSPECTOR_MIN_WIDTH = 17 * ROOT_FONT_SIZE;
+const INSPECTOR_LAYOUT_BREAKPOINT = 58 * ROOT_FONT_SIZE;
+const HISTORY_MIN_WIDTH = 18 * ROOT_FONT_SIZE;
 const SIDEBAR_RESIZER_WIDTH = 0.4 * ROOT_FONT_SIZE;
+
+function remoteBranchParts(branch: RepositoryBranch): {
+  readonly remote: string;
+  readonly branch: RepositoryBranch;
+} {
+  const refName = branch.fullName.replace(/^refs\/remotes\//, '');
+  const separator = refName.indexOf('/');
+  const remote = separator > 0 ? refName.slice(0, separator) : 'remote';
+  const name = separator > 0 ? refName.slice(separator + 1) : branch.name;
+  return { remote, branch: { ...branch, name } };
+}
+
+function remoteBranchTrees(
+  branches: readonly RepositoryBranch[],
+): ReadonlyMap<string, readonly BranchTreeNode[]> {
+  const grouped = new Map<string, RepositoryBranch[]>();
+  for (const branch of branches) {
+    const parts = remoteBranchParts(branch);
+    grouped.set(parts.remote, [...(grouped.get(parts.remote) ?? []), parts.branch]);
+  }
+  return new Map(
+    [...grouped.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([remote, remoteBranches]) => [remote, buildBranchTree(remoteBranches)]),
+  );
+}
+
+function remoteFolderKey(remote: string, path: string): string {
+  return `${remote}/${path}`;
+}
+
+function remoteFolderPaths(branches: readonly RepositoryBranch[]): ReadonlySet<string> {
+  const paths = new Set<string>();
+  for (const [remote, tree] of remoteBranchTrees(branches)) {
+    paths.add(remote);
+    for (const path of branchFolderPaths(tree)) {
+      paths.add(remoteFolderKey(remote, path));
+    }
+  }
+  return paths;
+}
+
+export function selectPreferredGitHubAccountId(
+  accounts: readonly GitHubAccount[],
+  host: string,
+): string | null {
+  const matching = accounts.filter(
+    (account) => account.state === 'connected' && account.host.toLowerCase() === host.toLowerCase(),
+  );
+  return matching.find((account) => account.authKind === 'gitHubCli')?.id
+    ?? matching.find((account) => account.authKind === 'oAuthDevice')?.id
+    ?? matching.find((account) => account.authKind === 'personalAccessToken')?.id
+    ?? null;
+}
 
 @Component({
   selector: 'app-workspace-history',
@@ -172,7 +264,9 @@ export class WorkspaceHistory implements OnDestroy {
   private readonly router = inject(Router);
   private readonly catalog = inject(RepositoryCatalog);
   private readonly ipc = inject(DESKTOP_IPC);
+  private readonly aiSupport = inject(AiSupportStore);
   protected readonly githubAccounts = inject(GitHubAccountStore);
+  protected readonly filePathParts = splitFilePath;
   private readonly branchExpansionState = new BranchExpansionState();
   private historyRequestGeneration = 0;
   private detailRequestGeneration = 0;
@@ -182,10 +276,13 @@ export class WorkspaceHistory implements OnDestroy {
   private pushAnalysisRequestGeneration = 0;
   private conflictListRequestGeneration = 0;
   private conflictDetailRequestGeneration = 0;
+  private aiGenerationRequestGeneration = 0;
   private dirtyStatesRequestGeneration = 0;
+  private submodulesRequestGeneration = 0;
   private destroyed = false;
   private fileDiffReturnFocus: HTMLElement | null = null;
   private activeResizePointer: number | null = null;
+  private activeInspectorResizePointer: number | null = null;
   private autoFetchTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private liveChangesTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   private liveRefreshInFlight = false;
@@ -202,9 +299,7 @@ export class WorkspaceHistory implements OnDestroy {
     if (state.kind !== 'ready' || host === undefined) {
       return null;
     }
-    return state.accounts.find(
-      (account) => account.state === 'connected' && account.host.toLowerCase() === host.toLowerCase(),
-    )?.id ?? null;
+    return selectPreferredGitHubAccountId(state.accounts, host);
   });
   private readonly refreshStorage = browserWorkspaceRefreshStorage();
   private readonly initialRefreshPreferences = readWorkspaceRefreshPreferences(
@@ -222,20 +317,31 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly stashDetailState = signal<StashDetailState>({ kind: 'idle' });
   protected readonly selectedStash = signal<RepositoryStash | null>(null);
   protected readonly navigationState = signal<NavigationState>({ kind: 'loading' });
+  protected readonly submoduleState = signal<SubmoduleState>({ kind: 'loading' });
   protected readonly navigationFilter = signal('');
   protected readonly expandedLocalBranchFolders = signal<ReadonlySet<string>>(new Set());
   protected readonly expandedRemoteBranchFolders = signal<ReadonlySet<string>>(new Set());
   protected readonly sidebarWidth = signal(this.readSidebarWidth());
   protected readonly resizingSidebar = signal(false);
+  protected readonly inspectorWidth = signal(this.readInspectorWidth());
+  protected readonly resizingInspector = signal(false);
+  protected readonly inspectorMaximized = signal(false);
   protected readonly switchingBranch = signal<string | null>(null);
   protected readonly openingWorktree = signal<string | null>(null);
+  protected readonly openingSubmodule = signal<string | null>(null);
   protected readonly refreshingWorkspace = signal(false);
   protected readonly navigationActionError = signal('');
   protected readonly navigationActionNotice = signal('');
   protected readonly branchContextMenu = signal<BranchContextMenu | null>(null);
+  protected readonly worktreeContextMenu = signal<WorktreeContextMenu | null>(null);
   protected readonly branchContextMutation = signal<string | null>(null);
   protected readonly mergeConfirmation = signal<MergeConfirmation | null>(null);
   protected readonly mergeAutoStash = signal(true);
+  protected readonly switchConfirmation = signal<SwitchConfirmation | null>(null);
+  protected readonly switchAutoStash = signal(true);
+  protected readonly branchCreationTarget = signal<BranchCreationTarget | null>(null);
+  protected readonly newBranchName = signal('');
+  protected readonly creatingBranch = signal(false);
   protected readonly releaseBranchFullName = signal<string | null>(null);
   protected readonly worktreeDirtyStates = signal<ReadonlyMap<string, WorktreeDirtyStateResponse>>(new Map());
   protected readonly currentOnly = signal(this.initialRefreshPreferences.currentOnly);
@@ -251,6 +357,8 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly worktreeRemovalDialogError = signal('');
   private readonly deletionDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceDeletionDialog');
   private readonly mergeDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceMergeDialog');
+  private readonly switchDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceSwitchDialog');
+  private readonly branchCreationDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceBranchCreationDialog');
   private readonly openDeletionDialog = effect(() => {
     if (this.deletionConfirmation() === null) {
       return;
@@ -290,9 +398,21 @@ export class WorkspaceHistory implements OnDestroy {
       }
     });
   });
-  protected readonly branchCreationTarget = signal<BranchCreationTarget | null>(null);
-  protected readonly newBranchName = signal('');
-  protected readonly creatingBranch = signal(false);
+  private readonly openSwitchDialog = effect(() => {
+    if (this.switchConfirmation() === null) {
+      return;
+    }
+    this.showDialogAfterRender(this.switchDialogElement()?.nativeElement, () => this.switchConfirmation() !== null);
+  });
+  private readonly openBranchCreationDialog = effect(() => {
+    if (this.branchCreationTarget() === null) {
+      return;
+    }
+    this.showDialogAfterRender(
+      this.branchCreationDialogElement()?.nativeElement,
+      () => this.branchCreationTarget() !== null,
+    );
+  });
   protected readonly stashMessage = signal('');
   protected readonly stashIncludeUntracked = signal(true);
   protected readonly stashMutation = signal<string | null>(null);
@@ -316,6 +436,8 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly selectedWorkingTreeFiles = signal<ReadonlySet<string>>(new Set());
   protected readonly commitMessage = signal('');
   protected readonly amendMode = signal(false);
+  protected readonly generatingCommitMessageWith = signal<string | null>(null);
+  protected readonly commitMessageGenerationError = signal('');
   protected readonly workingTreeMutation = signal<WorkingTreeMutation | null>(null);
   protected readonly workingTreeMutationError = signal('');
   protected readonly workspaceActionBusy = computed(
@@ -323,17 +445,20 @@ export class WorkspaceHistory implements OnDestroy {
       this.workingTreeMutation() !== null ||
       this.switchingBranch() !== null ||
       this.openingWorktree() !== null ||
+      this.openingSubmodule() !== null ||
       this.refreshingWorkspace() ||
       this.fetchingRepository() ||
       this.deletingBranch() !== null ||
       this.removingWorktree() !== null ||
       this.deletionConfirmation() !== null ||
       this.mergeConfirmation() !== null ||
+      this.switchConfirmation() !== null ||
       this.creatingBranch() ||
       this.stashMutation() !== null ||
       this.networkMutation() !== null ||
       this.conflictMutation() ||
-      this.branchContextMutation() !== null,
+      this.branchContextMutation() !== null ||
+      this.generatingCommitMessageWith() !== null,
   );
   protected readonly pushDisabledReason = computed(() => {
     const state = this.pushAnalysisState();
@@ -399,14 +524,11 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly localBranchHierarchy = computed(() =>
     buildBranchTree(this.otherLocalBranches()),
   );
-  protected readonly remoteBranchHierarchy = computed(() =>
-    buildBranchTree(this.remoteBranches()),
-  );
   protected readonly localBranchFolderPaths = computed(() =>
     branchFolderPaths(this.localBranchHierarchy()),
   );
   protected readonly remoteBranchFolderPaths = computed(() =>
-    branchFolderPaths(this.remoteBranchHierarchy()),
+    remoteFolderPaths(this.remoteBranches()),
   );
   protected readonly orderedWorktrees = computed(() => {
     const state = this.navigationState();
@@ -429,13 +551,26 @@ export class WorkspaceHistory implements OnDestroy {
       this.navigationFilter(),
     ),
   );
-  protected readonly remoteBranchTree = computed(() =>
-    visibleBranchTree(
-      this.remoteBranchHierarchy(),
-      this.collapsedFoldersFor('remote'),
-      this.navigationFilter(),
-    ),
-  );
+  protected readonly remoteBranchGroups = computed<readonly RemoteBranchGroup[]>(() => {
+    const expanded = this.expandedRemoteBranchFolders();
+    const filter = this.navigationFilter().trim().toLowerCase();
+    return [...remoteBranchTrees(this.remoteBranches()).entries()].map(([remote, tree]) => {
+      const available = branchFolderPaths(tree);
+      const collapsedGroup = filter.length === 0 && !expanded.has(remote);
+      const collapsed = new Set(
+        [...available].filter((path) => !expanded.has(remoteFolderKey(remote, path))),
+      );
+      const visibleFilter = filter.length > 0 && remote.toLowerCase().includes(filter)
+        ? ''
+        : this.navigationFilter();
+      return {
+        remote,
+        count: this.remoteBranches().filter((branch) => remoteBranchParts(branch).remote === remote).length,
+        collapsed: collapsedGroup,
+        tree: collapsedGroup ? [] : visibleBranchTree(tree, collapsed, visibleFilter),
+      };
+    }).filter((group) => filter.length === 0 || group.remote.toLowerCase().includes(filter) || group.tree.length > 0);
+  });
 
   protected readonly branchName = computed(() => {
     const state = this.statusStore.state();
@@ -464,6 +599,14 @@ export class WorkspaceHistory implements OnDestroy {
       this.reconciledWorkingTreeSelection(),
     ),
   );
+  protected readonly stagedWorkingTreeFiles = computed(() =>
+    this.workingTreeSummary().files.filter((file) => file.staged),
+  );
+  protected readonly unstagedWorkingTreeFiles = computed(() =>
+    this.workingTreeSummary().files.filter(
+      (file) => file.unstaged || file.primaryStatus === 'conflicted',
+    ),
+  );
   protected readonly commitDisabled = computed(
     () =>
       this.workspaceActionBusy() ||
@@ -482,6 +625,18 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly amendWithMessageDisabled = computed(
     () => this.amendUnavailable() || this.commitMessage().trim().length === 0,
   );
+  protected readonly enabledAiCommitMessageProviders = computed(() =>
+    this.aiSupport.enabledAvailableProviders(),
+  );
+  protected readonly aiCommitMessageGenerationDisabled = computed(() => {
+    const state = this.statusStore.state();
+    return (
+      this.workspaceActionBusy() ||
+      state.kind !== 'ready' ||
+      !this.workingTreeCapabilities().canCommit ||
+      this.workingTreeCapabilities().conflictedCount > 0
+    );
+  });
   protected readonly amendRewritesUpstream = computed(() => {
     const state = this.statusStore.state();
     return (
@@ -507,11 +662,12 @@ export class WorkspaceHistory implements OnDestroy {
   });
 
   constructor() {
-    globalThis.addEventListener('resize', this.clampSidebarToViewport);
+    globalThis.addEventListener('resize', this.clampPanelsToViewport);
     globalThis.document.addEventListener('pointerdown', this.closeBranchContextMenuFromOutside);
     globalThis.document.addEventListener('keydown', this.handleBranchContextMenuKeydown);
     this.configureAutoFetchTimer();
     this.configureLiveChangesTimer();
+    void this.aiSupport.loadAvailability();
     void this.loadRepository();
   }
 
@@ -525,11 +681,14 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.pushAnalysisRequestGeneration;
     ++this.conflictListRequestGeneration;
     ++this.conflictDetailRequestGeneration;
+    ++this.aiGenerationRequestGeneration;
     ++this.dirtyStatesRequestGeneration;
+    ++this.submodulesRequestGeneration;
     this.clearAutoFetchTimer();
     this.clearLiveChangesTimer();
     this.stopSidebarResize();
-    globalThis.removeEventListener('resize', this.clampSidebarToViewport);
+    this.stopInspectorResize();
+    globalThis.removeEventListener('resize', this.clampPanelsToViewport);
     globalThis.document.removeEventListener('pointerdown', this.closeBranchContextMenuFromOutside);
     globalThis.document.removeEventListener('keydown', this.handleBranchContextMenuKeydown);
   }
@@ -955,6 +1114,17 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  private selectWorkingTreeWhenChanged(): void {
+    const state = this.statusStore.state();
+    if (
+      this.historySelection() === 'none' &&
+      state.kind === 'ready' &&
+      state.status.entries.length > 0
+    ) {
+      this.selectWorkingTree();
+    }
+  }
+
   protected async refreshWorkspace(): Promise<void> {
     if (this.workspaceActionBusy()) {
       return;
@@ -968,6 +1138,7 @@ export class WorkspaceHistory implements OnDestroy {
         this.loadNavigation(),
         this.loadPushAnalysis(),
         this.loadConflicts(),
+        this.loadSubmodules(),
       ]);
     } finally {
       if (!this.destroyed) {
@@ -1242,6 +1413,14 @@ export class WorkspaceHistory implements OnDestroy {
     );
   }
 
+  protected remoteBranchFolderKey(remote: string, path: string): string {
+    return remoteFolderKey(remote, path);
+  }
+
+  protected remoteBranchQualifiedName(branch: RepositoryBranch): string {
+    return branch.fullName.replace(/^refs\/remotes\//, '');
+  }
+
   protected openBranchContextMenu(
     event: MouseEvent | null,
     branch: RepositoryBranch,
@@ -1255,6 +1434,7 @@ export class WorkspaceHistory implements OnDestroy {
     const rect = trigger.getBoundingClientRect();
     const requestedX = event !== null && event.clientX > 0 ? event.clientX : rect.right;
     const requestedY = event !== null && event.clientY > 0 ? event.clientY : rect.bottom;
+    this.closeWorktreeContextMenu();
     this.branchContextMenu.set({
       branch,
       x: Math.min(requestedX, Math.max(8, globalThis.innerWidth - 250)),
@@ -1270,6 +1450,46 @@ export class WorkspaceHistory implements OnDestroy {
     if (restoreFocus && menu !== null) {
       this.restoreFocusAfterRender(menu.returnFocus);
     }
+  }
+
+  protected openWorktreeContextMenu(
+    event: MouseEvent | null,
+    worktree: RepositoryWorktree,
+    trigger: HTMLElement,
+  ): void {
+    if (this.worktreeDisabledReason(worktree) !== null) {
+      return;
+    }
+    event?.preventDefault();
+    event?.stopPropagation();
+    const rect = trigger.getBoundingClientRect();
+    const requestedX = event !== null && event.clientX > 0 ? event.clientX : rect.right;
+    const requestedY = event !== null && event.clientY > 0 ? event.clientY : rect.bottom;
+    this.closeBranchContextMenu();
+    this.worktreeContextMenu.set({
+      worktree,
+      x: Math.min(requestedX, Math.max(8, globalThis.innerWidth - 250)),
+      y: Math.min(requestedY, Math.max(8, globalThis.innerHeight - 120)),
+      returnFocus: trigger,
+    });
+    this.focusAfterRender('worktree-context-menu');
+  }
+
+  protected closeWorktreeContextMenu(restoreFocus = false): void {
+    const menu = this.worktreeContextMenu();
+    this.worktreeContextMenu.set(null);
+    if (restoreFocus && menu !== null) {
+      this.restoreFocusAfterRender(menu.returnFocus);
+    }
+  }
+
+  protected async openWorktreeAsNewRepository(): Promise<void> {
+    const menu = this.worktreeContextMenu();
+    if (menu === null || this.workspaceActionBusy()) {
+      return;
+    }
+    this.worktreeContextMenu.set(null);
+    await this.openWorktree(menu.worktree);
   }
 
   protected isReleaseBranch(branch: RepositoryBranch): boolean {
@@ -1534,15 +1754,50 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
-  protected async switchBranch(branch: RepositoryBranch): Promise<boolean> {
+  protected switchBranch(branch: RepositoryBranch, trigger?: HTMLElement): boolean {
     if (branch.kind !== 'local' || branch.current || this.workspaceActionBusy()) {
       return false;
     }
-    if (!globalThis.confirm(`Switch the active worktree to “${branch.name}”?`)) {
+    const returnFocus = trigger
+      ?? (globalThis.document?.activeElement instanceof HTMLElement
+        ? globalThis.document.activeElement
+        : globalThis.document?.body);
+    if (!(returnFocus instanceof HTMLElement)) {
       return false;
     }
+    const state = this.statusStore.state();
+    this.switchAutoStash.set(state.kind === 'ready' && state.status.entries.length > 0);
+    this.switchConfirmation.set({
+      branch,
+      dirty: state.kind === 'ready' && state.status.entries.length > 0,
+      returnFocus,
+    });
+    this.focusAfterRender('cancel-branch-switch');
+    return true;
+  }
 
-    let switched = false;
+  protected setSwitchAutoStash(enabled: boolean): void {
+    this.switchAutoStash.set(enabled);
+  }
+
+  protected cancelBranchSwitch(): void {
+    const confirmation = this.switchConfirmation();
+    if (confirmation === null || this.switchingBranch() !== null) {
+      return;
+    }
+    this.switchConfirmation.set(null);
+    this.restoreFocusAfterRender(confirmation.returnFocus);
+  }
+
+  protected async confirmBranchSwitch(): Promise<void> {
+    const confirmation = this.switchConfirmation();
+    if (confirmation === null || this.switchingBranch() !== null) {
+      return;
+    }
+    const branch = confirmation.branch;
+    const autoStash = confirmation.dirty && this.switchAutoStash();
+    this.switchConfirmation.set(null);
+
     this.navigationActionError.set('');
     this.navigationActionNotice.set('');
     this.switchingBranch.set(branch.fullName);
@@ -1552,55 +1807,38 @@ export class WorkspaceHistory implements OnDestroy {
         operation: {
           fullName: branch.fullName,
           expectedOid: branch.oid,
-          stashOnDirty: false,
-          stashMessage: null,
+          stashOnDirty: autoStash,
+          stashMessage: autoStash
+            ? buildWipStashMessage(
+                this.currentLocalBranch()?.name ?? this.branchName(),
+                new Date(Date.now() - new Date().getTimezoneOffset() * 60_000),
+              )
+            : null,
         },
       });
       if (this.destroyed) {
-        return false;
+        return;
       }
       this.recordBranchSwitchOutcome(result);
-      switched = result.operationSucceeded;
       await this.refreshAfterBranchSwitch();
     } catch (error) {
       const message = this.errorMessage(error, 'The branch could not be switched.');
-      if (!this.destroyed && message.includes('dirtyWorkingTree')) {
-        const currentBranch = this.currentLocalBranch()?.name ?? this.branchName();
-        if (globalThis.confirm(`The working tree has uncommitted changes. Stash them and switch to “${branch.name}”?`)) {
-          try {
-            const result = await this.ipc.invoke('switch_repository_branch', {
-              repositoryId: this.repositoryId,
-              operation: {
-                fullName: branch.fullName,
-                expectedOid: branch.oid,
-                stashOnDirty: true,
-                stashMessage: buildWipStashMessage(
-                  currentBranch,
-                  new Date(Date.now() - new Date().getTimezoneOffset() * 60_000),
-                ),
-              },
-            });
-            if (!this.destroyed) {
-              this.recordBranchSwitchOutcome(result);
-              switched = result.operationSucceeded;
-              await this.refreshAfterBranchSwitch();
-            }
-          } catch (retryError) {
-            if (!this.destroyed) {
-              this.navigationActionError.set(this.errorMessage(retryError, 'The branch could not be switched after stashing.'));
-              await this.refreshAfterBranchSwitch();
-            }
-          }
-        }
-      } else if (!this.destroyed) {
+      if (!this.destroyed) {
         this.navigationActionError.set(message);
+        if (message.includes('dirtyWorkingTree') && !autoStash) {
+          this.navigationActionError.set(
+            `${message} Retry the switch and enable auto-stash to preserve local changes.`,
+          );
+        }
       }
     } finally {
       if (!this.destroyed) {
         this.switchingBranch.set(null);
       }
     }
-    return switched;
+    if (!this.destroyed) {
+      this.restoreFocusAfterRender(confirmation.returnFocus);
+    }
   }
 
   private recordBranchSwitchOutcome(result: SwitchRepositoryBranchResponse): void {
@@ -1858,6 +2096,76 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  protected submoduleDisabledReason(submodule: RepositorySubmodule): string | null {
+    if (!submodule.present || !submodule.initialized) {
+      return 'Not initialized locally';
+    }
+    if (submodule.commitState === 'unavailable') {
+      return 'Commit is unavailable locally';
+    }
+    if (submodule.worktreeState === 'unavailable') {
+      return 'Working tree is unavailable';
+    }
+    return null;
+  }
+
+  protected submoduleCommitToken(submodule: RepositorySubmodule): string {
+    switch (submodule.commitState) {
+      case 'atExpected':
+        return 'at expected commit';
+      case 'different':
+        return 'commit differs';
+      case 'conflicted':
+        return 'commit conflict';
+      case 'unavailable':
+        return 'commit unavailable';
+    }
+  }
+
+  protected submoduleWorktreeToken(submodule: RepositorySubmodule): string {
+    switch (submodule.worktreeState) {
+      case 'clean':
+        return 'clean';
+      case 'modified':
+        return `modified${submodule.changeCount > 0 ? ` · ${submodule.changeCount}` : ''}`;
+      case 'untracked':
+        return `untracked${submodule.changeCount > 0 ? ` · ${submodule.changeCount}` : ''}`;
+      case 'modifiedAndUntracked':
+        return `changes${submodule.changeCount > 0 ? ` · ${submodule.changeCount}` : ''}`;
+      case 'conflicted':
+        return 'conflicted';
+      case 'unavailable':
+        return 'unavailable';
+    }
+  }
+
+  protected async openSubmodule(submodule: RepositorySubmodule): Promise<void> {
+    if (this.workspaceActionBusy() || this.submoduleDisabledReason(submodule) !== null) {
+      return;
+    }
+    this.navigationActionError.set('');
+    this.openingSubmodule.set(submodule.path);
+    try {
+      const repository = await this.catalog.openSubmodule(this.repositoryId, submodule.path);
+      if (this.destroyed) {
+        return;
+      }
+      this.statusStore.setRepositoryPath(repository.path);
+      if (repository.id !== this.repositoryId) {
+        await this.router.navigateByUrl('/repositories', { skipLocationChange: true });
+      }
+      await this.router.navigate(['/workspace', repository.id, 'history']);
+    } catch (error) {
+      if (!this.destroyed) {
+        this.navigationActionError.set(this.errorMessage(error, 'The submodule could not be opened.'));
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.openingSubmodule.set(null);
+      }
+    }
+  }
+
   protected startSidebarResize(event: PointerEvent): void {
     if (event.button !== 0) {
       return;
@@ -1898,6 +2206,54 @@ export class WorkspaceHistory implements OnDestroy {
     return this.maximumSidebarWidth();
   }
 
+  protected startInspectorResize(event: PointerEvent): void {
+    if (event.button !== 0 || this.inspectorMaximized() || globalThis.innerWidth <= INSPECTOR_LAYOUT_BREAKPOINT) {
+      return;
+    }
+    event.preventDefault();
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can be unavailable in tests and older embedded webviews.
+    }
+    this.activeInspectorResizePointer = event.pointerId;
+    this.resizingInspector.set(true);
+    globalThis.addEventListener('pointermove', this.resizeInspector);
+    globalThis.addEventListener('pointerup', this.finishInspectorResize);
+    globalThis.addEventListener('pointercancel', this.finishInspectorResize);
+    globalThis.addEventListener('blur', this.cancelInspectorResize);
+  }
+
+  protected resizeInspectorWithKeyboard(event: KeyboardEvent): void {
+    if (this.inspectorMaximized() || globalThis.innerWidth <= INSPECTOR_LAYOUT_BREAKPOINT) {
+      return;
+    }
+    let width: number | null = null;
+    if (event.key === 'ArrowLeft') {
+      width = this.inspectorWidth() + INSPECTOR_KEYBOARD_STEP;
+    } else if (event.key === 'ArrowRight') {
+      width = this.inspectorWidth() - INSPECTOR_KEYBOARD_STEP;
+    } else if (event.key === 'Home') {
+      width = INSPECTOR_MIN_WIDTH;
+    } else if (event.key === 'End') {
+      width = this.maximumInspectorWidth();
+    }
+    if (width === null) {
+      return;
+    }
+    event.preventDefault();
+    this.setInspectorWidth(width, true);
+  }
+
+  protected inspectorMaximumWidth(): number {
+    return this.maximumInspectorWidth();
+  }
+
+  protected toggleInspectorMaximized(): void {
+    this.stopInspectorResize();
+    this.inspectorMaximized.update((maximized) => !maximized);
+  }
+
   protected worktreeDisabledReason(worktree: RepositoryWorktree): string | null {
     if (this.isCurrentWorktree(worktree)) {
       return 'current';
@@ -1916,6 +2272,11 @@ export class WorkspaceHistory implements OnDestroy {
       return worktree.branch.replace(/^refs\/heads\//, '');
     }
     return worktree.detached ? 'detached HEAD' : worktree.path;
+  }
+
+  protected worktreeDisplayName(worktree: RepositoryWorktree): string {
+    const normalized = worktree.path.replace(/[\\/]+$/, '');
+    return normalized.split(/[\\/]/).at(-1) || worktree.path;
   }
 
   protected async loadNavigation(): Promise<void> {
@@ -1939,9 +2300,7 @@ export class WorkspaceHistory implements OnDestroy {
         const localTree = buildBranchTree(
           navigation.branches.filter((branch) => branch.kind === 'local' && !branch.current),
         );
-        const remoteTree = buildBranchTree(
-          navigation.branches.filter((branch) => branch.kind === 'remote'),
-        );
+        const remoteBranches = navigation.branches.filter((branch) => branch.kind === 'remote');
         this.expandedLocalBranchFolders.set(
           this.branchExpansionState.read(
             this.repositoryId,
@@ -1953,7 +2312,7 @@ export class WorkspaceHistory implements OnDestroy {
           this.branchExpansionState.read(
             this.repositoryId,
             'remote',
-            branchFolderPaths(remoteTree),
+            remoteFolderPaths(remoteBranches),
           ),
         );
         void this.loadWorktreeDirtyStates();
@@ -1968,7 +2327,28 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  protected async loadSubmodules(): Promise<void> {
+    const generation = ++this.submodulesRequestGeneration;
+    this.submoduleState.set({ kind: 'loading' });
+    try {
+      const response = await this.ipc.invoke('repository_submodules', {
+        repositoryId: this.repositoryId,
+      });
+      if (generation === this.submodulesRequestGeneration && !this.destroyed) {
+        this.submoduleState.set({ kind: 'ready', submodules: response.submodules });
+      }
+    } catch (error) {
+      if (generation === this.submodulesRequestGeneration && !this.destroyed) {
+        this.submoduleState.set({
+          kind: 'error',
+          message: this.errorMessage(error, 'Submodules could not be loaded.'),
+        });
+      }
+    }
+  }
+
   protected async reloadHistory(): Promise<void> {
+    const selectionBeforeReload = this.historySelection();
     const generation = ++this.historyRequestGeneration;
     ++this.detailRequestGeneration;
     ++this.fileDiffRequestGeneration;
@@ -1999,6 +2379,9 @@ export class WorkspaceHistory implements OnDestroy {
       this.commits.set(response.commits);
       this.nextCursor.set(response.nextCursor);
       this.historyPhase.set('ready');
+      if (selectionBeforeReload === 'none' || selectionBeforeReload === 'working-tree') {
+        this.selectWorkingTreeWhenChanged();
+      }
     } catch {
       if (generation === this.historyRequestGeneration) {
         this.historyError.set('Commit history could not be loaded. Try again.');
@@ -2184,6 +2567,93 @@ export class WorkspaceHistory implements OnDestroy {
     this.commitMessage.set(message);
   }
 
+  protected async generateCommitMessage(
+    provider: AiCliProvider,
+  ): Promise<void> {
+    const state = this.statusStore.state();
+    if (state.kind !== 'ready' || this.aiCommitMessageGenerationDisabled()) {
+      return;
+    }
+
+    const expectedHeadOid = state.status.branch.oid;
+    const expectedIndexFingerprint = state.status.indexFingerprint;
+    const expectedWorktreeFingerprint = state.status.worktreeFingerprint;
+    const generation = ++this.aiGenerationRequestGeneration;
+    this.commitMessageGenerationError.set('');
+    this.generatingCommitMessageWith.set(provider);
+
+    try {
+      const result = await this.aiSupport.generateCommitMessage(provider, {
+        repositoryId: this.repositoryId,
+        expectedHead: expectedHeadOid,
+        indexFingerprint: expectedIndexFingerprint,
+        worktreeFingerprint: expectedWorktreeFingerprint,
+      });
+      if (this.destroyed || generation !== this.aiGenerationRequestGeneration) {
+        return;
+      }
+
+      const current = this.statusStore.state();
+      if (
+        current.kind !== 'ready' ||
+        current.status.branch.oid !== expectedHeadOid ||
+        result.indexFingerprint !== expectedIndexFingerprint ||
+        result.worktreeFingerprint !== expectedWorktreeFingerprint ||
+        current.status.indexFingerprint !== result.indexFingerprint ||
+        current.status.worktreeFingerprint !== result.worktreeFingerprint
+      ) {
+        this.commitMessageGenerationError.set(
+          'The staged changes changed while the message was being generated. Generate a new message for the current changes.',
+        );
+        return;
+      }
+
+      this.commitMessage.set(result.message);
+    } catch (error) {
+      if (generation === this.aiGenerationRequestGeneration && !this.destroyed) {
+        this.commitMessageGenerationError.set(this.aiCommitMessageError(error, provider));
+      }
+    } finally {
+      if (generation === this.aiGenerationRequestGeneration && !this.destroyed) {
+        this.generatingCommitMessageWith.set(null);
+      }
+    }
+  }
+
+  protected aiCommitMessageProviderIsGenerating(provider: AiCliProvider): boolean {
+    return this.generatingCommitMessageWith() === provider;
+  }
+
+  protected aiCommitMessageProviderLabel(provider: AiCliProvider): string {
+    switch (provider) {
+      case 'claude':
+        return 'Claude';
+      case 'cursor':
+        return 'Cursor';
+      default:
+        return 'Codex';
+    }
+  }
+
+  private aiCommitMessageError(error: unknown, provider: AiCliProvider): string {
+    const label = this.aiCommitMessageProviderLabel(provider);
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { readonly code?: unknown }).code
+      : null;
+    switch (code) {
+      case 'notAvailable':
+        return `${label} is no longer available on this computer.`;
+      case 'notEnabled':
+        return `${label} is disabled in AI support settings.`;
+      case 'authenticationRequired':
+        return `${label} requires sign-in before it can generate a commit message.`;
+      case 'cancelled':
+        return `${label} cancelled commit-message generation.`;
+      default:
+        return this.errorMessage(error, `${label} could not generate a commit message.`);
+    }
+  }
+
   protected startAmend(trigger: HTMLElement): void {
     if (this.amendUnavailable()) {
       return;
@@ -2207,6 +2677,38 @@ export class WorkspaceHistory implements OnDestroy {
   }
 
   protected async applyIndexChange(action: IndexAction, all: boolean): Promise<void> {
+    await this.applyIndexChangeWithSelection(
+      action,
+      all,
+      this.reconciledWorkingTreeSelection(),
+    );
+  }
+
+  protected workingTreeFileActionDisabled(action: IndexAction, file: WorkingTreeFile): boolean {
+    if (this.workspaceActionBusy() || file.primaryStatus === 'conflicted') {
+      return true;
+    }
+    const plan = planWorkingTreeMutation(
+      action,
+      this.workingTreeSummary().files,
+      new Set([this.workingTreeFileIdentity(file)]),
+    );
+    return plan.actionableCount === 0 || plan.ambiguous;
+  }
+
+  protected async applyIndexChangeToFile(action: IndexAction, file: WorkingTreeFile): Promise<void> {
+    await this.applyIndexChangeWithSelection(
+      action,
+      false,
+      new Set([this.workingTreeFileIdentity(file)]),
+    );
+  }
+
+  private async applyIndexChangeWithSelection(
+    action: IndexAction,
+    all: boolean,
+    selected: ReadonlySet<string>,
+  ): Promise<void> {
     const state = this.statusStore.state();
     if (state.kind !== 'ready' || this.workspaceActionBusy()) {
       return;
@@ -2215,7 +2717,7 @@ export class WorkspaceHistory implements OnDestroy {
     const plan = planWorkingTreeMutation(
       action,
       this.workingTreeSummary().files,
-      all ? 'all' : this.reconciledWorkingTreeSelection(),
+      all ? 'all' : selected,
     );
     if (plan.actionableCount === 0 || plan.ambiguous) {
       return;
@@ -2512,6 +3014,25 @@ export class WorkspaceHistory implements OnDestroy {
         globalThis.document?.getElementById(id)?.focus();
       }
     }, 0);
+  }
+
+  private showDialogAfterRender(
+    dialog: HTMLDialogElement | undefined,
+    shouldOpen: () => boolean,
+  ): void {
+    if (dialog === undefined || dialog.open) {
+      return;
+    }
+    globalThis.queueMicrotask(() => {
+      if (!dialog.isConnected || dialog.open || !shouldOpen()) {
+        return;
+      }
+      try {
+        dialog.showModal();
+      } catch {
+        dialog.setAttribute('open', '');
+      }
+    });
   }
 
   private restoreFocusAfterRender(target: HTMLElement | null): void {
@@ -2827,7 +3348,7 @@ export class WorkspaceHistory implements OnDestroy {
   }
 
   private readonly closeBranchContextMenuFromOutside = (event: PointerEvent): void => {
-    if (this.branchContextMenu() === null) {
+    if (this.branchContextMenu() === null && this.worktreeContextMenu() === null) {
       return;
     }
     const target = event.target;
@@ -2835,14 +3356,22 @@ export class WorkspaceHistory implements OnDestroy {
       return;
     }
     this.closeBranchContextMenu();
+    this.closeWorktreeContextMenu();
   };
 
   private readonly handleBranchContextMenuKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== 'Escape' || this.branchContextMenu() === null) {
+    if (
+      event.key !== 'Escape' ||
+      (this.branchContextMenu() === null && this.worktreeContextMenu() === null)
+    ) {
       return;
     }
     event.preventDefault();
-    this.closeBranchContextMenu(true);
+    if (this.worktreeContextMenu() !== null) {
+      this.closeWorktreeContextMenu(true);
+    } else {
+      this.closeBranchContextMenu(true);
+    }
   };
 
   private closeDialog(dialog: HTMLDialogElement | undefined): void {
@@ -2879,6 +3408,27 @@ export class WorkspaceHistory implements OnDestroy {
     }
   };
 
+  private readonly resizeInspector = (event: PointerEvent): void => {
+    if (event.pointerId === this.activeInspectorResizePointer) {
+      this.setInspectorWidth(globalThis.innerWidth - event.clientX, false);
+    }
+  };
+
+  private readonly finishInspectorResize = (event: PointerEvent): void => {
+    if (event.pointerId !== this.activeInspectorResizePointer) {
+      return;
+    }
+    this.persistInspectorWidth();
+    this.stopInspectorResize();
+  };
+
+  private readonly cancelInspectorResize = (): void => {
+    if (this.activeInspectorResizePointer !== null) {
+      this.persistInspectorWidth();
+      this.stopInspectorResize();
+    }
+  };
+
   private readonly finishSidebarResize = (event: PointerEvent): void => {
     if (event.pointerId !== this.activeResizePointer) {
       return;
@@ -2894,8 +3444,9 @@ export class WorkspaceHistory implements OnDestroy {
     }
   };
 
-  private readonly clampSidebarToViewport = (): void => {
+  private readonly clampPanelsToViewport = (): void => {
     this.setSidebarWidth(this.sidebarWidth(), false);
+    this.setInspectorWidth(this.inspectorWidth(), false);
   };
 
   private stopSidebarResize(): void {
@@ -2907,6 +3458,15 @@ export class WorkspaceHistory implements OnDestroy {
     globalThis.removeEventListener('blur', this.cancelSidebarResize);
   }
 
+  private stopInspectorResize(): void {
+    this.activeInspectorResizePointer = null;
+    this.resizingInspector.set(false);
+    globalThis.removeEventListener('pointermove', this.resizeInspector);
+    globalThis.removeEventListener('pointerup', this.finishInspectorResize);
+    globalThis.removeEventListener('pointercancel', this.finishInspectorResize);
+    globalThis.removeEventListener('blur', this.cancelInspectorResize);
+  }
+
   private setSidebarWidth(width: number, persist: boolean): void {
     this.sidebarWidth.set(Math.min(this.maximumSidebarWidth(), Math.max(SIDEBAR_MIN_WIDTH, width)));
     if (persist) {
@@ -2914,11 +3474,26 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  private setInspectorWidth(width: number, persist: boolean): void {
+    this.inspectorWidth.set(Math.min(this.maximumInspectorWidth(), Math.max(INSPECTOR_MIN_WIDTH, width)));
+    if (persist) {
+      this.persistInspectorWidth();
+    }
+  }
+
+  private maximumInspectorWidth(): number {
+    if (globalThis.innerWidth <= INSPECTOR_LAYOUT_BREAKPOINT) {
+      return INSPECTOR_DEFAULT_WIDTH;
+    }
+    const reservedWidth = this.sidebarWidth() + HISTORY_MIN_WIDTH + 2 * SIDEBAR_RESIZER_WIDTH;
+    return Math.max(INSPECTOR_MIN_WIDTH, Math.floor(globalThis.innerWidth - reservedWidth));
+  }
+
   private maximumSidebarWidth(): number {
     const viewportWidth = globalThis.innerWidth;
     let reservedWidth = 0;
     if (viewportWidth > INSPECTOR_LAYOUT_BREAKPOINT) {
-      reservedWidth = HISTORY_MIN_WIDTH + INSPECTOR_MIN_WIDTH + SIDEBAR_RESIZER_WIDTH;
+      reservedWidth = HISTORY_MIN_WIDTH + INSPECTOR_MIN_WIDTH + 2 * SIDEBAR_RESIZER_WIDTH;
     } else if (viewportWidth > COMPACT_LAYOUT_BREAKPOINT) {
       reservedWidth = HISTORY_MIN_WIDTH + SIDEBAR_RESIZER_WIDTH;
     }
@@ -2929,7 +3504,7 @@ export class WorkspaceHistory implements OnDestroy {
     );
   }
 
-  private isCurrentWorktree(worktree: RepositoryWorktree): boolean {
+  protected isCurrentWorktree(worktree: RepositoryWorktree): boolean {
     return this.repository()?.path === worktree.path;
   }
 
@@ -3020,9 +3595,28 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  private readInspectorWidth(): number {
+    try {
+      const stored = Number(globalThis.localStorage?.getItem(INSPECTOR_WIDTH_KEY));
+      return Number.isFinite(stored) && stored > 0
+        ? Math.min(this.maximumInspectorWidth(), Math.max(INSPECTOR_MIN_WIDTH, stored))
+        : INSPECTOR_DEFAULT_WIDTH;
+    } catch {
+      return INSPECTOR_DEFAULT_WIDTH;
+    }
+  }
+
   private persistSidebarWidth(): void {
     try {
       globalThis.localStorage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth()));
+    } catch {
+      // Storage may be unavailable in a hardened webview. Resizing remains usable for the session.
+    }
+  }
+
+  private persistInspectorWidth(): void {
+    try {
+      globalThis.localStorage?.setItem(INSPECTOR_WIDTH_KEY, String(this.inspectorWidth()));
     } catch {
       // Storage may be unavailable in a hardened webview. Resizing remains usable for the session.
     }
@@ -3057,6 +3651,9 @@ export class WorkspaceHistory implements OnDestroy {
     }
 
     this.statusStore.setRepositoryPath(repository.path);
+    // Submodules are independent repositories.  Their inspection must not
+    // delay opening the parent workspace or its history.
+    void this.loadSubmodules();
     await Promise.all([
       this.statusStore.refresh(),
       this.reloadHistory(),
@@ -3064,5 +3661,6 @@ export class WorkspaceHistory implements OnDestroy {
       this.loadPushAnalysis(),
       this.loadConflicts(),
     ]);
+    this.selectWorkingTreeWhenChanged();
   }
 }

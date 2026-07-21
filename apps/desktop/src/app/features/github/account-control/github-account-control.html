@@ -1,94 +1,105 @@
-<section class="github-account-control" aria-labelledby="github-account-heading">
-  <header>
-    <div>
-      <strong id="github-account-heading">GitHub accounts</strong>
-      <small>Credentials are stored by the desktop credential service.</small>
-    </div>
-    <button class="secondary-button" type="button" [disabled]="store.state().kind === 'loading' || store.connecting() || oauthBusy() || store.disconnectingAccountId() !== null" (click)="store.load()">Refresh</button>
-  </header>
+<section class="github-account-control" aria-label="GitHub accounts">
+  <div class="account-toolbar">
+    <span>Credentials stay in the desktop credential service or GitHub CLI.</span>
+    <button class="mini-button" type="button" [disabled]="store.state().kind === 'loading' || store.connecting() || oauthBusy() || store.disconnectingAccountId() !== null" (click)="store.load()">Refresh</button>
+  </div>
 
   @let state = store.state();
   @if (state.kind === 'loading' || state.kind === 'idle') {
     <p class="state-message" role="status">Loading GitHub accounts…</p>
   } @else if (state.kind === 'error') {
     <p class="state-message error" role="alert">{{ state.message }}</p>
-  } @else {
-    @if (state.accounts.length === 0) {
-      <p class="state-message">No GitHub account connected.</p>
-    } @else {
-      <ul aria-label="Connected GitHub accounts">
-        @for (account of state.accounts; track account.id) {
-          <li>
-            @if (account.avatarUrl) { <img [src]="account.avatarUrl" alt="" /> }
-            <span><strong>{{ account.login }}</strong><small>{{ account.host }}</small></span>
+  } @else if (state.accounts.length > 0) {
+    <ul aria-label="Connected GitHub accounts">
+      @for (account of state.accounts; track account.id) {
+        <li class="account-row">
+          @if (account.avatarUrl) { <img [src]="account.avatarUrl" alt="" /> } @else { <span class="avatar" aria-hidden="true"></span> }
+          <span class="account-identity">
+            <strong>{{ account.login }}</strong>
+            <small>{{ account.host }} · <span class="auth-kind" [class.cli]="account.authKind === 'gitHubCli'">{{ authKindLabel(account.authKind) }}</span>{{ account.authKind === 'gitHubCli' ? ' · managed by gh' : '' }}</small>
+          </span>
+          <span class="connected-badge">Connected</span>
+          @if (account.authKind !== 'gitHubCli') {
             <button
+              class="mini-button"
               type="button"
               [disabled]="store.disconnectingAccountId() !== null || store.connecting() || oauthBusy()"
               [attr.aria-label]="'Disconnect GitHub account ' + account.login"
               (click)="disconnect(account.id)"
             >{{ store.disconnectingAccountId() === account.id ? 'Disconnecting…' : 'Disconnect' }}</button>
-          </li>
-        }
-      </ul>
-    }
+          }
+        </li>
+      }
+    </ul>
+  } @else {
+    <p class="state-message">No GitHub account connected.</p>
   }
 
-  @let deviceFlow = store.deviceFlow();
-  <section class="device-flow" aria-labelledby="github-device-flow-heading">
-    <div>
-      <strong id="github-device-flow-heading">Connect with GitHub</strong>
-      <small>Sign in securely in your browser. No token is exposed in the interface.</small>
-    </div>
-    @if (deviceFlow.kind === 'idle') {
-      <button class="primary-button" type="button" [disabled]="store.connecting() || store.disconnectingAccountId() !== null" (click)="connectWithGitHub()">
-        Connect with GitHub
-      </button>
-    } @else if (deviceFlow.kind === 'starting') {
-      <button class="primary-button" type="button" disabled>Starting secure sign-in…</button>
-    } @else if (deviceFlow.kind === 'waiting') {
-      <div class="device-code" role="status">
-        <span>Enter this one-time code on GitHub</span>
-        <strong>{{ deviceFlow.userCode }}</strong>
-        <button class="secondary-button" type="button" (click)="copyUserCode(deviceFlow.userCode)">
-          <span aria-hidden="true">⧉</span> {{ codeCopied() ? 'Copied' : 'Copy code' }}
-        </button>
-      </div>
-      <div class="device-actions">
-        <button class="primary-button" type="button" (click)="openGitHubVerification()">
-          Open GitHub <span aria-hidden="true">↗</span>
-        </button>
-        <button class="secondary-button" type="button" (click)="cancelGitHubConnection()">Cancel</button>
-      </div>
-      <small class="polling-status" role="status">Waiting for authorization… This page updates automatically.</small>
-    } @else {
-      <p class="state-message error" role="alert">
-        {{ deviceFlow.kind === 'expired' ? 'The GitHub sign-in code expired.' : 'GitHub sign-in was denied.' }}
-      </p>
-      <button class="secondary-button" type="button" (click)="connectWithGitHub()">Try again</button>
-    }
-  </section>
+  <details class="add-account">
+    <summary>
+      <span class="add-mark" aria-hidden="true">＋</span>
+      <span>Add GitHub account</span>
+      <span class="summary-hint">OAuth, GitHub CLI or token</span>
+    </summary>
 
-  <details class="pat-fallback">
-    <summary>Advanced: connect with a personal access token</summary>
-    <form (submit)="$event.preventDefault(); connectPat()">
-      <label for="github-pat">Personal access token</label>
-      <div>
-        <input
-          id="github-pat"
-          type="password"
-          autocomplete="off"
-          spellcheck="false"
-          [value]="token()"
+    <div class="connection-options">
+      <section class="cli-flow" aria-labelledby="github-cli-heading">
+        <div>
+          <strong id="github-cli-heading">Use GitHub CLI</strong>
+          <small>Detect an existing <code>gh auth</code> session. Authentication remains managed by GitHub CLI.</small>
+        </div>
+        <button
+          class="secondary-button"
+          type="button"
           [disabled]="store.connecting() || oauthBusy() || store.disconnectingAccountId() !== null"
-          (input)="updateToken($any($event.target).value)"
-        />
-        <button type="submit" [disabled]="token().trim().length === 0 || store.connecting() || oauthBusy()">
-          {{ store.connecting() ? 'Connecting…' : 'Connect token' }}
+          (click)="connectCli()"
+        >
+          <span aria-hidden="true">⌘</span>
+          {{ store.connectingAuthKind() === 'gitHubCli' ? 'Detecting…' : cliConnected() ? 'Refresh GitHub CLI' : 'Use GitHub CLI' }}
         </button>
-      </div>
-      <small>The token is cleared from this form before the desktop bridge is called.</small>
-    </form>
+      </section>
+
+      @let deviceFlow = store.deviceFlow();
+      <section class="device-flow" aria-labelledby="github-device-flow-heading">
+        <div>
+          <strong id="github-device-flow-heading">Connect with GitHub</strong>
+          <small>Sign in securely in your browser. No token is exposed in the interface.</small>
+        </div>
+        @if (deviceFlow.kind === 'idle') {
+          <button class="primary-button" type="button" [disabled]="store.connecting() || store.disconnectingAccountId() !== null" (click)="connectWithGitHub()">Connect with GitHub</button>
+        } @else if (deviceFlow.kind === 'starting') {
+          <button class="primary-button" type="button" disabled>Starting secure sign-in…</button>
+        } @else if (deviceFlow.kind === 'waiting') {
+          <div class="device-code" role="status">
+            <span>Enter this one-time code on GitHub</span>
+            <strong>{{ deviceFlow.userCode }}</strong>
+            <button class="secondary-button" type="button" (click)="copyUserCode(deviceFlow.userCode)"><span aria-hidden="true">⧉</span> {{ codeCopied() ? 'Copied' : 'Copy code' }}</button>
+          </div>
+          <div class="device-actions">
+            <button class="primary-button" type="button" (click)="openGitHubVerification()">Open GitHub <span aria-hidden="true">↗</span></button>
+            <button class="secondary-button" type="button" (click)="cancelGitHubConnection()">Cancel</button>
+          </div>
+          <small class="polling-status" role="status">Waiting for authorization… This page updates automatically.</small>
+        } @else {
+          <p class="state-message error" role="alert">{{ deviceFlow.kind === 'expired' ? 'The GitHub sign-in code expired.' : 'GitHub sign-in was denied.' }}</p>
+          <button class="secondary-button" type="button" (click)="connectWithGitHub()">Try again</button>
+        }
+      </section>
+
+      <details class="pat-fallback">
+        <summary>Advanced: connect with a personal access token</summary>
+        <form (submit)="$event.preventDefault(); connectPat()">
+          <label for="github-pat">Personal access token</label>
+          <div>
+            <input id="github-pat" type="password" autocomplete="off" spellcheck="false" [value]="token()" [disabled]="store.connecting() || oauthBusy() || store.disconnectingAccountId() !== null" (input)="updateToken($any($event.target).value)" />
+            <button type="submit" [disabled]="token().trim().length === 0 || store.connecting() || oauthBusy()">{{ store.connecting() ? 'Connecting…' : 'Connect token' }}</button>
+          </div>
+          <small>The token is cleared before the desktop bridge is called.</small>
+        </form>
+      </details>
+    </div>
   </details>
+
   @if (store.mutationError()) {
     <p class="state-message error" role="alert">{{ store.mutationError() }}</p>
   }

@@ -3,6 +3,7 @@ mod navigation;
 mod remotes;
 mod runner;
 mod status;
+mod submodule;
 
 pub use history::{
     HistoryParseError, parse_changed_files, parse_commit_details_header, parse_commit_list,
@@ -16,3 +17,7 @@ pub use runner::{
     GitRunner,
 };
 pub use status::{StatusParseError, parse_porcelain_v2_z};
+pub use submodule::{
+    GitlinkIndexEntry, GitmodulesEntry, SubmoduleParseError, parse_gitlink_index_entries,
+    parse_gitmodules_config, sanitize_submodule_url,
+};

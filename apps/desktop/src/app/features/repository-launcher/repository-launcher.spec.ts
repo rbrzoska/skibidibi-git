@@ -9,6 +9,8 @@ import { RepositoryLauncher } from './repository-launcher';
 
 const rememberedRepository = {
   id: 'skibidibi-git',
+  repositoryGroupId: 'skibidibi-group',
+  worktreeRole: 'main' as const,
   canonicalPath: '/work/skibidibi-git',
   displayName: 'skibidibi-git',
   provider: 'github' as const,
@@ -19,9 +21,18 @@ const rememberedRepository = {
   githubHealth: { state: 'healthy' as const, issue: null, checkedAt: 10 },
   pinned: false,
   openCount: 1,
-  lastOpenedAt: Math.floor(Date.now() / 1000),
+  lastOpenedAt: 100,
   createdAt: 1,
   updatedAt: 10,
+};
+
+const linkedWorktree = {
+  ...rememberedRepository,
+  id: 'skibidibi-feature',
+  worktreeRole: 'linked' as const,
+  canonicalPath: '/work/skibidibi-feature',
+  displayName: 'skibidibi-feature',
+  lastOpenedAt: 200,
 };
 
 describe('RepositoryLauncher', () => {
@@ -29,12 +40,28 @@ describe('RepositoryLauncher', () => {
   let ipcInvoke: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
-    ipcInvoke = vi.fn().mockImplementation((command: string) => {
+    ipcInvoke = vi.fn().mockImplementation((command: string, request?: { repositoryPath?: string }) => {
       if (command === 'list_remembered_repositories') {
-        return Promise.resolve([rememberedRepository]);
+        return Promise.resolve([linkedWorktree, rememberedRepository]);
       }
       if (command === 'remember_repository') {
-        return Promise.resolve(rememberedRepository);
+        if (request?.repositoryPath === '/work/new-repository') {
+          return Promise.resolve({
+            ...rememberedRepository,
+            id: 'new-repository',
+            repositoryGroupId: 'new-group',
+            canonicalPath: '/work/new-repository',
+            displayName: 'new-repository',
+          });
+        }
+        return Promise.resolve(
+          request?.repositoryPath === linkedWorktree.canonicalPath
+            ? linkedWorktree
+            : rememberedRepository,
+        );
+      }
+      if (command === 'select_repository_directory') {
+        return Promise.resolve({ path: '/work/new-repository' });
       }
       return Promise.resolve({
         branch: { oid: 'abc', head: 'main', upstream: 'origin/main', ahead: 0, behind: 0, detached: false, unborn: false },
@@ -51,6 +78,7 @@ describe('RepositoryLauncher', () => {
       githubCancelDeviceFlow: vi.fn(),
       githubOpenDeviceVerification: vi.fn(),
       githubConnectPat: vi.fn(),
+      githubConnectCli: vi.fn(),
       githubDisconnectAccount: vi.fn(),
       githubListRepositories: vi.fn().mockResolvedValue({ repositories: [], nextCursor: null }),
       githubListPullRequests: vi.fn(),
@@ -77,10 +105,15 @@ describe('RepositoryLauncher', () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain('skibidibi-git');
-    expect(rows[0].textContent).toContain('GitHub connected');
+    expect(rows[0].textContent).toContain('PRs connected');
+    expect(rows[0].textContent).toContain('2 worktrees');
+    expect(rows[0].textContent).toContain('/work/skibidibi-feature');
+    expect(fixture.nativeElement.querySelectorAll('.worktree-row')).toHaveLength(2);
+    expect(fixture.nativeElement.textContent).toContain('/work/skibidibi-git');
+    expect(fixture.nativeElement.textContent).toContain('/work/skibidibi-feature');
   });
 
-  it('opens a remembered repository in its workspace', async () => {
+  it('opens the most recently used available worktree from the group header', async () => {
     const router = TestBed.inject(Router);
     const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
     const row = fixture.nativeElement.querySelector('.repository-row') as HTMLButtonElement;
@@ -88,22 +121,37 @@ describe('RepositoryLauncher', () => {
     row.click();
     await fixture.whenStable();
 
-    expect(TestBed.inject(RepositoryStatusStore).repositoryPath()).toContain('skibidibi-git');
+    expect(TestBed.inject(RepositoryStatusStore).repositoryPath()).toBe('/work/skibidibi-feature');
+    expect(navigate).toHaveBeenCalledWith(['/workspace', 'skibidibi-feature', 'history']);
+  });
+
+  it('opens the specific repository selected from the worktree list', async () => {
+    const router = TestBed.inject(Router);
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    const worktreeRows = fixture.nativeElement.querySelectorAll(
+      '.worktree-row',
+    ) as NodeListOf<HTMLButtonElement>;
+
+    worktreeRows[0].click();
+    await fixture.whenStable();
+
+    expect(ipcInvoke).toHaveBeenCalledWith('remember_repository', {
+      repositoryPath: '/work/skibidibi-git',
+    });
     expect(navigate).toHaveBeenCalledWith(['/workspace', 'skibidibi-git', 'history']);
   });
 
   it('remembers a newly selected repository exactly once', async () => {
     const router = TestBed.inject(Router);
     vi.spyOn(router, 'navigate').mockResolvedValue(true);
-    TestBed.inject(RepositoryStatusStore).setRepositoryPath('/work/new-repository');
-    fixture.detectChanges();
-
-    const open = fixture.nativeElement.querySelector('.open-workspace') as HTMLButtonElement;
-    open.click();
+    const addLocal = [...fixture.nativeElement.querySelectorAll('button')]
+      .find((button: HTMLButtonElement) => button.textContent?.includes('Add local')) as HTMLButtonElement;
+    addLocal.click();
     await fixture.whenStable();
 
     expect(
       ipcInvoke.mock.calls.filter(([command]) => command === 'remember_repository'),
     ).toHaveLength(1);
+    expect(TestBed.inject(RepositoryStatusStore).repositoryPath()).toBe('/work/new-repository');
   });
 });

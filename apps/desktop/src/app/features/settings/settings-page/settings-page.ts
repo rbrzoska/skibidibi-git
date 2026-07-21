@@ -1,9 +1,15 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal, viewChild } from '@angular/core';
 import { RouterLink } from '@angular/router';
 
-import { DESKTOP_IPC, type RepositoryMaintenanceStatisticsResponse } from '../../../core/ipc/desktop-ipc';
+import { AiSupportStore } from '../../../core/ai-support/ai-support.store';
+import {
+  DESKTOP_IPC,
+  type DiagnosticsSettingsResponse,
+  type RepositoryMaintenanceStatisticsResponse,
+} from '../../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../../core/repositories/repository-catalog';
 import { GitHubAccountControl } from '../../github';
+import { DiagnosticLogDialog } from '../diagnostic-log-dialog/diagnostic-log-dialog';
 import {
   browserWorkspaceRefreshStorage,
   readGlobalWorkspaceRefreshPreferences,
@@ -22,14 +28,16 @@ type MaintenanceScanState =
 
 @Component({
   selector: 'app-settings-page',
-  imports: [GitHubAccountControl, RouterLink],
+  imports: [DiagnosticLogDialog, GitHubAccountControl, RouterLink],
   templateUrl: './settings-page.html',
   styleUrl: './settings-page.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class SettingsPage {
   protected readonly catalog = inject(RepositoryCatalog);
+  protected readonly aiSupport = inject(AiSupportStore);
   private readonly maintenanceIpc = inject(DESKTOP_IPC);
+  private readonly diagnosticLogDialog = viewChild.required(DiagnosticLogDialog);
   private readonly storage = browserWorkspaceRefreshStorage();
   private readonly initialRefreshDefaults = readGlobalWorkspaceRefreshPreferences(this.storage);
 
@@ -38,6 +46,11 @@ export class SettingsPage {
   protected readonly liveChanges = signal(this.initialRefreshDefaults.liveChanges);
   protected readonly maintenanceScans = signal<ReadonlyMap<string, MaintenanceScanState>>(new Map());
   protected readonly scanAllRunning = signal(false);
+  protected readonly diagnosticsSettings = signal<DiagnosticsSettingsResponse | null>(null);
+  protected readonly diagnosticsLoading = signal(false);
+  protected readonly diagnosticsSaving = signal(false);
+  protected readonly diagnosticsError = signal<string | null>(null);
+  protected readonly diagnosticLogLimits = [64, 128, 256, 512, 1024, 2048, 4096, 8192] as const;
   protected readonly maintenanceRepositories = computed(() => {
     const states = this.maintenanceScans();
     return this.catalog.repositories()
@@ -50,8 +63,93 @@ export class SettingsPage {
   });
 
   constructor() {
+    void this.aiSupport.loadAvailability();
+    void this.loadDiagnosticsSettings();
     if (this.catalog.state().kind === 'idle') {
       void this.catalog.load();
+    }
+  }
+
+  protected async chooseDiagnosticsDirectory(): Promise<void> {
+    const current = this.diagnosticsSettings();
+    if (current === null || this.diagnosticsSaving()) {
+      return;
+    }
+    this.diagnosticsError.set(null);
+    try {
+      const selection = await this.maintenanceIpc.invoke('select_diagnostics_directory', {
+        initialPath: current.dataDirectory,
+      });
+      if (selection.path !== null) {
+        await this.updateDiagnosticsSettings(selection.path, current.maxLogKilobytes);
+      }
+    } catch (error) {
+      this.diagnosticsError.set(messageFrom(error, 'The data directory could not be selected.'));
+    }
+  }
+
+  protected async setDiagnosticLogLimit(value: string): Promise<void> {
+    const current = this.diagnosticsSettings();
+    const maxLogKilobytes = Number(value);
+    if (current === null || !this.diagnosticLogLimits.includes(maxLogKilobytes as typeof this.diagnosticLogLimits[number])) {
+      return;
+    }
+    await this.updateDiagnosticsSettings(current.dataDirectory, maxLogKilobytes);
+  }
+
+  protected async viewDiagnosticLog(): Promise<void> {
+    if (this.diagnosticsLoading()) {
+      return;
+    }
+    this.diagnosticsLoading.set(true);
+    this.diagnosticsError.set(null);
+    try {
+      this.diagnosticLogDialog().open(await this.maintenanceIpc.invoke('diagnostics_read', {}));
+    } catch (error) {
+      this.diagnosticsError.set(messageFrom(error, 'The diagnostic log could not be loaded.'));
+    } finally {
+      this.diagnosticsLoading.set(false);
+    }
+  }
+
+  protected async clearDiagnosticLog(): Promise<void> {
+    if (this.diagnosticsLoading()) {
+      return;
+    }
+    this.diagnosticsLoading.set(true);
+    this.diagnosticsError.set(null);
+    try {
+      await this.maintenanceIpc.invoke('diagnostics_clear', {});
+    } catch (error) {
+      this.diagnosticsError.set(messageFrom(error, 'The diagnostic log could not be cleared.'));
+    } finally {
+      this.diagnosticsLoading.set(false);
+    }
+  }
+
+  private async loadDiagnosticsSettings(): Promise<void> {
+    this.diagnosticsLoading.set(true);
+    try {
+      this.diagnosticsSettings.set(await this.maintenanceIpc.invoke('diagnostics_settings', {}));
+    } catch (error) {
+      this.diagnosticsError.set(messageFrom(error, 'Diagnostics settings could not be loaded.'));
+    } finally {
+      this.diagnosticsLoading.set(false);
+    }
+  }
+
+  private async updateDiagnosticsSettings(dataDirectory: string, maxLogKilobytes: number): Promise<void> {
+    this.diagnosticsSaving.set(true);
+    this.diagnosticsError.set(null);
+    try {
+      this.diagnosticsSettings.set(await this.maintenanceIpc.invoke('diagnostics_update_settings', {
+        dataDirectory,
+        maxLogKilobytes,
+      }));
+    } catch (error) {
+      this.diagnosticsError.set(messageFrom(error, 'Diagnostics settings could not be saved.'));
+    } finally {
+      this.diagnosticsSaving.set(false);
     }
   }
 
@@ -222,4 +320,8 @@ function parseCommitTimestamp(timestamp: string | null): number | null {
   }
   const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function messageFrom(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
 }

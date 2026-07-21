@@ -2,6 +2,7 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 
 import {
   GITHUB_BRIDGE,
+  type GitHubPullRequestScope,
   type GitHubPullRequestDetail,
   type GitHubPullRequestSummary,
 } from './github-bridge';
@@ -32,6 +33,7 @@ export class GitHubRepositoryPullRequestStore {
   private repositoryId: string | null = null;
   private accountId: string | null = null;
 
+  readonly scope = signal<GitHubPullRequestScope>('assignedToViewer');
   readonly listState = signal<GitHubPullRequestListState>({ kind: 'idle' });
   readonly detailState = signal<GitHubPullRequestDetailState>({ kind: 'idle' });
   readonly loadingMore = signal(false);
@@ -51,13 +53,26 @@ export class GitHubRepositoryPullRequestStore {
     }
     this.repositoryId = normalizedRepositoryId;
     this.accountId = normalizedAccountId;
+    this.invalidateContext();
+    return true;
+  }
+
+  setScope(scope: GitHubPullRequestScope): boolean {
+    if (this.scope() === scope) {
+      return false;
+    }
+    this.scope.set(scope);
+    this.invalidateContext();
+    return true;
+  }
+
+  private invalidateContext(): void {
     ++this.listGeneration;
     ++this.detailGeneration;
     this.loadingMore.set(false);
     this.paginationError.set('');
     this.listState.set({ kind: 'idle' });
     this.detailState.set({ kind: 'idle' });
-    return true;
   }
 
   async load(): Promise<void> {
@@ -131,7 +146,11 @@ export class GitHubRepositoryPullRequestStore {
     const generation = ++this.detailGeneration;
     this.detailState.set({ kind: 'loading', number });
     try {
-      const detail = await this.bridge.githubPullRequestDetail({ ...context, number });
+      const detail = await this.bridge.githubPullRequestDetail({
+        repositoryId: context.repositoryId,
+        accountId: context.accountId,
+        number,
+      });
       if (generation === this.detailGeneration && this.matches(context)) {
         this.detailState.set({ kind: 'ready', detail });
       }
@@ -147,14 +166,24 @@ export class GitHubRepositoryPullRequestStore {
     this.detailState.set({ kind: 'idle' });
   }
 
-  private context(): { readonly repositoryId: string; readonly accountId: string } | null {
+  private context(): {
+    readonly repositoryId: string;
+    readonly accountId: string;
+    readonly scope: GitHubPullRequestScope;
+  } | null {
     return this.repositoryId !== null && this.repositoryId.length > 0 && this.accountId !== null
-      ? { repositoryId: this.repositoryId, accountId: this.accountId }
+      ? { repositoryId: this.repositoryId, accountId: this.accountId, scope: this.scope() }
       : null;
   }
 
-  private matches(context: { readonly repositoryId: string; readonly accountId: string }): boolean {
-    return this.repositoryId === context.repositoryId && this.accountId === context.accountId;
+  private matches(context: {
+    readonly repositoryId: string;
+    readonly accountId: string;
+    readonly scope: GitHubPullRequestScope;
+  }): boolean {
+    return this.repositoryId === context.repositoryId &&
+      this.accountId === context.accountId &&
+      this.scope() === context.scope;
   }
 }
 

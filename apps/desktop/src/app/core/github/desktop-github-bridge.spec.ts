@@ -5,7 +5,7 @@ import { DESKTOP_IPC, type DesktopIpcClient } from '../ipc/desktop-ipc';
 import { DesktopGitHubBridge } from './desktop-github-bridge';
 
 describe('DesktopGitHubBridge', () => {
-  it('maps account metadata without exposing auth metadata to feature stores', async () => {
+  it('maps account metadata including the non-secret authentication source', async () => {
     const invoke = vi.fn().mockResolvedValue([{
       id: 'github.com:7',
       host: 'github.com',
@@ -32,6 +32,7 @@ describe('DesktopGitHubBridge', () => {
       login: 'octocat',
       avatarUrl: null,
       state: 'connected',
+      authKind: 'personalAccessToken',
     }]);
     expect(invoke).toHaveBeenCalledWith('github_list_accounts', {});
   });
@@ -43,6 +44,7 @@ describe('DesktopGitHubBridge', () => {
       login: 'octocat',
       avatarUrl: null,
       state: 'connected',
+      authKind: 'personalAccessToken',
     });
     TestBed.configureTestingModule({
       providers: [
@@ -55,6 +57,28 @@ describe('DesktopGitHubBridge', () => {
 
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledWith('github_connect_pat', { token: 'test-token' });
+  });
+
+  it('connects the active GitHub CLI session without renderer credentials', async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      id: 'github-cli:github.com:7:octocat',
+      host: 'github.com',
+      login: 'octocat',
+      avatarUrl: null,
+      state: 'connected',
+      authKind: 'gitHubCli',
+    });
+    TestBed.configureTestingModule({
+      providers: [
+        DesktopGitHubBridge,
+        { provide: DESKTOP_IPC, useValue: { invoke } as unknown as DesktopIpcClient },
+      ],
+    });
+
+    const account = await TestBed.inject(DesktopGitHubBridge).githubConnectCli();
+
+    expect(account.authKind).toBe('gitHubCli');
+    expect(invoke).toHaveBeenCalledWith('github_connect_cli', {});
   });
 
   it('uses opaque flow identifiers for the OAuth device flow IPC contract', async () => {

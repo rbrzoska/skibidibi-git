@@ -1,15 +1,44 @@
 :host { display: block; min-width: 0; }
-.github-pull-requests { display: grid; gap: .35rem; }
-header { display: flex; justify-content: space-between; color: #c9d1d9; font-size: .75rem; text-transform: uppercase; }
-header small, .list-state, .title small { color: #8b949e; font-size: .66rem; }
-.list-state { margin: 0; padding: .5rem .25rem; }
-.list-state.error { color: #ff7b72; }
-.list-state p { margin: 0 0 .35rem; }
-ul { display: grid; gap: .2rem; margin: 0; padding: 0; list-style: none; }
-li button { display: grid; gap: .3rem; width: 100%; border: 1px solid transparent; border-radius: .35rem; padding: .45rem; color: #b1bac4; background: transparent; text-align: left; cursor: pointer; }
-li button:hover, li button:focus-visible, li button.selected { outline: 0; border-color: #24496f; background: #162334; }
-.title { display: grid; min-width: 0; }
+.github-pull-requests { display: grid; gap: 4px; min-width: 0; color: var(--tx); font-family: var(--font-ui); }
+.pr-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 4px; min-width: 0; }
+.pr-scope { display: grid; grid-template-columns: 1fr 1fr; min-width: 0; height: var(--mini-h); overflow: hidden; border: 1px solid var(--bd); border-radius: var(--r-sm); background: var(--bg0); }
+.pr-scope button { min-width: 0; border: 0; padding: 0 5px; overflow: hidden; color: var(--tx3); background: transparent; font: 600 var(--fs-micro)/1 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.pr-scope button + button { border-left: 1px solid var(--bd); }
+.pr-scope button:hover, .pr-scope button:focus-visible { outline: 0; color: var(--tx); background: var(--bg2); }
+.pr-scope button:focus-visible { box-shadow: inset 0 0 0 1px var(--ac); }
+.pr-scope button.active { color: var(--tx); background: var(--acd); }
+.pr-count { min-width: 14px; color: var(--tx3); font: 600 var(--fs-micro)/1 var(--font-ui); text-align: center; }
+.refresh-cli, .load-more, .list-state button { display: inline-flex; align-items: center; justify-content: center; gap: 3px; height: var(--mini-h); border: 1px solid var(--bd); border-radius: var(--r-sm); padding: 0 5px; color: var(--tx2); background: var(--bg2); font: 600 var(--fs-micro)/1 var(--font-ui); cursor: pointer; }
+.refresh-cli:hover:not(:disabled), .refresh-cli:focus-visible, .load-more:hover:not(:disabled), .load-more:focus-visible, .list-state button:hover, .list-state button:focus-visible { outline: 0; border-color: var(--acb); color: var(--tx); }
+.refresh-cli:disabled, .load-more:disabled { cursor: wait; opacity: .5; }
+.list-state { display: grid; justify-items: center; gap: 6px; margin: 0; padding: 14px 8px; color: var(--tx3); font: var(--fs-xs)/1.35 var(--font-ui); text-align: center; }
+.list-state p { margin: 0; overflow-wrap: anywhere; }
+.list-state.error { color: var(--red); }
+.state-icon { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--bd); border-radius: 50%; color: var(--tx3); background: var(--bg2); font: 700 var(--fs-micro)/1 var(--font-ui); }
+.list-state.error .state-icon { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); background: var(--red-d); }
+.spinner { width: 14px; height: 14px; border: 2px solid var(--bd); border-top-color: var(--ac); border-radius: 50%; animation: pr-spin .8s linear infinite; }
+ul { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.pr-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: center; min-width: 0; border-radius: var(--r-sm); }
+.select-pr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; min-width: 0; width: 100%; min-height: 34px; border: 1px solid transparent; border-radius: var(--r-sm); padding: 3px 4px 3px 6px; color: var(--tx2); background: transparent; font: var(--fs-sm)/1.15 var(--font-ui); text-align: left; cursor: pointer; }
+.select-pr:hover, .select-pr:focus-visible { outline: 0; border-color: var(--bd); background: var(--bg2); }
+.select-pr:focus-visible { border-color: var(--acb); }
+.select-pr.selected { border-color: var(--acb); background: var(--acd); }
+.title { display: grid; gap: 3px; min-width: 0; }
 .title strong, .title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.badges { display: flex; flex-wrap: wrap; gap: .25rem; }
-.badges small { border-radius: 999px; padding: .08rem .3rem; color: #79c0ff; background: #1f6feb29; font-size: .58rem; }
-.load-more, .list-state button { justify-self: center; border: 1px solid #30363d; border-radius: .35rem; padding: .35rem .55rem; color: #c9d1d9; background: #21262d; cursor: pointer; }
+.title strong { color: var(--tx2); font-size: var(--fs-sm); font-weight: 600; }
+.selected .title strong { color: var(--tx); }
+.title small { color: var(--tx3); font: var(--fs-micro)/1 var(--font-mono); }
+.pr-number { color: var(--tx3); }
+.badges { display: flex; align-items: center; justify-content: flex-end; gap: 3px; }
+.badges small { border-radius: var(--r-xs); padding: 2px 3px; color: var(--ac); background: var(--acd); font: 600 var(--fs-micro)/1 var(--font-ui); white-space: nowrap; }
+.badges .comment-count { display: inline-flex; gap: 2px; color: var(--tx3); background: transparent; }
+.badges .draft { color: var(--cyan); background: var(--cyan-d); }
+.badges .mine { color: var(--green); background: var(--green-d); }
+.badges .review-requested { color: var(--amber); background: var(--amber-d); }
+.badges .unresolved { color: var(--red); background: var(--red-d); }
+.open-pr { display: grid; place-items: center; width: var(--mini-h); height: var(--mini-h); border-radius: var(--r-sm); color: var(--tx4); font: var(--fs-xs)/1 var(--font-ui); text-decoration: none; }
+.open-pr:hover, .open-pr:focus-visible { outline: 0; color: var(--ac); background: var(--acd); }
+.load-more { justify-self: center; margin-top: 3px; }
+@keyframes pr-spin { to { transform: rotate(360deg); } }
+@media (max-width: 270px) { .refresh-label { display: none; } .badges small:not(.comment-count) { display: none; } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }

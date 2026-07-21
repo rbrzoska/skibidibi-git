@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 
 import { GitHubRepositoryPullRequestStore } from '../../../core/github';
+import { SafeMarkdown } from './safe-markdown/safe-markdown';
 
 @Component({
   selector: 'app-github-pull-request-inspector',
-  imports: [],
+  imports: [SafeMarkdown],
   templateUrl: './github-pull-request-inspector.html',
   styleUrl: './github-pull-request-inspector.css',
   changeDetection: ChangeDetectionStrategy.OnPush,

@@ -6,6 +6,7 @@ export interface GitHubAccount {
   readonly host: string;
   readonly avatarUrl: string | null;
   readonly state: 'unknown' | 'connected' | 'authenticationRequired' | 'unavailable';
+  readonly authKind: 'personalAccessToken' | 'oAuthDevice' | 'gitHubCli';
 }
 
 export interface GitHubRepository {
@@ -35,6 +36,7 @@ export interface GitHubPullRequestSummary {
   readonly baseRefName: string;
   readonly updatedAt: string;
   readonly authoredByViewer: boolean;
+  readonly commentCount: number;
   readonly reviewRequestedFromViewer: boolean | null;
   readonly unresolvedThreadCount: number | null;
 }
@@ -75,9 +77,12 @@ export interface GitHubPullRequestDetail extends GitHubPullRequestSummary {
 export interface GitHubListPullRequestsRequest {
   readonly accountId: string;
   readonly repositoryId: string;
+  readonly scope: GitHubPullRequestScope;
   readonly cursor: string | null;
   readonly pageSize: number;
 }
+
+export type GitHubPullRequestScope = 'assignedToViewer' | 'authoredByViewer';
 
 export interface GitHubListPullRequestsResponse {
   readonly pullRequests: readonly GitHubPullRequestSummary[];
@@ -117,6 +122,7 @@ export interface GitHubBridge {
   githubCancelDeviceFlow(request: { readonly flowId: string }): Promise<{ readonly cancelled: boolean }>;
   githubOpenDeviceVerification(request: { readonly flowId: string }): Promise<void>;
   githubConnectPat(request: { readonly token: string }): Promise<GitHubAccount>;
+  githubConnectCli(): Promise<GitHubAccount>;
   githubDisconnectAccount(request: { readonly accountId: string }): Promise<{ readonly disconnected: boolean }>;
   githubListRepositories(request: { readonly accountId: string; readonly cursor: string | null; readonly pageSize: number }): Promise<GitHubRepositoryPage>;
   githubListPullRequests(request: GitHubListPullRequestsRequest): Promise<GitHubListPullRequestsResponse>;

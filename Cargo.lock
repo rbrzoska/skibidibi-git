@@ -1422,10 +1422,13 @@ name = "github-client"
 version = "0.1.0"
 dependencies = [
  "app-domain",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "url",
  "zeroize",
 ]
@@ -3728,6 +3731,7 @@ dependencies = [
  "app-domain",
  "app-store",
  "github-client",
+ "libc",
  "repo-runtime",
  "secret-store",
  "serde",
@@ -4415,8 +4419,21 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

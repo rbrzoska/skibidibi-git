@@ -4,7 +4,7 @@
   "scripts": {
     "ng": "ng",
     "start": "ng serve",
-    "build": "ng build",
+    "build": "ng build && node tools/verify-production-index.mjs",
     "watch": "ng build --watch --configuration development",
     "test": "ng test --watch=false",
     "lint": "ng lint"
@@ -18,6 +18,8 @@
     "@angular/forms": "22.0.6",
     "@angular/platform-browser": "22.0.6",
     "@angular/router": "22.0.6",
+    "dompurify": "^3.4.12",
+    "marked": "^18.0.6",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0"
   },

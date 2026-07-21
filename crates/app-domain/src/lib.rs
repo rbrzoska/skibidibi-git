@@ -1,3 +1,4 @@
+mod ai;
 mod branch_actions;
 mod branch_creation;
 mod branch_operations;
@@ -14,8 +15,13 @@ mod repository;
 mod stash_actions;
 mod stash_inspection;
 mod status;
+mod submodule;
 mod working_tree;
 
+pub use ai::{
+    AiCliStatus, AiCliStatuses, AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult,
+    AiProvider,
+};
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use branch_creation::{BranchCreationSource, CreateBranchRequest, CreateBranchResult};
 pub use branch_operations::{
@@ -59,8 +65,9 @@ pub use network_operations::{
 };
 pub use repository::{
     HostedRepositoryIdentity, IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState,
-    RememberRepositoryInput, RememberedRepository, RepositoryAvailability, RepositoryHealthUpdate,
-    RepositoryProvider, RepositoryTransport,
+    RememberRepositoryInput, RememberedRepository, RepositoryAvailability, RepositoryGitIdentity,
+    RepositoryGroupRelation, RepositoryHealthUpdate, RepositoryProvider, RepositoryRelationKind,
+    RepositoryTransport, RepositoryWorktreeRole,
 };
 pub use stash_actions::{
     ApplyStashRequest, ApplyStashResult, AutoStashCreateState, AutoStashOptions, AutoStashOutcome,
@@ -72,4 +79,7 @@ pub use stash_inspection::{
     StashChangedFile, StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource,
 };
 pub use status::{BranchStatus, RepositoryStatus, StatusCode, StatusEntry, StatusEntryKind};
+pub use submodule::{
+    RepositorySubmodule, RepositorySubmodules, SubmoduleCommitState, SubmoduleWorktreeState,
+};
 pub use working_tree::{WorkingTreeFileDiff, WorkingTreeFileDiffRequest};

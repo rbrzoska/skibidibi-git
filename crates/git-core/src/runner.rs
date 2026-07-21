@@ -363,6 +363,7 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ["rev-parse", "--verify", "ORIG_HEAD^{commit}"] => true,
         ["symbolic-ref", "--quiet", "--short", "HEAD"] => true,
         ["config", "--get", key] => safe_config_key(key),
+        ["config", "--null", "--file", ".gitmodules", "--list"] => true,
         ["remote"] => true,
         ["remote", "get-url", "--", remote] => safe_remote_name(remote),
         ["remote", "get-url", "--push", "--", remote] => safe_remote_name(remote),
@@ -373,6 +374,7 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ["diff", rest @ ..] => allowed_working_tree_diff(rest),
         ["hash-object", "-t", "tree", "--stdin"] => true,
         ["ls-files", "--stage", "-z"] => true,
+        ["ls-files", "-z", "--format=%(objectmode)"] => true,
         ["cat-file", "blob", oid] => valid_object_id(oid),
         ["merge-base", "--is-ancestor", oid, "HEAD"] => valid_object_id(oid),
         ["merge-base", "--is-ancestor", ancestor, descendant] => {
@@ -519,6 +521,21 @@ fn allowed_show(arguments: &[&str]) -> bool {
 }
 
 fn allowed_working_tree_diff(arguments: &[&str]) -> bool {
+    if arguments == ["--cached", "--name-only", "-z", "--"] {
+        return true;
+    }
+    if arguments
+        == [
+            "--cached",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=3",
+            "--",
+        ]
+    {
+        return true;
+    }
     let arguments = arguments.strip_prefix(&["--cached"]).unwrap_or(arguments);
     let [
         "--no-color",
@@ -727,6 +744,16 @@ mod tests {
             vec!["show", "--format=", oid, "--"],
             vec!["log", "-c", "diff.external=unsafe", oid],
             vec!["config", "--get", "diff.external.command"],
+            vec!["diff", "--cached", "--name-only", "--stat", "--"],
+            vec![
+                "diff",
+                "--cached",
+                "--no-color",
+                "--no-ext-diff",
+                "--textconv",
+                "--unified=3",
+                "--",
+            ],
             vec!["merge-base", "--is-ancestor", "0123456", "HEAD"],
             vec![
                 "merge-base",
@@ -768,6 +795,8 @@ mod tests {
             ],
             vec!["symbolic-ref", "--quiet", "--short", "HEAD"],
             vec!["config", "--get", "branch.feature/topic.remote"],
+            vec!["config", "--null", "--file", ".gitmodules", "--list"],
+            vec!["ls-files", "-z", "--format=%(objectmode)"],
             vec!["remote", "get-url", "--push", "--", "origin"],
             vec![
                 "for-each-ref",
@@ -790,6 +819,16 @@ mod tests {
             ],
             vec!["log", "-g", "--format=%H", "refs/stash"],
             vec!["show", "-s", "-z", "--format=%H", oid, "--"],
+            vec!["diff", "--cached", "--name-only", "-z", "--"],
+            vec![
+                "diff",
+                "--cached",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--unified=3",
+                "--",
+            ],
             vec![
                 "show",
                 "--format=",

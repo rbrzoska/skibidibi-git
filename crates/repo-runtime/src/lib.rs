@@ -1,3 +1,4 @@
+mod ai_context;
 mod branch_actions;
 mod branch_creation;
 mod branch_operations;
@@ -11,8 +12,13 @@ mod navigation;
 mod network_operations;
 mod stash_actions;
 mod stash_inspection;
+mod submodules;
 mod working_tree_diff;
 
+pub use ai_context::{
+    AiContextError, AiContextGitExecutor, StagedAiContext, staged_ai_context,
+    staged_ai_context_default,
+};
 pub use branch_actions::{BranchActionGitExecutor, BranchSwitchError};
 pub use branch_creation::{BranchCreationError, BranchCreationGitExecutor};
 pub use branch_operations::{BranchOperationError, BranchOperationGitExecutor};
@@ -32,6 +38,7 @@ pub use stash_inspection::{
     StashInspectionError, StashInspectionGitExecutor, StashInspectionQuery, stash_details,
     stash_file_diff,
 };
+pub use submodules::{SubmoduleGitExecutor, SubmoduleQuery, SubmodulesRuntimeError, submodules};
 pub use working_tree_diff::{
     WorkingTreeDiffGitExecutor, WorkingTreeDiffQuery, WorkingTreeDiffRuntimeError,
     working_tree_file_diff,

@@ -17,6 +17,7 @@ const MAX_PAGE_SIZE: u16 = 50;
 const MAX_PAGE_NUMBER: u32 = 10_000;
 const MAX_CURSOR_BYTES: usize = 1_024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const PULL_REQUESTS_QUERY: &str = include_str!("graphql/pull_requests.graphql");
 const REVIEW_THREADS_QUERY: &str = include_str!("graphql/review_threads.graphql");
 
 #[derive(Debug, Clone)]
@@ -51,18 +52,16 @@ impl GitHubClientConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PullRequestListState {
-    Open,
-    Closed,
-    All,
+pub enum PullRequestListScope {
+    AssignedToViewer,
+    AuthoredByViewer,
 }
 
-impl PullRequestListState {
-    fn as_query(self) -> &'static str {
+impl PullRequestListScope {
+    fn qualifier(self) -> &'static str {
         match self {
-            Self::Open => "open",
-            Self::Closed => "closed",
-            Self::All => "all",
+            Self::AssignedToViewer => "assignee",
+            Self::AuthoredByViewer => "author",
         }
     }
 }
@@ -136,30 +135,47 @@ impl<T: GitHubTransport> GitHubClient<T> {
         &self,
         owner: &str,
         repository: &str,
-        state: PullRequestListState,
+        viewer_login: &str,
+        scope: PullRequestListScope,
         page_size: u16,
         cursor: Option<&str>,
     ) -> Result<GitHubPage<PullRequestSummary>, GitHubClientError> {
+        validate_search_owner_or_login(owner, "repository owner")?;
+        validate_search_repository(repository)?;
+        validate_search_owner_or_login(viewer_login, "viewer login")?;
         validate_page_size(page_size)?;
-        let page = decode_page_cursor(cursor)?;
-        let expected_path = self.rest_path(&["repos", owner, repository, "pulls"])?;
-        let mut url = self.config.api_base_url.clone();
-        url.set_path(&expected_path);
-        url.query_pairs_mut()
-            .append_pair("state", state.as_query())
-            .append_pair("per_page", &page_size.to_string())
-            .append_pair("page", &page.to_string());
-        let response = self.get(url)?;
-        let items: Vec<RestPullRequest> = decode_json(&response)?;
-        let next_cursor = next_rest_cursor(
-            response.headers.get("link"),
-            &self.config.api_base_url,
-            &expected_path,
-        )?;
+        validate_graphql_cursor(cursor)?;
+        let query = format!(
+            "repo:{owner}/{repository} is:pr is:open {}:{viewer_login}",
+            scope.qualifier()
+        );
+        let body = serde_json::to_vec(&GraphQlRequest {
+            query: PULL_REQUESTS_QUERY,
+            variables: PullRequestListVariables {
+                query: &query,
+                first: page_size,
+                after: cursor,
+            },
+        })
+        .map_err(|_| invalid_response())?;
+        let response = self.execute(GitHubRequest {
+            method: GitHubMethod::Post,
+            url: self.config.graphql_url.clone(),
+            headers: BTreeMap::new(),
+            body: Some(body),
+        })?;
+        let rate = rate_limit(&response.headers);
+        let envelope: PullRequestListEnvelope = decode_json(&response)?;
+        reject_graphql_errors(envelope.errors, &rate)?;
+        let pulls = envelope
+            .data
+            .map(|data| data.search)
+            .ok_or_else(invalid_response)?;
+        let next_cursor = graphql_next_cursor(&pulls.page_info)?;
         Ok(GitHubPage {
-            items: items.into_iter().map(Into::into).collect(),
+            items: pulls.nodes.into_iter().map(Into::into).collect(),
             next_cursor,
-            rate_limit: rate_limit(&response.headers),
+            rate_limit: rate,
         })
     }
 
@@ -235,9 +251,7 @@ impl<T: GitHubTransport> GitHubClient<T> {
         validate_identity(repository, "repository name")?;
         validate_number(number)?;
         validate_page_size(page_size)?;
-        if cursor.is_some_and(|value| value.len() > MAX_CURSOR_BYTES) {
-            return Err(invalid_request("the pagination cursor is too long"));
-        }
+        validate_graphql_cursor(cursor)?;
         let body = serde_json::to_vec(&GraphQlRequest {
             query: REVIEW_THREADS_QUERY,
             variables: ReviewThreadVariables {
@@ -257,18 +271,7 @@ impl<T: GitHubTransport> GitHubClient<T> {
         })?;
         let rate = rate_limit(&response.headers);
         let envelope: GraphQlEnvelope = decode_json(&response)?;
-        if let Some(errors) = envelope.errors.filter(|errors| !errors.is_empty()) {
-            if errors.iter().any(GraphQlError::is_rate_limited) {
-                let mut error = GitHubClientError::new(
-                    GitHubErrorCode::RateLimited,
-                    "the GitHub rate limit was reached",
-                );
-                error.retryable = true;
-                error.rate_limit = Some(rate);
-                return Err(error);
-            }
-            return Err(invalid_response());
-        }
+        reject_graphql_errors(envelope.errors, &rate)?;
         let threads = envelope
             .data
             .and_then(|data| data.repository)
@@ -277,10 +280,7 @@ impl<T: GitHubTransport> GitHubClient<T> {
             .ok_or_else(invalid_response)?;
         Ok(GitHubPage {
             items: threads.nodes.into_iter().map(Into::into).collect(),
-            next_cursor: threads
-                .page_info
-                .end_cursor
-                .filter(|_| threads.page_info.has_next_page),
+            next_cursor: graphql_next_cursor(&threads.page_info)?,
             rate_limit: rate,
         })
     }
@@ -376,6 +376,32 @@ fn validate_identity(value: &str, field: &'static str) -> Result<(), GitHubClien
     Ok(())
 }
 
+fn validate_search_owner_or_login(
+    value: &str,
+    field: &'static str,
+) -> Result<(), GitHubClientError> {
+    validate_identity(value, field)?;
+    if value.len() > 100
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(invalid_request(field));
+    }
+    Ok(())
+}
+
+fn validate_search_repository(value: &str) -> Result<(), GitHubClientError> {
+    validate_identity(value, "repository name")?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(invalid_request("repository name"));
+    }
+    Ok(())
+}
+
 fn validate_number(number: u64) -> Result<(), GitHubClientError> {
     if number == 0 || number > i32::MAX as u64 {
         return Err(invalid_request("the pull request number is invalid"));
@@ -388,6 +414,45 @@ fn validate_page_size(page_size: u16) -> Result<(), GitHubClientError> {
         return Err(invalid_request("page size must be between 1 and 50"));
     }
     Ok(())
+}
+
+fn validate_graphql_cursor(cursor: Option<&str>) -> Result<(), GitHubClientError> {
+    if cursor.is_some_and(|value| value.is_empty() || value.len() > MAX_CURSOR_BYTES) {
+        return Err(invalid_request("the pagination cursor is invalid"));
+    }
+    Ok(())
+}
+
+fn graphql_next_cursor(page_info: &GraphQlPageInfo) -> Result<Option<String>, GitHubClientError> {
+    if !page_info.has_next_page {
+        return Ok(None);
+    }
+    page_info
+        .end_cursor
+        .as_ref()
+        .filter(|cursor| !cursor.is_empty() && cursor.len() <= MAX_CURSOR_BYTES)
+        .cloned()
+        .map(Some)
+        .ok_or_else(invalid_response)
+}
+
+fn reject_graphql_errors(
+    errors: Option<Vec<GraphQlError>>,
+    rate: &GitHubRateLimit,
+) -> Result<(), GitHubClientError> {
+    let Some(errors) = errors.filter(|errors| !errors.is_empty()) else {
+        return Ok(());
+    };
+    if errors.iter().any(GraphQlError::is_rate_limited) {
+        let mut error = GitHubClientError::new(
+            GitHubErrorCode::RateLimited,
+            "the GitHub rate limit was reached",
+        );
+        error.retryable = true;
+        error.rate_limit = Some(rate.clone());
+        return Err(error);
+    }
+    Err(invalid_response())
 }
 
 fn decode_page_cursor(cursor: Option<&str>) -> Result<u32, GitHubClientError> {
@@ -426,7 +491,7 @@ fn next_rest_cursor(
             .ok_or_else(invalid_response)?;
         let target = Url::parse(target).map_err(|_| invalid_response())?;
         if !same_origin(base, &target)
-            || target.path() != expected_path
+            || !is_allowed_pagination_path(target.path(), expected_path)
             || !target.username().is_empty()
             || target.password().is_some()
         {
@@ -441,6 +506,34 @@ fn next_rest_cursor(
         return Ok(Some(format!("page:{page}")));
     }
     Ok(None)
+}
+
+fn is_allowed_pagination_path(target: &str, expected: &str) -> bool {
+    if target == expected {
+        return true;
+    }
+    let Some((prefix, named_repository)) = expected.rsplit_once("/repos/") else {
+        return false;
+    };
+    let named_segments = named_repository.split('/').collect::<Vec<_>>();
+    if named_segments.len() != 3
+        || named_segments[0].is_empty()
+        || named_segments[1].is_empty()
+        || named_segments[2] != "pulls"
+    {
+        return false;
+    }
+    let canonical_prefix = format!("{prefix}/repositories/");
+    let Some(canonical_repository) = target.strip_prefix(&canonical_prefix) else {
+        return false;
+    };
+    let canonical_segments = canonical_repository.split('/').collect::<Vec<_>>();
+    canonical_segments.len() == 2
+        && !canonical_segments[0].is_empty()
+        && canonical_segments[0]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        && canonical_segments[1] == "pulls"
 }
 
 fn rate_limit(headers: &BTreeMap<String, String>) -> GitHubRateLimit {
@@ -685,9 +778,17 @@ impl From<RestIssueComment> for IssueComment {
 }
 
 #[derive(Serialize)]
-struct GraphQlRequest<'a> {
+struct GraphQlRequest<V> {
     query: &'static str,
-    variables: ReviewThreadVariables<'a>,
+    variables: V,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestListVariables<'a> {
+    query: &'a str,
+    first: u16,
+    after: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -704,6 +805,45 @@ struct ReviewThreadVariables<'a> {
 struct GraphQlEnvelope {
     data: Option<GraphQlData>,
     errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestListEnvelope {
+    data: Option<PullRequestListData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestListData {
+    search: GraphQlPullRequestConnection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlPullRequestConnection {
+    nodes: Vec<GraphQlPullRequestSummary>,
+    page_info: GraphQlPageInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlPullRequestSummary {
+    number: u64,
+    title: String,
+    state: String,
+    is_draft: bool,
+    author: Option<GraphQlUser>,
+    head_ref_name: String,
+    base_ref_name: String,
+    url: String,
+    updated_at: String,
+    comments: GraphQlTotalCount,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlTotalCount {
+    total_count: u64,
 }
 
 #[derive(Deserialize)]
@@ -803,6 +943,27 @@ impl From<GraphQlUser> for GitHubUser {
             login: user.login,
             display_name: user.name,
             avatar_url: user.avatar_url,
+        }
+    }
+}
+
+impl From<GraphQlPullRequestSummary> for PullRequestSummary {
+    fn from(pull: GraphQlPullRequestSummary) -> Self {
+        Self {
+            number: pull.number,
+            title: pull.title,
+            state: match pull.state.as_str() {
+                "OPEN" => PullRequestState::Open,
+                "MERGED" => PullRequestState::Merged,
+                _ => PullRequestState::Closed,
+            },
+            draft: pull.is_draft,
+            author: pull.author.map(Into::into),
+            head_ref: pull.head_ref_name,
+            base_ref: pull.base_ref_name,
+            html_url: pull.url,
+            updated_at: pull.updated_at,
+            comment_count: pull.comments.total_count,
         }
     }
 }
@@ -1006,35 +1167,172 @@ mod tests {
     }
 
     #[test]
-    fn returns_a_bounded_opaque_cursor_from_a_same_origin_link() {
-        let mut response = response(200, "[]");
-        response.headers.insert(
-            "link".into(),
-            "<https://api.github.test/api/v3/repos/acme/widget/pulls?page=2&per_page=20>; rel=\"next\"".into(),
+    fn lists_pull_requests_with_accurate_conversation_comment_counts_in_one_request() {
+        let response = response(
+            200,
+            r#"{"data":{"search":{
+              "nodes":[{
+                "number":17,"title":"Accurate comments","state":"OPEN","isDraft":false,
+                "author":{"databaseId":42,"login":"octo","name":"Octo","avatarUrl":null},
+                "headRefName":"feature/comments","baseRefName":"main",
+                "url":"https://github.test/acme/widget/pull/17",
+                "updatedAt":"2026-07-17T08:30:00Z",
+                "comments":{"totalCount":7}
+              }],
+              "pageInfo":{"hasNextPage":true,"endCursor":"cursor-2"}
+            }}}"#,
         );
         let client = client(vec![response]);
 
         let page = client
-            .list_pull_requests("acme", "widget", PullRequestListState::Open, 20, None)
+            .list_pull_requests(
+                "acme",
+                "widget",
+                "octo",
+                PullRequestListScope::AssignedToViewer,
+                20,
+                None,
+            )
             .unwrap();
 
-        assert_eq!(page.next_cursor.as_deref(), Some("page:2"));
+        assert_eq!(page.items[0].comment_count, 7);
+        assert_eq!(page.items[0].number, 17);
+        assert_eq!(page.items[0].title, "Accurate comments");
+        assert_eq!(page.items[0].state, PullRequestState::Open);
+        assert!(!page.items[0].draft);
+        assert_eq!(page.items[0].author.as_ref().unwrap().login, "octo");
+        assert_eq!(page.items[0].head_ref, "feature/comments");
+        assert_eq!(page.items[0].base_ref, "main");
+        assert_eq!(
+            page.items[0].html_url,
+            "https://github.test/acme/widget/pull/17"
+        );
+        assert_eq!(page.items[0].updated_at, "2026-07-17T08:30:00Z");
+        assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
+        let requests = client.transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, GitHubMethod::Post);
+        assert_eq!(requests[0].url.path(), "/api/graphql");
+        let body: serde_json::Value =
+            serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["query"], PULL_REQUESTS_QUERY);
+        assert_eq!(
+            body["variables"]["query"],
+            "repo:acme/widget is:pr is:open assignee:octo"
+        );
+        assert_eq!(body["variables"]["first"], 20);
+        assert!(body["variables"]["after"].is_null());
     }
 
     #[test]
-    fn rejects_a_cross_origin_pagination_link() {
-        let mut response = response(200, "[]");
-        response.headers.insert(
-            "link".into(),
-            "<https://attacker.test/api/v3/repos/acme/widget/pulls?page=2>; rel=\"next\"".into(),
+    fn pull_request_graphql_pagination_forwards_cursor_and_authored_scope() {
+        let response = response(
+            200,
+            r#"{"data":{"search":{
+              "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}}"#,
         );
         let client = client(vec![response]);
 
-        let error = client
-            .list_pull_requests("acme", "widget", PullRequestListState::Open, 20, None)
-            .unwrap_err();
+        let page = client
+            .list_pull_requests(
+                "acme",
+                "widget",
+                "octo",
+                PullRequestListScope::AuthoredByViewer,
+                50,
+                Some("cursor-1"),
+            )
+            .unwrap();
 
-        assert_eq!(error.code, GitHubErrorCode::InvalidResponse);
+        assert!(page.next_cursor.is_none());
+        let requests = client.transport.requests.lock().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            body["variables"]["query"],
+            "repo:acme/widget is:pr is:open author:octo"
+        );
+        assert_eq!(body["variables"]["after"], "cursor-1");
+    }
+
+    #[test]
+    fn rejects_unrelated_or_malformed_canonical_pagination_paths() {
+        assert!(!is_allowed_pagination_path(
+            "/api/v3/repositories/108991260/issues",
+            "/api/v3/repos/rspective/voucherify-mono/pulls"
+        ));
+        assert!(!is_allowed_pagination_path(
+            "/api/v3/repositories/not-a-number/pulls",
+            "/api/v3/repos/rspective/voucherify-mono/pulls"
+        ));
+    }
+
+    #[test]
+    fn pull_request_listing_rejects_invalid_cursors_before_transport() {
+        let client = client(Vec::new());
+        for cursor in [String::new(), "x".repeat(MAX_CURSOR_BYTES + 1)] {
+            let error = client
+                .list_pull_requests(
+                    "acme",
+                    "widget",
+                    "octo",
+                    PullRequestListScope::AssignedToViewer,
+                    20,
+                    Some(&cursor),
+                )
+                .unwrap_err();
+            assert_eq!(error.code, GitHubErrorCode::InvalidRequest);
+        }
+        assert!(client.transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pull_request_listing_rejects_a_missing_or_oversized_next_cursor() {
+        for cursor in [None, Some("x".repeat(MAX_CURSOR_BYTES + 1))] {
+            let body = serde_json::json!({
+                "data": {"search": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": true, "endCursor": cursor}
+                }}
+            })
+            .to_string();
+            let client = client(vec![response(200, &body)]);
+            let error = client
+                .list_pull_requests(
+                    "acme",
+                    "widget",
+                    "octo",
+                    PullRequestListScope::AssignedToViewer,
+                    20,
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, GitHubErrorCode::InvalidResponse);
+        }
+    }
+
+    #[test]
+    fn pull_request_scope_query_rejects_qualifier_injection_before_transport() {
+        let client = client(Vec::new());
+        for (owner, repository, viewer) in [
+            ("acme is:public", "widget", "octo"),
+            ("acme", "widget author:attacker", "octo"),
+            ("acme", "widget", "octo assignee:attacker"),
+        ] {
+            let error = client
+                .list_pull_requests(
+                    owner,
+                    repository,
+                    viewer,
+                    PullRequestListScope::AssignedToViewer,
+                    20,
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, GitHubErrorCode::InvalidRequest);
+        }
+        assert!(client.transport.requests.lock().unwrap().is_empty());
     }
 
     #[test]

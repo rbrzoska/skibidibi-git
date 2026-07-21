@@ -28,6 +28,7 @@ export class GitHubAccountStore {
 
   readonly state = signal<GitHubAccountState>({ kind: 'idle' });
   readonly connecting = signal(false);
+  readonly connectingAuthKind = signal<'personalAccessToken' | 'gitHubCli' | null>(null);
   readonly deviceFlow = signal<GitHubDeviceFlowState>({ kind: 'idle' });
   readonly disconnectingAccountId = signal<string | null>(null);
   readonly mutationError = signal('');
@@ -111,6 +112,7 @@ export class GitHubAccountStore {
     ++this.loadGeneration;
     const generation = ++this.mutationGeneration;
     this.connecting.set(true);
+    this.connectingAuthKind.set('personalAccessToken');
     this.mutationError.set('');
     try {
       const account = await this.bridge.githubConnectPat({ token: normalized });
@@ -132,12 +134,59 @@ export class GitHubAccountStore {
     } finally {
       if (generation === this.mutationGeneration) {
         this.connecting.set(false);
+        this.connectingAuthKind.set(null);
+      }
+    }
+  }
+
+  async connectCli(): Promise<boolean> {
+    if (this.connecting() || this.disconnectingAccountId() !== null || this.deviceFlowActive()) {
+      return false;
+    }
+    ++this.loadGeneration;
+    const generation = ++this.mutationGeneration;
+    this.connecting.set(true);
+    this.connectingAuthKind.set('gitHubCli');
+    this.mutationError.set('');
+    try {
+      const account = await this.bridge.githubConnectCli();
+      if (generation !== this.mutationGeneration) {
+        return false;
+      }
+      const current = this.state();
+      const accounts = current.kind === 'ready' ? current.accounts : [];
+      this.state.set({
+        kind: 'ready',
+        accounts: [account, ...accounts.filter((candidate) => candidate.id !== account.id)],
+      });
+      return true;
+    } catch (error) {
+      if (generation === this.mutationGeneration) {
+        this.mutationError.set(errorMessage(
+          error,
+          'GitHub CLI could not be detected. Install gh and run “gh auth login”, then try again.',
+        ));
+      }
+      return false;
+    } finally {
+      if (generation === this.mutationGeneration) {
+        this.connecting.set(false);
+        this.connectingAuthKind.set(null);
       }
     }
   }
 
   async disconnect(accountId: string): Promise<void> {
     if (accountId.length === 0 || this.connecting() || this.disconnectingAccountId() !== null || this.deviceFlowActive()) {
+      return;
+    }
+    const currentAccountState = this.state();
+    if (
+      currentAccountState.kind === 'ready' &&
+      currentAccountState.accounts.some(
+        (account) => account.id === accountId && account.authKind === 'gitHubCli',
+      )
+    ) {
       return;
     }
     ++this.loadGeneration;
@@ -170,6 +219,7 @@ export class GitHubAccountStore {
     ++this.loadGeneration;
     ++this.mutationGeneration;
     this.connecting.set(false);
+    this.connectingAuthKind.set(null);
     this.disconnectingAccountId.set(null);
     this.clearDeviceFlowTimer();
     this.deviceFlow.set({ kind: 'idle' });

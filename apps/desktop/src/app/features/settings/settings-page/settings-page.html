@@ -1,28 +1,17 @@
 <main class="settings">
-  <a class="back-link" routerLink="/repositories"><span aria-hidden="true">←</span> Back to repositories</a>
   <header class="page-heading">
-    <p class="eyebrow">application preferences</p>
     <h1>Settings</h1>
-    <p>Accounts, background activity, cloning defaults, and local repository maintenance.</p>
+    <a class="back-link" routerLink="/repositories"><span aria-hidden="true">←</span> Repositories</a>
   </header>
 
-  <section class="settings-card account-card" aria-labelledby="accounts-heading">
-    <div class="section-heading">
-      <div><p class="eyebrow">integrations</p><h2 id="accounts-heading">GitHub accounts</h2></div>
-    </div>
-    <app-github-account-control />
+  <section class="settings-section account-card" aria-labelledby="accounts-heading">
+    <h2 id="accounts-heading">GitHub accounts</h2>
+    <div class="settings-card"><app-github-account-control /></div>
   </section>
 
-  <section class="settings-card" aria-labelledby="refresh-heading">
-    <div class="section-heading">
-      <div><p class="eyebrow">workspace behavior</p><h2 id="refresh-heading">Refresh defaults</h2></div>
-    </div>
-    <p class="section-copy">Used as defaults for repositories without their own saved preference. Existing repository choices are never overwritten.</p>
-    <div class="setting-list">
-      <label class="setting-row">
-        <span><strong>Show only current</strong><small>Start with unrelated branches and worktrees hidden.</small></span>
-        <input type="checkbox" [checked]="currentOnly()" (change)="setRefreshDefault('currentOnly', $any($event.target).checked)" />
-      </label>
+  <section class="settings-section" aria-labelledby="refresh-heading">
+    <h2 id="refresh-heading">Defaults</h2>
+    <div class="settings-card setting-list">
       <label class="setting-row">
         <span><strong>Auto fetch</strong><small>Fetch remotes every minute while a workspace is open.</small></span>
         <input type="checkbox" [checked]="autoFetch()" (change)="setRefreshDefault('autoFetch', $any($event.target).checked)" />
@@ -31,25 +20,106 @@
         <span><strong>Live working tree</strong><small>Watch the active workspace for file changes.</small></span>
         <input type="checkbox" [checked]="liveChanges()" (change)="setRefreshDefault('liveChanges', $any($event.target).checked)" />
       </label>
+      <label class="setting-row">
+        <span><strong>Current branch only</strong><small>Start with unrelated branches and worktrees hidden in very large repositories.</small></span>
+        <input type="checkbox" [checked]="currentOnly()" (change)="setRefreshDefault('currentOnly', $any($event.target).checked)" />
+      </label>
     </div>
   </section>
 
-  <section class="settings-card" aria-labelledby="clone-heading">
-    <div class="section-heading">
-      <div><p class="eyebrow">new repositories</p><h2 id="clone-heading">Cloning preferences</h2></div>
+  <section class="settings-section" aria-labelledby="ai-support-heading">
+    <h2 id="ai-support-heading">AI Support</h2>
+    <div class="settings-card ai-support-card">
+      <p class="ai-privacy-copy">AI commit-message generation runs through the enabled CLI installed on this computer. The staged diff and this prompt are passed only to the selected provider.</p>
+
+      <label class="ai-prompt-field" for="ai-commit-prompt">
+        <span><strong>Commit prompt template</strong><small>Used for every generated message. Keep it concise; generated messages are always inserted for review before committing.</small></span>
+        <textarea id="ai-commit-prompt" rows="3" maxlength="4096" [value]="aiSupport.promptTemplate()" (input)="aiSupport.updatePromptTemplate($any($event.target).value)"></textarea>
+      </label>
+      <div class="ai-prompt-actions">
+        <small>{{ aiSupport.promptTemplate().length }} / 4096 characters</small>
+        <button type="button" class="compact-button" (click)="aiSupport.resetPromptTemplate()">Reset prompt</button>
+      </div>
+
+      <div class="ai-provider-list" aria-label="Available AI command line tools">
+        @for (status of aiSupport.providerStatuses(); track status.provider) {
+          <div class="ai-provider-row">
+            <span class="ai-provider-copy">
+              <strong>{{ status.displayName }}</strong>
+              <small>
+                @if (status.available) {
+                  Available @if (status.version !== null) { · {{ status.version }} }
+                } @else if (aiSupport.availabilityLoading()) {
+                  Checking…
+                } @else {
+                  Unavailable
+                }
+              </small>
+              @if (status.detail !== null) {
+                <small class="ai-provider-detail">{{ status.detail }}</small>
+              }
+            </span>
+            @if (status.available) {
+              <label class="provider-toggle">
+                <span>Enable</span>
+                <input type="checkbox" [checked]="aiSupport.isProviderEnabled(status.provider)" (change)="aiSupport.setProviderEnabled(status.provider, $any($event.target).checked)" [attr.aria-label]="'Enable ' + status.displayName + ' commit-message generation'" />
+              </label>
+            } @else {
+              <span class="ai-unavailable">CLI not detected</span>
+            }
+          </div>
+        }
+      </div>
+      @if (aiSupport.availabilityError() !== null) {
+        <p class="ai-availability-error" role="alert">{{ aiSupport.availabilityError() }}</p>
+      }
     </div>
-    <p class="section-copy">The clone dialog will remember the preferred parent directory and transport (SSH or HTTPS). Credentials remain in the operating system credential service and are never stored here.</p>
   </section>
 
-  <section class="settings-card" aria-labelledby="maintenance-heading">
+  <section class="settings-section" aria-labelledby="diagnostics-heading">
+    <h2 id="diagnostics-heading">Diagnostics &amp; application data</h2>
+    <div class="settings-card diagnostics-card">
+      <p class="diagnostics-copy">Native settings and redacted diagnostic events are stored in the user data directory. Logs never contain prompts, diffs, tokens, CLI output, or raw CLI errors.</p>
+      @if (diagnosticsSettings(); as diagnostics) {
+        <div class="diagnostics-setting-row">
+          <span class="diagnostics-label"><strong>Data directory</strong><small>Defaults to <code>~/.skibidibi-git</code>. Selecting another existing folder starts using it immediately.</small></span>
+          <span class="directory-control">
+            <code [title]="diagnostics.dataDirectory">{{ diagnostics.dataDirectory }}</code>
+            <button type="button" class="compact-button" [disabled]="diagnosticsSaving()" (click)="chooseDiagnosticsDirectory()">Choose…</button>
+          </span>
+        </div>
+        <label class="diagnostics-setting-row">
+          <span class="diagnostics-label"><strong>Diagnostic log limit</strong><small>One current and one rotated JSONL file are retained.</small></span>
+          <select [value]="diagnostics.maxLogKilobytes" [disabled]="diagnosticsSaving()" (change)="setDiagnosticLogLimit($any($event.target).value)">
+            @for (limit of diagnosticLogLimits; track limit) {
+              <option [value]="limit">{{ limit >= 1024 ? (limit / 1024) + ' MiB' : limit + ' KiB' }}</option>
+            }
+          </select>
+        </label>
+        <div class="diagnostic-file-row">
+          <span><small>Log file</small><code [title]="diagnostics.logFile">{{ diagnostics.logFile }}</code></span>
+          <span class="diagnostic-actions">
+            <button type="button" class="compact-button" [disabled]="diagnosticsLoading()" (click)="viewDiagnosticLog()">View log</button>
+            <button type="button" class="compact-button" [disabled]="diagnosticsLoading()" (click)="clearDiagnosticLog()">Clear log</button>
+          </span>
+        </div>
+      } @else if (diagnosticsLoading()) {
+        <p class="catalog-message" role="status">Loading diagnostics settings…</p>
+      }
+      @if (diagnosticsError() !== null) {
+        <p class="ai-availability-error" role="alert">{{ diagnosticsError() }}</p>
+      }
+    </div>
+  </section>
+
+  <section class="settings-section" aria-labelledby="maintenance-heading">
     <div class="section-heading">
-      <div><p class="eyebrow">local storage</p><h2 id="maintenance-heading">Repository maintenance</h2></div>
+      <h2 id="maintenance-heading">Storage — repository &amp; worktree size / age</h2>
       <div class="maintenance-actions">
         <button type="button" class="compact-button" [disabled]="scanAllRunning() || catalog.state().kind === 'loading'" (click)="scanAllRepositories()">{{ scanAllRunning() ? 'Scanning…' : 'Scan all' }}</button>
         <button type="button" class="compact-button" [disabled]="catalog.state().kind === 'loading'" (click)="catalog.load()">Refresh</button>
       </div>
     </div>
-    <p class="section-copy">Run an explicit on-demand scan to find large repositories and worktrees whose branches have not received commits recently. Scanned repositories are shown oldest first; unscanned repositories stay below them.</p>
 
     @let catalogState = catalog.state();
     @if (catalogState.kind === 'loading' || catalogState.kind === 'idle') {
@@ -59,14 +129,23 @@
     } @else if (catalog.repositories().length === 0) {
       <p class="catalog-message">No remembered repositories yet.</p>
     } @else {
-      <ul class="repository-list" aria-label="Remembered repository maintenance summary">
+      <div class="maintenance-table-header" aria-hidden="true">
+        <span>Location</span><span>Kind / availability</span><span>Size</span><span>Last active</span><span></span>
+      </div>
+      <ul class="repository-list settings-card" aria-label="Remembered repository maintenance summary">
         @for (repository of maintenanceRepositories(); track repository.id) {
           <li class="repository-maintenance-row">
             @let scan = maintenanceState(repository.id);
             <div class="repository-summary">
-              <span class="provider-mark" [class.local]="repository.provider === 'local'">{{ repository.provider === 'github' ? 'GH' : 'L' }}</span>
               <span class="repository-identity"><strong>{{ repository.name }}</strong><small>{{ repository.path }}</small></span>
-              <span class="repository-meta"><strong>{{ repository.lastOpenedLabel }}</strong><small>{{ repository.provider }} · {{ availabilityLabel(repository.availability) }}</small></span>
+              <span class="repository-meta"><strong>Repository</strong><small>{{ repository.provider }} · {{ availabilityLabel(repository.availability) }}</small></span>
+              @if (scan.kind === 'ready') {
+                <span class="repository-size">{{ formatBytes(scan.stats.repositoryBytes) }}</span>
+                <span class="repository-age"><strong>{{ staleLabel(scan.stats.repositoryLastCommitAt, scan.stats.scannedAt) }}</strong><small>{{ formatCommitTimestamp(scan.stats.repositoryLastCommitAt) }}</small></span>
+              } @else {
+                <span class="repository-size">—</span>
+                <span class="repository-age"><strong>{{ repository.lastOpenedLabel }}</strong><small>Not scanned</small></span>
+              }
               <button
                 type="button"
                 class="compact-button scan-button"
@@ -81,11 +160,9 @@
             } @else if (scan.kind === 'ready') {
               <div class="scan-results">
                 <dl class="size-summary">
-                  <div><dt>Repository</dt><dd>{{ formatBytes(scan.stats.repositoryBytes) }}</dd></div>
                   <div><dt>Git data</dt><dd>{{ formatBytes(scan.stats.gitBytes) }}</dd></div>
-                  <div><dt>Worktrees</dt><dd>{{ formatBytes(scan.stats.worktreeBytes) }}</dd></div>
+                  <div><dt>All worktrees</dt><dd>{{ formatBytes(scan.stats.worktreeBytes) }}</dd></div>
                   <div><dt>Scanned</dt><dd><time [attr.datetime]="timestampIso(scan.stats.scannedAt)">{{ formatTimestamp(scan.stats.scannedAt) }}</time></dd></div>
-                  <div class="commit-age"><dt>Repository last commit</dt><dd><time [attr.datetime]="commitTimestampIso(scan.stats.repositoryLastCommitAt)">{{ formatCommitTimestamp(scan.stats.repositoryLastCommitAt) }}</time><small>{{ staleLabel(scan.stats.repositoryLastCommitAt, scan.stats.scannedAt) }}</small></dd></div>
                 </dl>
 
                 @if (scan.stats.worktrees.length === 0) {
@@ -108,3 +185,5 @@
     }
   </section>
 </main>
+
+<app-diagnostic-log-dialog />
