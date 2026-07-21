@@ -15,7 +15,8 @@
       {
         "title": "Skibidibi Git",
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "minHeight": 720
       }
     ],
     "security": {

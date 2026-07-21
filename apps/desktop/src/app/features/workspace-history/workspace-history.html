@@ -885,21 +885,24 @@
             }
           </section>
         }
-        @if (workingTreeMutationError()) {
-          <p class="working-tree-action-error" role="alert">{{ workingTreeMutationError() }}</p>
-        }
-        <header class="file-heading">
-          <div><span class="file-heading-label">Files</span><strong>{{ working.counts.total }} changed {{ working.counts.total === 1 ? 'file' : 'files' }}</strong></div>
-        </header>
-        <div class="index-actions" aria-label="Staging actions">
-          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageSelected" [title]="indexActionTitle(workingTreeCapabilities().stageSelectedAmbiguous)" (click)="applyIndexChange('stage', false)">{{ mutationInProgress('stage', 'selected') ? 'Staging…' : 'Stage selected' }}</button>
-          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('stage', true)">{{ mutationInProgress('stage', 'all') ? 'Staging…' : 'Stage all' }}</button>
-          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageSelected" [title]="indexActionTitle(workingTreeCapabilities().unstageSelectedAmbiguous)" (click)="applyIndexChange('unstage', false)">{{ mutationInProgress('unstage', 'selected') ? 'Unstaging…' : 'Unstage selected' }}</button>
-          <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('unstage', true)">{{ mutationInProgress('unstage', 'all') ? 'Unstaging…' : 'Unstage all' }}</button>
-        </div>
-        @if (workingTreeCapabilities().conflictedCount > 0) {
-          <p class="commit-hint conflicts">Resolve all conflicts before staging or unstaging changes.</p>
-        }
+        <div class="working-tree-layout">
+          <div class="working-tree-file-header">
+            @if (workingTreeMutationError()) {
+              <p class="working-tree-action-error" role="alert">{{ workingTreeMutationError() }}</p>
+            }
+            <header class="file-heading">
+              <div><span class="file-heading-label">Files</span><strong>{{ working.counts.total }} changed {{ working.counts.total === 1 ? 'file' : 'files' }}</strong></div>
+            </header>
+            <div class="index-actions" aria-label="Staging actions">
+              <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageSelected" [title]="indexActionTitle(workingTreeCapabilities().stageSelectedAmbiguous)" (click)="applyIndexChange('stage', false)">{{ mutationInProgress('stage', 'selected') ? 'Staging…' : 'Stage selected' }}</button>
+              <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('stage', true)">{{ mutationInProgress('stage', 'all') ? 'Staging…' : 'Stage all' }}</button>
+              <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageSelected" [title]="indexActionTitle(workingTreeCapabilities().unstageSelectedAmbiguous)" (click)="applyIndexChange('unstage', false)">{{ mutationInProgress('unstage', 'selected') ? 'Unstaging…' : 'Unstage selected' }}</button>
+              <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('unstage', true)">{{ mutationInProgress('unstage', 'all') ? 'Unstaging…' : 'Unstage all' }}</button>
+            </div>
+            @if (workingTreeCapabilities().conflictedCount > 0) {
+              <p class="commit-hint conflicts">Resolve all conflicts before staging or unstaging changes.</p>
+            }
+          </div>
         <div class="working-tree-file-groups">
           <section class="working-tree-file-group" aria-labelledby="staged-files-heading">
             <header>
@@ -983,6 +986,7 @@
             @else if (!workingTreeCapabilities().canCommit) { <p class="commit-hint">Stage at least one change before committing.</p> }
           }
         </section>
+        </div>
       } @else if (historySelection() === 'stash') {
         @let stashState = stashDetailState();
         @switch (stashState.kind) {

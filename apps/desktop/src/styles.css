@@ -242,7 +242,7 @@ button {
 .workspace .commit-copy small, .workspace .commit-row time, .workspace .commit-row code { color: #8b949e; font-size: .7rem; }
 .workspace .inspector h2 { margin-top: .6rem; overflow-wrap: anywhere; font-size: 1rem; line-height: 1.45; }
 .workspace .inspector { border-left: 1px solid #30363d; }
-.workspace .inspector > :not(.changed-files) { flex: 0 0 auto; }
+.workspace .inspector > :not(.changed-files):not(.working-tree-layout) { flex: 0 0 auto; }
 .workspace .inspector-heading { margin: -.8rem -.8rem 0; border-bottom: 1px solid #30363d; padding: .7rem .8rem; }
 .workspace .commit-overview { display: grid; gap: .8rem; border-bottom: 1px solid #30363d; padding: .85rem 0 1rem; }
 .workspace .working-tree-overview { display: grid; gap: .55rem; border-bottom: 1px solid #30363d; padding: .85rem 0 1rem; }

@@ -835,7 +835,9 @@ describe('WorkspaceHistory', () => {
     expect(inspector.querySelector('[aria-label="Staged files"]')?.textContent).toContain('renamed.ts');
     expect(inspector.querySelector('[aria-label="Unstaged files"]')?.textContent).toContain('modified.ts');
     expect(inspector.querySelectorAll('.working-tree-file-group')).toHaveLength(2);
-    expect(inspector.lastElementChild?.classList).toContain('commit-composer');
+    const workingTreeLayout = inspector.querySelector('.working-tree-layout') as HTMLElement;
+    expect(inspector.lastElementChild).toBe(workingTreeLayout);
+    expect(workingTreeLayout.lastElementChild?.classList).toContain('commit-composer');
 
     (inspector.querySelector('.changed-file') as HTMLButtonElement).click();
     await fixture.whenStable();
