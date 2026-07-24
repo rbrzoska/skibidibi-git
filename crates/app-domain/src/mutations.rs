@@ -48,6 +48,40 @@ pub struct ApplyIndexChangeResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiscardWorkingTreeChangesRequest {
+    pub entries: Vec<WorkingTreeEntrySelector>,
+    pub expected_head: Option<String>,
+    pub expected_head_name: Option<String>,
+    pub expected_detached: bool,
+    pub expected_unborn: bool,
+    pub expected_index_fingerprint: String,
+    pub expected_worktree_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardWorkingTreeHunkRequest {
+    pub entry: WorkingTreeEntrySelector,
+    /// Exact single-file patch hunk returned by the current working-tree diff endpoint.
+    pub patch: String,
+    pub expected_head: Option<String>,
+    pub expected_head_name: Option<String>,
+    pub expected_detached: bool,
+    pub expected_unborn: bool,
+    pub expected_index_fingerprint: String,
+    pub expected_worktree_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardWorkingTreeChangesResult {
+    pub discarded_entries: usize,
+    pub deleted_untracked_files: usize,
+    pub status: RepositoryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateCommitRequest {
     pub message: String,
     pub expected_head: Option<String>,

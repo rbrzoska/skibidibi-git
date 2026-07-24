@@ -2,7 +2,7 @@
 .app-bar { display: flex; align-items: center; gap: 12px; height: var(--topbar-h, 38px); border-bottom: 1px solid var(--bd, rgba(255,255,255,.075)); padding: 0 10px; background: var(--bg1, #181a20); -webkit-app-region: drag; }
 .app-bar a { color: var(--tx, #e6e8ee); text-decoration: none; -webkit-app-region: no-drag; }
 .product { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; font-size: var(--fs-base, 12px); letter-spacing: .02em; }
-.product-mark { width: 14px; height: 14px; border-radius: 4px; background: conic-gradient(from 200deg, var(--ac, #5b93ff), var(--purple, #a874f5), var(--cyan, #37b6c8), var(--ac, #5b93ff)); }
+.product-mark { display: block; width: 18px; height: 22px; object-fit: contain; filter: drop-shadow(0 2px 3px rgb(0 0 0 / 25%)); }
 .screen-tabs { display: flex; gap: 1px; border: 1px solid var(--bd, rgba(255,255,255,.075)); border-radius: 6px; padding: 2px; background: var(--bg2, #1e2128); -webkit-app-region: no-drag; }
 .screen-tabs a { display: inline-flex; align-items: center; height: 24px; border-radius: 4px; padding: 0 11px; color: var(--tx3, #697082); font-size: 11.5px; font-weight: 600; }
 .screen-tabs a:hover, .screen-tabs a:focus-visible { color: var(--tx, #e6e8ee); outline: none; }

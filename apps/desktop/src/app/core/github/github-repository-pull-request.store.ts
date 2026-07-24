@@ -4,6 +4,7 @@ import {
   GITHUB_BRIDGE,
   type GitHubPullRequestScope,
   type GitHubPullRequestDetail,
+  type GitHubPullRequestFile,
   type GitHubPullRequestSummary,
 } from './github-bridge';
 
@@ -23,6 +24,18 @@ export type GitHubPullRequestDetailState =
   | { readonly kind: 'ready'; readonly detail: GitHubPullRequestDetail }
   | { readonly kind: 'error'; readonly number: number; readonly message: string };
 
+export type GitHubPullRequestFilesState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading'; readonly number: number }
+  | { readonly kind: 'ready'; readonly number: number; readonly files: readonly GitHubPullRequestFile[]; readonly truncated: boolean }
+  | { readonly kind: 'error'; readonly number: number; readonly message: string };
+
+export type GitHubPullRequestApprovalState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'approving'; readonly number: number }
+  | { readonly kind: 'approved'; readonly number: number }
+  | { readonly kind: 'error'; readonly number: number; readonly message: string };
+
 const PAGE_SIZE = 30;
 
 @Injectable()
@@ -36,6 +49,8 @@ export class GitHubRepositoryPullRequestStore {
   readonly scope = signal<GitHubPullRequestScope>('assignedToViewer');
   readonly listState = signal<GitHubPullRequestListState>({ kind: 'idle' });
   readonly detailState = signal<GitHubPullRequestDetailState>({ kind: 'idle' });
+  readonly filesState = signal<GitHubPullRequestFilesState>({ kind: 'idle' });
+  readonly approvalState = signal<GitHubPullRequestApprovalState>({ kind: 'idle' });
   readonly loadingMore = signal(false);
   readonly paginationError = signal('');
   readonly selectedNumber = computed(() => {
@@ -73,6 +88,8 @@ export class GitHubRepositoryPullRequestStore {
     this.paginationError.set('');
     this.listState.set({ kind: 'idle' });
     this.detailState.set({ kind: 'idle' });
+    this.filesState.set({ kind: 'idle' });
+    this.approvalState.set({ kind: 'idle' });
   }
 
   async load(): Promise<void> {
@@ -145,6 +162,8 @@ export class GitHubRepositoryPullRequestStore {
     }
     const generation = ++this.detailGeneration;
     this.detailState.set({ kind: 'loading', number });
+    this.filesState.set({ kind: 'idle' });
+    this.approvalState.set({ kind: 'idle' });
     try {
       const detail = await this.bridge.githubPullRequestDetail({
         repositoryId: context.repositoryId,
@@ -164,6 +183,62 @@ export class GitHubRepositoryPullRequestStore {
   clearSelection(): void {
     ++this.detailGeneration;
     this.detailState.set({ kind: 'idle' });
+    this.filesState.set({ kind: 'idle' });
+    this.approvalState.set({ kind: 'idle' });
+  }
+
+  async loadFiles(number: number): Promise<void> {
+    const context = this.context();
+    if (context === null || number <= 0 || this.bridge.githubPullRequestFiles === undefined) {
+      if (this.bridge.githubPullRequestFiles === undefined) {
+        this.filesState.set({ kind: 'error', number, message: 'Changed-file review is unavailable in this application build.' });
+      }
+      return;
+    }
+    this.filesState.set({ kind: 'loading', number });
+    try {
+      const response = await this.bridge.githubPullRequestFiles({
+        repositoryId: context.repositoryId,
+        accountId: context.accountId,
+        number,
+      });
+      if (this.matches(context) && this.selectedNumber() === number) {
+        this.filesState.set({ kind: 'ready', number, ...response });
+      }
+    } catch (error) {
+      if (this.matches(context) && this.selectedNumber() === number) {
+        this.filesState.set({ kind: 'error', number, message: errorMessage(error, 'Pull request files could not be loaded.') });
+      }
+    }
+  }
+
+  async approve(number: number): Promise<void> {
+    const context = this.context();
+    if (context === null || number <= 0 || this.approvalState().kind === 'approving' || this.bridge.githubApprovePullRequest === undefined) {
+      if (this.bridge.githubApprovePullRequest === undefined) {
+        this.approvalState.set({ kind: 'error', number, message: 'Pull request approval is unavailable in this application build.' });
+      }
+      return;
+    }
+    this.approvalState.set({ kind: 'approving', number });
+    try {
+      const response = await this.bridge.githubApprovePullRequest({
+        repositoryId: context.repositoryId,
+        accountId: context.accountId,
+        number,
+      });
+      if (this.matches(context) && this.selectedNumber() === number && response.approved) {
+        const detail = this.detailState();
+        if (detail.kind === 'ready') {
+          this.detailState.set({ kind: 'ready', detail: { ...detail.detail, approvalCount: detail.detail.approvalCount + 1 } });
+        }
+        this.approvalState.set({ kind: 'approved', number });
+      }
+    } catch (error) {
+      if (this.matches(context) && this.selectedNumber() === number) {
+        this.approvalState.set({ kind: 'error', number, message: errorMessage(error, 'Pull request could not be approved.') });
+      }
+    }
   }
 
   private context(): {

@@ -1,13 +1,16 @@
 use std::{
     collections::BTreeSet,
+    fs,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
 
 use app_domain::{
     AmendCommitRequest, AmendCommitResult, AmendCommitState, ApplyIndexChangeRequest,
-    ApplyIndexChangeResult, ChangeSelection, CreateCommitRequest, CreateCommitResult, IndexAction,
-    RepositoryStatus, StatusCode, StatusEntry, StatusEntryKind, WorkingTreeEntrySelector,
+    ApplyIndexChangeResult, ChangeSelection, CreateCommitRequest, CreateCommitResult,
+    DiscardWorkingTreeChangesRequest, DiscardWorkingTreeChangesResult,
+    DiscardWorkingTreeHunkRequest, IndexAction, RepositoryStatus, StatusCode, StatusEntry,
+    StatusEntryKind, WorkingTreeEntrySelector,
 };
 use git_core::{GitInvocation, GitInvocationPolicy, GitOutput, GitRunError, GitRunner};
 use thiserror::Error;
@@ -22,6 +25,8 @@ const OUTPUT_LIMIT: usize = 512 * 1024;
 const MAX_SELECTED_ENTRIES: usize = 10_000;
 const MAX_TOTAL_PATH_BYTES: usize = 1024 * 1024;
 const MAX_COMMIT_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_DISCARD_PATCH_BYTES: usize = 1024 * 1024;
+const DISCARD_PATCH_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const LITERAL_PATHSPEC_PREFIX: &str = ":(literal)";
 
 pub trait MutationGitExecutor: RepositoryStatusGitExecutor {
@@ -49,6 +54,89 @@ pub trait MutationGitExecutor: RepositoryStatusGitExecutor {
     ) -> Result<GitOutput, GitRunError>;
 
     fn commit_parents(&self, repository: &Path, oid: &str) -> Result<GitOutput, GitRunError>;
+}
+
+pub trait DiscardGitExecutor: RepositoryStatusGitExecutor {
+    fn restore_worktree(
+        &self,
+        repository: &Path,
+        pathspecs: Vec<String>,
+    ) -> Result<GitOutput, GitRunError>;
+    fn unstaged_diff(
+        &self,
+        repository: &Path,
+        entry: &WorkingTreeEntrySelector,
+    ) -> Result<GitOutput, GitRunError>;
+    fn reverse_apply(&self, repository: &Path, patch: &[u8]) -> Result<GitOutput, GitRunError>;
+}
+
+impl DiscardGitExecutor for GitRunner {
+    fn restore_worktree(
+        &self,
+        repository: &Path,
+        pathspecs: Vec<String>,
+    ) -> Result<GitOutput, GitRunError> {
+        self.run(
+            repository,
+            GitInvocation::new(
+                GitInvocationPolicy::Mutating,
+                [
+                    "restore",
+                    "--worktree",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ],
+            )
+            .with_stdin(encode_pathspecs(&pathspecs))
+            .with_output_limits(OUTPUT_LIMIT, OUTPUT_LIMIT)
+            .with_timeout(ACTION_TIMEOUT),
+        )
+    }
+
+    fn unstaged_diff(
+        &self,
+        repository: &Path,
+        entry: &WorkingTreeEntrySelector,
+    ) -> Result<GitOutput, GitRunError> {
+        let mut arguments = vec![
+            "diff".to_owned(),
+            "--no-color".to_owned(),
+            "--no-ext-diff".to_owned(),
+            "--no-textconv".to_owned(),
+            "-M".to_owned(),
+            "--unified=3".to_owned(),
+            "--".to_owned(),
+        ];
+        if let Some(old_path) = &entry.old_path {
+            arguments.push(format!("{LITERAL_PATHSPEC_PREFIX}{old_path}"));
+        }
+        arguments.push(format!("{LITERAL_PATHSPEC_PREFIX}{}", entry.path));
+        self.run(
+            repository,
+            GitInvocation::new(GitInvocationPolicy::ReadOnly, arguments)
+                .with_output_limits(DISCARD_PATCH_OUTPUT_LIMIT, OUTPUT_LIMIT)
+                .with_timeout(ACTION_TIMEOUT),
+        )
+    }
+
+    fn reverse_apply(&self, repository: &Path, patch: &[u8]) -> Result<GitOutput, GitRunError> {
+        self.run(
+            repository,
+            GitInvocation::new(
+                GitInvocationPolicy::Mutating,
+                [
+                    "apply",
+                    "--reverse",
+                    "--recount",
+                    "--whitespace=nowarn",
+                    "-",
+                ],
+            )
+            .with_stdin(patch.to_vec())
+            .with_output_limits(OUTPUT_LIMIT, OUTPUT_LIMIT)
+            .with_timeout(ACTION_TIMEOUT),
+        )
+    }
 }
 
 impl MutationGitExecutor for GitRunner {
@@ -204,6 +292,10 @@ pub enum MutationRuntimeError {
     InvalidCommitMessage { limit: usize },
     #[error("Git reported success but did not return the new commit id")]
     MissingCommitId,
+    #[error("an untracked path changed or is unsafe to delete")]
+    UnsafeUntrackedPath,
+    #[error("the selected diff chunk is invalid or no longer current")]
+    InvalidDiscardHunk,
     #[error(transparent)]
     Repository(#[from] RepositoryRuntimeError),
     #[error(transparent)]
@@ -213,15 +305,17 @@ pub enum MutationRuntimeError {
 impl MutationRuntimeError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidRequest | Self::InvalidPath | Self::InvalidCommitMessage { .. } => {
-                "invalidRequest"
-            }
+            Self::InvalidRequest
+            | Self::InvalidPath
+            | Self::InvalidCommitMessage { .. }
+            | Self::InvalidDiscardHunk => "invalidRequest",
             Self::StaleState | Self::ChangeNotFound => "staleState",
             Self::ConflictsPresent => "conflictsPresent",
             Self::IneligibleSelection { .. } => "ineligibleSelection",
             Self::NothingStaged => "nothingStaged",
             Self::NothingToAmend => "nothingToAmend",
             Self::UpstreamRewriteConfirmationRequired => "upstreamRewriteConfirmationRequired",
+            Self::UnsafeUntrackedPath => "unsafePath",
             Self::MissingCommitId | Self::Repository(_) => "internal",
             Self::Git(GitRunError::TimedOut { .. }) => "timedOut",
             Self::Git(GitRunError::OutputLimitExceeded { .. }) => "outputLimit",
@@ -403,6 +497,194 @@ impl<E: MutationGitExecutor> RepositoryRuntime<E> {
             error_message: None,
         })
     }
+}
+
+impl<E: DiscardGitExecutor> RepositoryRuntime<E> {
+    pub fn discard_worktree_changes(
+        &self,
+        repository: &Path,
+        request: &DiscardWorkingTreeChangesRequest,
+    ) -> Result<DiscardWorkingTreeChangesResult, MutationRuntimeError> {
+        validate_discard_selection(&request.entries)?;
+        let before = repository_status(&self.executor, repository)?;
+        validate_precondition(
+            &before,
+            request.expected_head.as_deref(),
+            request.expected_head_name.as_deref(),
+            request.expected_detached,
+            request.expected_unborn,
+            &request.expected_index_fingerprint,
+            &request.expected_worktree_fingerprint,
+        )?;
+        let mut tracked_paths = BTreeSet::new();
+        let mut untracked_targets = Vec::new();
+        for selector in &request.entries {
+            let matches = before
+                .entries
+                .iter()
+                .filter(|entry| selector_matches(selector, entry))
+                .collect::<Vec<_>>();
+            let [entry] = matches.as_slice() else {
+                return Err(MutationRuntimeError::ChangeNotFound);
+            };
+            if !is_unstaged(entry) {
+                return Err(MutationRuntimeError::IneligibleSelection {
+                    action: "discarded",
+                });
+            }
+            if entry.kind == StatusEntryKind::Untracked {
+                untracked_targets.push(safe_untracked_target(repository, &entry.path)?);
+            } else {
+                tracked_paths.insert(format!("{LITERAL_PATHSPEC_PREFIX}{}", entry.path));
+            }
+        }
+
+        if !tracked_paths.is_empty() {
+            self.executor
+                .restore_worktree(repository, tracked_paths.into_iter().collect())?;
+        }
+        for target in &untracked_targets {
+            fs::remove_file(target).map_err(|_| MutationRuntimeError::UnsafeUntrackedPath)?;
+        }
+
+        Ok(DiscardWorkingTreeChangesResult {
+            discarded_entries: request.entries.len(),
+            deleted_untracked_files: untracked_targets.len(),
+            status: repository_status(&self.executor, repository)?,
+        })
+    }
+
+    pub fn discard_worktree_hunk(
+        &self,
+        repository: &Path,
+        request: &DiscardWorkingTreeHunkRequest,
+    ) -> Result<DiscardWorkingTreeChangesResult, MutationRuntimeError> {
+        validate_selector(&request.entry)?;
+        if request.patch.is_empty()
+            || request.patch.len() > MAX_DISCARD_PATCH_BYTES
+            || matches!(request.entry.entry_kind, StatusEntryKind::Untracked)
+        {
+            return Err(MutationRuntimeError::InvalidDiscardHunk);
+        }
+        let before = repository_status(&self.executor, repository)?;
+        validate_precondition(
+            &before,
+            request.expected_head.as_deref(),
+            request.expected_head_name.as_deref(),
+            request.expected_detached,
+            request.expected_unborn,
+            &request.expected_index_fingerprint,
+            &request.expected_worktree_fingerprint,
+        )?;
+        let matches = before
+            .entries
+            .iter()
+            .filter(|entry| selector_matches(&request.entry, entry))
+            .collect::<Vec<_>>();
+        let [entry] = matches.as_slice() else {
+            return Err(MutationRuntimeError::ChangeNotFound);
+        };
+        if !is_unstaged(entry) {
+            return Err(MutationRuntimeError::IneligibleSelection {
+                action: "discarded",
+            });
+        }
+        let current = self.executor.unstaged_diff(repository, &request.entry)?;
+        let current_patch = String::from_utf8_lossy(&current.stdout);
+        if !single_hunk_patches(&current_patch)
+            .iter()
+            .any(|patch| patch == &request.patch)
+        {
+            return Err(MutationRuntimeError::InvalidDiscardHunk);
+        }
+        self.executor
+            .reverse_apply(repository, request.patch.as_bytes())?;
+        Ok(DiscardWorkingTreeChangesResult {
+            discarded_entries: 1,
+            deleted_untracked_files: 0,
+            status: repository_status(&self.executor, repository)?,
+        })
+    }
+}
+
+fn validate_discard_selection(
+    entries: &[WorkingTreeEntrySelector],
+) -> Result<(), MutationRuntimeError> {
+    if entries.is_empty() || entries.len() > MAX_SELECTED_ENTRIES {
+        return Err(MutationRuntimeError::InvalidRequest);
+    }
+    let mut identities = BTreeSet::new();
+    let mut total_bytes = 0_usize;
+    for selector in entries {
+        validate_selector(selector)?;
+        total_bytes = total_bytes
+            .checked_add(selector.path.len())
+            .and_then(|value| {
+                selector
+                    .old_path
+                    .as_ref()
+                    .map_or(Some(value), |path| value.checked_add(path.len()))
+            })
+            .ok_or(MutationRuntimeError::InvalidRequest)?;
+        if total_bytes > MAX_TOTAL_PATH_BYTES
+            || !identities.insert(format!(
+                "{:?}\0{}\0{}",
+                selector.entry_kind,
+                selector.path,
+                selector.old_path.as_deref().unwrap_or("")
+            ))
+        {
+            return Err(MutationRuntimeError::InvalidRequest);
+        }
+    }
+    Ok(())
+}
+
+fn safe_untracked_target(repository: &Path, path: &str) -> Result<PathBuf, MutationRuntimeError> {
+    let relative = validate_relative_path(path)?;
+    let root =
+        fs::canonicalize(repository).map_err(|_| MutationRuntimeError::UnsafeUntrackedPath)?;
+    let file_name = relative
+        .file_name()
+        .ok_or(MutationRuntimeError::UnsafeUntrackedPath)?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let canonical_parent = fs::canonicalize(root.join(parent))
+        .map_err(|_| MutationRuntimeError::UnsafeUntrackedPath)?;
+    if !canonical_parent.starts_with(&root) {
+        return Err(MutationRuntimeError::UnsafeUntrackedPath);
+    }
+    let target = canonical_parent.join(file_name);
+    let metadata =
+        fs::symlink_metadata(&target).map_err(|_| MutationRuntimeError::UnsafeUntrackedPath)?;
+    if !metadata.is_file() && !metadata.file_type().is_symlink() {
+        return Err(MutationRuntimeError::UnsafeUntrackedPath);
+    }
+    Ok(target)
+}
+
+fn single_hunk_patches(patch: &str) -> Vec<String> {
+    if patch.matches("diff --git ").count() != 1 || patch.contains("GIT binary patch") {
+        return Vec::new();
+    }
+    let lines = patch.split_inclusive('\n').collect::<Vec<_>>();
+    let Some(first_hunk) = lines.iter().position(|line| line.starts_with("@@ -")) else {
+        return Vec::new();
+    };
+    let header = lines[..first_hunk].concat();
+    let mut result = Vec::new();
+    let mut index = first_hunk;
+    while index < lines.len() {
+        if !lines[index].starts_with("@@ -") {
+            return Vec::new();
+        }
+        let end = lines[index + 1..]
+            .iter()
+            .position(|line| line.starts_with("@@ -"))
+            .map_or(lines.len(), |offset| index + 1 + offset);
+        result.push(format!("{header}{}", lines[index..end].concat()));
+        index = end;
+    }
+    result
 }
 
 fn validate_amend_preflight(

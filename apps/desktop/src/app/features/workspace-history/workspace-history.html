@@ -1,4 +1,38 @@
 <main class="workspace">
+  @if (navigationActionError() || navigationActionNotice() || networkError() || networkNotice() || (liveChanges() && statusStore.backgroundError())) {
+    <section class="workspace-toasts workspace-notification-compat" aria-label="Workspace notification state">
+      @if (navigationActionError()) {
+        <div id="navigation-action-error" class="workspace-toast error navigation-action-error" role="alert" tabindex="-1">
+          <p>{{ navigationActionError() }}</p>
+          <button type="button" aria-label="Dismiss workspace error" title="Dismiss" (click)="dismissNavigationActionError()">×</button>
+        </div>
+      }
+      @if (networkError()) {
+        <div class="workspace-toast error" role="alert">
+          <p>{{ networkError() }}</p>
+          <button type="button" aria-label="Dismiss network error" title="Dismiss" (click)="dismissNetworkError()">×</button>
+        </div>
+      }
+      @if (liveChanges() && statusStore.backgroundError()) {
+        <div class="workspace-toast error" role="status">
+          <p>{{ statusStore.backgroundError() }}</p>
+          <button type="button" aria-label="Dismiss live refresh error" title="Dismiss" (click)="dismissBackgroundRefreshError()">×</button>
+        </div>
+      }
+      @if (navigationActionNotice()) {
+        <div id="navigation-action-notice" class="workspace-toast success navigation-action-notice" role="status" tabindex="-1">
+          <p>{{ navigationActionNotice() }}</p>
+          <button type="button" aria-label="Dismiss workspace notification" title="Dismiss" (click)="dismissNavigationActionNotice()">×</button>
+        </div>
+      }
+      @if (networkNotice()) {
+        <div class="workspace-toast success" role="status">
+          <p>{{ networkNotice() }}</p>
+          <button type="button" aria-label="Dismiss network notification" title="Dismiss" (click)="dismissNetworkNotice()">×</button>
+        </div>
+      }
+    </section>
+  }
   @if (worktreeContextMenu(); as menu) {
     <div
       id="worktree-context-menu"
@@ -13,6 +47,15 @@
       <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="openWorktreeAsNewRepository()">
         <span aria-hidden="true">↗</span>Open as new repository
       </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy() || menu.worktree.detached" [title]="menu.worktree.detached ? 'A detached worktree has no local branch to open.' : 'Open this worktree in VS Code.'" (click)="openWorktreeInApplication('vsCode')">
+        <span aria-hidden="true">⌘</span>Open in VS Code
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy() || menu.worktree.detached" [title]="menu.worktree.detached ? 'A detached worktree has no local branch to open.' : 'Open this worktree in Cursor.'" (click)="openWorktreeInApplication('cursor')">
+        <span aria-hidden="true">⌁</span>Open in Cursor
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy() || menu.worktree.detached" [title]="menu.worktree.detached ? 'A detached worktree has no local branch to open.' : 'Reveal this worktree in Finder or Explorer.'" (click)="openWorktreeInApplication('system')">
+        <span aria-hidden="true">▣</span>Open in Finder / Explorer
+      </button>
     </div>
   }
   @if (branchContextMenu(); as menu) {
@@ -26,6 +69,25 @@
       [style.top.px]="menu.y"
     >
       <p>{{ menu.branch.name }}</p>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="previewBranch(menu.branch)">
+        <span aria-hidden="true">◉</span>{{ menu.branch.current ? 'Show active worktree history' : 'Preview branch' }}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        [disabled]="menu.branch.current || workspaceActionBusy()"
+        [title]="menu.branch.current ? 'This is already the active branch.' : 'Checkout in the active worktree (may offer auto-stash).'"
+        (click)="checkoutBranchFromContextMenu()"
+      ><span aria-hidden="true">⇄</span>Checkout in active worktree</button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="openBranchWorkspaceFromContextMenu('vsCode')">
+        <span aria-hidden="true">⌘</span>Open in VS Code
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="openBranchWorkspaceFromContextMenu('cursor')">
+        <span aria-hidden="true">⌁</span>Open in Cursor
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="openBranchWorkspaceFromContextMenu('system')">
+        <span aria-hidden="true">▣</span>Open in Finder / Explorer
+      </button>
       <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="toggleReleaseBranch(menu.branch)">
         <span aria-hidden="true">◆</span>{{ isReleaseBranch(menu.branch) ? 'Unmark release' : 'Mark as release' }}
       </button>
@@ -98,13 +160,21 @@
       (cancel)="$event.preventDefault(); cancelBranchSwitch()"
     >
       <p class="eyebrow"><app-icon name="branch" /> branch switch</p>
-      <h2 id="branch-switch-title">Switch active branch?</h2>
-      <div id="branch-switch-description" class="reference-confirmation-description merge-route">
-        <span><small>From</small><strong>{{ currentLocalBranch()?.name ?? branchName() }}</strong></span>
-        <span aria-hidden="true">→</span>
-        <span><small>To</small><strong>{{ confirmation.branch.name }}</strong></span>
-      </div>
-      @if (confirmation.dirty) {
+      <h2 id="branch-switch-title">{{ confirmation.targetWorktree ? 'Open branch worktree?' : 'Switch active branch?' }}</h2>
+      @if (confirmation.targetWorktree; as targetWorktree) {
+        <div id="branch-switch-description" class="worktree-switch-description">
+          <p>The branch <strong>{{ confirmation.branch.name }}</strong> is already checked out in worktree <strong>“{{ worktreeDisplayName(targetWorktree) }}”</strong>.</p>
+          <p>Continuing will take you to that worktree. Your current worktree and its uncommitted changes will stay unchanged.</p>
+          <code [title]="targetWorktree.path">{{ targetWorktree.path }}</code>
+        </div>
+      } @else {
+        <div id="branch-switch-description" class="reference-confirmation-description merge-route">
+          <span><small>From</small><strong>{{ currentLocalBranch()?.name ?? branchName() }}</strong></span>
+          <span aria-hidden="true">→</span>
+          <span><small>To</small><strong>{{ confirmation.branch.name }}</strong></span>
+        </div>
+      }
+      @if (confirmation.targetWorktree === null && confirmation.dirty) {
         <label class="merge-autostash">
           <input type="checkbox" [checked]="switchAutoStash()" (change)="setSwitchAutoStash($any($event.target).checked)" />
           <span>
@@ -112,12 +182,12 @@
             <small>Create {{ switchAutoStash() ? 'a dated WIP stash, switch, then restore it' : 'no stash; Git will refuse when changes block the switch' }}.</small>
           </span>
         </label>
-      } @else {
+      } @else if (confirmation.targetWorktree === null) {
         <p class="merge-note">The active worktree is clean. Files on disk will be updated to the selected branch.</p>
       }
       <div class="reference-confirmation-actions">
-        <button id="cancel-branch-switch" type="button" [disabled]="switchingBranch() !== null" (click)="cancelBranchSwitch()"><app-icon name="close" />Cancel</button>
-        <button id="confirm-branch-switch" type="button" [disabled]="switchingBranch() !== null" (click)="confirmBranchSwitch()"><app-icon name="branch" />{{ switchingBranch() ? 'Switching…' : 'Switch branch' }}</button>
+        <button id="cancel-branch-switch" type="button" [disabled]="switchingBranch() !== null || openingWorktree() !== null" (click)="cancelBranchSwitch()"><app-icon name="close" />Cancel</button>
+        <button id="confirm-branch-switch" type="button" [disabled]="switchingBranch() !== null || openingWorktree() !== null" (click)="confirmBranchSwitch()"><app-icon name="branch" />{{ confirmation.targetWorktree ? (openingWorktree() ? 'Opening…' : 'Open worktree') : (switchingBranch() ? 'Switching…' : 'Switch branch') }}</button>
       </div>
     </dialog>
   }
@@ -164,6 +234,7 @@
         aria-describedby="reference-confirmation-description"
         (cancel)="$event.preventDefault(); cancelReferenceDeletion()"
       >
+        <app-skibi-bot class="dialog-bot" mood="scared" />
         <p class="eyebrow destructive-eyebrow"><app-icon name="warning" /> destructive action</p>
         <h2 id="reference-confirmation-title">
           {{ confirmation.kind === 'branch' ? 'Delete local branch?' : 'Remove worktree?' }}
@@ -224,6 +295,55 @@
         </div>
       </dialog>
   }
+  @if (destructiveActionConfirmation(); as confirmation) {
+    <dialog
+      #destructiveActionDialog
+      class="reference-confirmation destructive-action-confirmation"
+      role="alertdialog"
+      aria-labelledby="destructive-action-title"
+      aria-describedby="destructive-action-description"
+      (cancel)="$event.preventDefault(); cancelDestructiveAction()"
+    >
+      <app-skibi-bot class="dialog-bot" [mood]="confirmation.destructive ? 'scared' : 'neutral'" />
+      <p class="eyebrow" [class.destructive-eyebrow]="confirmation.destructive"><app-icon name="warning" />{{ confirmation.destructive ? 'destructive action' : 'confirm action' }}</p>
+      <h2 id="destructive-action-title">{{ confirmation.title }}</h2>
+      <p id="destructive-action-description" class="reference-confirmation-description destructive-action-description">{{ confirmation.description }}</p>
+      <div class="reference-confirmation-actions">
+        <button id="cancel-destructive-action" type="button" (click)="cancelDestructiveAction()"><app-icon name="close" />Cancel</button>
+        <button id="confirm-destructive-action" type="button" [class.danger]="confirmation.destructive" (click)="confirmDestructiveAction()"><app-icon name="warning" />{{ confirmation.confirmLabel }}</button>
+      </div>
+    </dialog>
+  }
+  @if (stashCreationOpen()) {
+    <dialog
+      #stashCreationDialog
+      class="reference-confirmation stash-creation-dialog"
+      aria-labelledby="stash-creation-title"
+      (cancel)="$event.preventDefault(); closeStashCreation()"
+    >
+      <p class="eyebrow">SAVE WORK IN PROGRESS</p>
+      <h2 id="stash-creation-title">Create stash</h2>
+      <form (submit)="$event.preventDefault(); pushStash()">
+        <label for="manual-stash-message">Stash message</label>
+        <input
+          id="manual-stash-message"
+          type="text"
+          aria-label="Stash message"
+          [value]="stashMessage()"
+          [disabled]="stashMutation() !== null"
+          (input)="updateStashMessage($any($event.target).value)"
+        />
+        <label class="stash-untracked-option">
+          <input type="checkbox" [checked]="stashIncludeUntracked()" [disabled]="stashMutation() !== null" (change)="setStashIncludeUntracked($any($event.target).checked)" />
+          <span><strong>Include untracked files</strong><small>Ignored files are never included.</small></span>
+        </label>
+        <div class="reference-confirmation-actions">
+          <button type="button" [disabled]="stashMutation() !== null" (click)="closeStashCreation()"><app-icon name="close" />Cancel</button>
+          <button type="submit" class="primary-action" [disabled]="stashMutation() !== null || stashMessage().trim().length === 0"><app-icon name="stash" />{{ stashMutation() === 'create' ? 'Stashing…' : 'Create stash' }}</button>
+        </div>
+      </form>
+    </dialog>
+  }
   <header class="workspace-bar">
     <a routerLink="/repositories" class="back" aria-label="Back to repositories">‹</a>
     <span class="repo-icon">{{ repository()?.provider === 'github' ? 'GH' : 'L' }}</span>
@@ -263,10 +383,26 @@
         [title]="pushDisabledReason() ?? 'Push to the configured upstream'"
         (click)="pushRepository()"
       ><app-icon name="upload" />{{ networkMutation() === 'push' ? 'Pushing…' : 'Push' }}</button>
+      <button type="button" [disabled]="workspaceActionBusy()" title="Save staged, unstaged and optionally untracked changes" (click)="openStashCreation()">
+        <app-icon name="stash" />Stash
+      </button>
     </div>
     <button type="button" [disabled]="workspaceActionBusy()" (click)="refreshWorkspace()">
       <app-icon name="refresh" />{{ refreshingWorkspace() ? 'Refreshing…' : 'Refresh' }}
     </button>
+    <button
+      type="button"
+      class="compare-entry"
+      [disabled]="compareRefs() === null"
+      [title]="compareRefs() === null ? compareDisabledReason() : 'Compare the active branch with its release or main/master base'"
+      (click)="openComparison()"
+    ><app-icon name="compare" />Compare</button>
+    <button
+      type="button"
+      routerLink="/code-reviews"
+      [queryParams]="{ repositoryId, target: releaseBranchFullName() ?? primaryBranch()?.fullName ?? null }"
+      title="Analyze the current task with an enabled AI CLI"
+    ><span aria-hidden="true">✶</span>Review task</button>
     <div class="workspace-view-switch" aria-label="Center view">
       <button type="button" [class.active]="fileDiffState().kind === 'idle'" [attr.aria-pressed]="fileDiffState().kind === 'idle'" (click)="closeFileDiff()">History</button>
       <button type="button" [class.active]="fileDiffState().kind !== 'idle'" [attr.aria-pressed]="fileDiffState().kind !== 'idle'" [disabled]="fileDiffState().kind === 'idle'">Diff</button>
@@ -305,21 +441,6 @@
           <span>Live changes</span>
         </label>
       </div>
-      @if (navigationActionError()) {
-        <p id="navigation-action-error" class="navigation-action-error" role="alert" tabindex="-1">{{ navigationActionError() }}</p>
-      }
-      @if (navigationActionNotice()) {
-        <p id="navigation-action-notice" class="navigation-action-notice" role="status" tabindex="-1">{{ navigationActionNotice() }}</p>
-      }
-      @if (networkError()) {
-        <p class="navigation-action-error" role="alert">{{ networkError() }}</p>
-      }
-      @if (networkNotice()) {
-        <p class="navigation-action-notice" role="status">{{ networkNotice() }}</p>
-      }
-      @if (liveChanges() && statusStore.backgroundError()) {
-        <p class="navigation-action-error" role="status">{{ statusStore.backgroundError() }}</p>
-      }
       @let navigation = navigationState();
       @if (navigation.kind === 'loading') {
         <p class="navigation-state"><span class="spinner" aria-hidden="true"></span> Loading references…</p>
@@ -335,7 +456,7 @@
             @if (currentLocalBranch(); as currentBranch) {
               <li>
                 <div class="tree-action-row" (contextmenu)="openBranchContextMenu($event, currentBranch, $any($event.currentTarget))">
-                  <button type="button" class="tree-row branch-row active pinned-current" disabled aria-current="true" [title]="currentBranch.name + ' (current branch)'">
+                  <button type="button" class="tree-row branch-row active pinned-current" [class.previewed]="isPreviewedBranch(currentBranch)" [style.box-shadow]="isPreviewedBranch(currentBranch) ? 'inset 2px 0 0 var(--green)' : null" aria-current="true" [title]="isPreviewingBranch() ? 'Return to the active worktree history' : currentBranch.name + ' (current branch)'" (click)="returnToActiveHistory()">
                     <span class="branch-icon" aria-hidden="true">⑂</span>
                     <span class="tree-label">{{ currentBranch.name }}</span>
                     <span class="branch-badges">
@@ -369,9 +490,11 @@
                     <button
                       type="button"
                       class="tree-row branch-row"
+                      [class.previewed]="isPreviewedBranch(node.branch)"
+                      [style.box-shadow]="isPreviewedBranch(node.branch) ? 'inset 2px 0 0 var(--green)' : null"
                       [disabled]="workspaceActionBusy()"
-                      [title]="'Switch to ' + node.branch.name"
-                      (click)="switchBranch(node.branch, $any($event.currentTarget))"
+                      [title]="'Preview ' + node.branch.name + ' without switching the active worktree'"
+                      (click)="previewBranch(node.branch)"
                     >
                       <span class="branch-icon" aria-hidden="true">⑂</span>
                       <span class="tree-label">{{ node.name }}</span>
@@ -499,18 +622,6 @@
         @if (!currentOnly()) {
         <details>
           <summary><span>Stashes</span><strong>{{ navigation.navigation.stashes.length }}</strong></summary>
-          <form class="stash-create-form" (submit)="$event.preventDefault(); pushStash()">
-            <input
-              type="text"
-              aria-label="Stash message"
-              placeholder="Stash message"
-              [value]="stashMessage()"
-              [disabled]="workspaceActionBusy()"
-              (input)="updateStashMessage($any($event.target).value)"
-            />
-            <label><input type="checkbox" [checked]="stashIncludeUntracked()" [disabled]="workspaceActionBusy()" (change)="setStashIncludeUntracked($any($event.target).checked)" /> untracked</label>
-            <button type="submit" [disabled]="workspaceActionBusy() || stashMessage().trim().length === 0">{{ stashMutation() === 'create' ? 'Stashing…' : 'Stash' }}</button>
-          </form>
           @if (navigation.navigation.stashes.length === 0) { <p class="section-placeholder">No stashes.</p> }
           <ul class="stash-list">
             @for (stash of navigation.navigation.stashes; track stash.oid) {
@@ -526,11 +637,14 @@
                   <span>{{ stash.selector }} · {{ stash.message }}</span>
                   <small>{{ formatTimestamp(stash.authoredAt) }}</small>
                 </button>
-                <span class="stash-actions">
-                  <button type="button" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Apply ' + stash.selector" (click)="applyStash(stash)">{{ stashMutation() === 'apply:' + stash.oid ? 'Applying…' : 'Apply' }}</button>
-                  <button type="button" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Pop ' + stash.selector" (click)="popStash(stash)">{{ stashMutation() === 'pop:' + stash.oid ? 'Popping…' : 'Pop' }}</button>
-                  <button type="button" class="danger" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Drop ' + stash.selector" (click)="dropStash(stash)">{{ stashMutation() === 'drop:' + stash.oid ? 'Dropping…' : 'Drop' }}</button>
-                </span>
+                <details class="stash-action-menu">
+                  <summary [attr.aria-label]="'Actions for ' + stash.selector" title="Stash actions">⋯</summary>
+                  <div role="menu">
+                    <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Apply ' + stash.selector" (click)="applyStash(stash)"><span aria-hidden="true">↳</span>{{ stashMutation() === 'apply:' + stash.oid ? 'Applying…' : 'Apply' }}</button>
+                    <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Pop ' + stash.selector" (click)="popStash(stash)"><span aria-hidden="true">↑</span>{{ stashMutation() === 'pop:' + stash.oid ? 'Popping…' : 'Pop' }}</button>
+                    <button type="button" role="menuitem" class="danger" [disabled]="workspaceActionBusy()" [attr.aria-label]="'Drop ' + stash.selector" (click)="dropStash(stash)"><span aria-hidden="true">×</span>{{ stashMutation() === 'drop:' + stash.oid ? 'Dropping…' : 'Drop' }}</button>
+                  </div>
+                </details>
               </li>
             }
           </ul>
@@ -613,7 +727,15 @@
         <div class="diff-view">
           <header class="diff-toolbar">
             <button type="button" class="close-diff" aria-label="Close file diff" title="Back to commit history" (click)="closeFileDiff()">×</button>
-            <div><p class="eyebrow">file diff</p><h1 id="history-heading" [title]="selectedFilePath() ?? ''">{{ selectedFilePath() }}</h1></div>
+            @let selectedPathParts = filePathParts(selectedFilePath() ?? '');
+            <div class="diff-file-heading">
+              <p class="eyebrow">file diff</p>
+              <h1 id="history-heading" class="diff-file-path" [title]="selectedFilePath() ?? ''">
+                <span class="file-directory">{{ selectedPathParts.directory }}</span>
+                @if (selectedPathParts.directory) { <span class="file-separator" aria-hidden="true">/</span> }
+                <strong class="file-name">{{ selectedPathParts.fileName }}</strong>
+              </h1>
+            </div>
             <div class="diff-toolbar-actions">
               <button
                 type="button"
@@ -647,8 +769,19 @@
                       @case ('context') { <div class="diff-row context"><span class="line-number" aria-hidden="true">{{ row.oldLineNumber }}</span><span class="line-number" aria-hidden="true">{{ row.newLineNumber }}</span><code>{{ row.content }}</code></div> }
                       @case ('addition') { <div class="diff-row addition"><span class="line-number" aria-hidden="true"></span><span class="line-number" aria-hidden="true">{{ row.newLineNumber }}</span><code>+{{ row.content }}</code></div> }
                       @case ('deletion') { <div class="diff-row deletion"><span class="line-number" aria-hidden="true">{{ row.oldLineNumber }}</span><span class="line-number" aria-hidden="true"></span><code>-{{ row.content }}</code></div> }
-                      @case ('hunk-header') { <div class="diff-row hunk-header"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
-                      @case ('file-header') { <div class="diff-row file-header"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.displayPath }}</code></div> }
+                      @case ('hunk-header') {
+                        <div class="diff-row hunk-header">
+                          <span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code>
+                          @if (discardableDiffHunksByDisplayHunk().get(row.hunkKey); as discardHunks) {
+                            <div class="discard-hunk-actions" aria-label="Actions for this change chunk">
+                              @for (hunk of discardHunks; track hunk.key) {
+                                <button type="button" class="discard-hunk danger" [disabled]="workspaceActionBusy()" (click)="discardWorkingTreeHunk(hunk)">{{ hunk.label }}</button>
+                              }
+                            </div>
+                          }
+                        </div>
+                      }
+                      @case ('file-header') {}
                       @case ('binary') { <div class="diff-row metadata"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
                       @case ('no-newline') { <div class="diff-row metadata"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
                       @case ('metadata') { <div class="diff-row metadata"><span aria-hidden="true"></span><span aria-hidden="true"></span><code>{{ row.raw }}</code></div> }
@@ -663,7 +796,7 @@
       } @else {
       @let summary = workingTreeSummary();
       <div class="working-tree">
-        <div><p class="eyebrow">working tree</p><h1 id="history-heading">Commit history</h1></div>
+        <div><p class="eyebrow">{{ isPreviewingBranch() ? 'read-only branch preview' : 'working tree' }}</p><h1 id="history-heading">{{ isPreviewingBranch() ? 'Branch preview' : 'Commit history' }}</h1></div>
         <div class="change-stats" aria-label="Working tree changes">
           <span><b>{{ summary.counts.total }}</b> changed</span>
           <span class="added">+{{ summary.counts.added }}</span>
@@ -673,6 +806,17 @@
           @if (summary.counts.conflicted > 0) { <span class="conflicts">!{{ summary.counts.conflicted }}</span> }
         </div>
       </div>
+
+      @if (branchPreview(); as preview) {
+        <div class="branch-preview-banner" role="status" style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:38px;padding:5px 12px;border-bottom:1px solid var(--bd);background:var(--acd)">
+          <div>
+            <p style="margin:0;color:var(--ac);font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase">Read-only preview</p>
+            <strong>{{ preview.branch.name }}</strong>
+            <small style="margin-left:7px;color:var(--tx3)">Compared with {{ preview.target.name }} · active worktree unchanged</small>
+          </div>
+          <button type="button" style="flex:none;height:24px;border:1px solid var(--acb);border-radius:5px;padding:0 7px;color:var(--tx);background:var(--bg2);font-size:10px" (click)="returnToActiveHistory()"><span aria-hidden="true">←</span>Return to active branch</button>
+        </div>
+      }
 
       <div class="history-columns" aria-hidden="true">
         <span>Graph / commit</span><span>Author</span><span>When</span><span>Commit</span>
@@ -694,7 +838,7 @@
             </div>
           }
           @case ('ready') {
-            @if (summary.counts.total > 0) {
+            @if (!isPreviewingBranch() && summary.counts.total > 0) {
               <button
                 type="button"
                 class="working-tree-history-row"
@@ -703,7 +847,7 @@
                 [attr.aria-current]="historySelection() === 'working-tree' ? 'true' : null"
                 (click)="selectWorkingTree()"
               >
-                <span class="working-tree-dot" aria-hidden="true"></span>
+                <span class="graph working-tree-graph" aria-hidden="true"><i></i></span>
                 <span class="commit-copy working-tree-copy">
                   <strong>Working Tree</strong>
                   <span class="working-tree-counts" aria-label="Working tree: {{ summary.counts.added }} added, {{ summary.counts.modified }} modified, {{ summary.counts.renamed }} renamed, {{ summary.counts.deleted }} deleted, {{ summary.counts.conflicted }} conflicted">
@@ -730,12 +874,19 @@
                 <button
                   type="button"
                   class="commit-row"
+                  [class.commit-task]="commit.relation === 'task'"
+                  [class.commit-merge]="commit.relation === 'merge'"
+                  [class.commit-base]="commit.relation === 'base'"
                   role="listitem"
                   [class.selected]="historySelection() === 'commit' && selectedOid() === commit.oid"
                   [attr.aria-current]="historySelection() === 'commit' && selectedOid() === commit.oid ? 'true' : null"
                   (click)="selectCommit(commit)"
                 >
-                  <span class="graph" aria-hidden="true"><i></i></span>
+                  <span
+                    class="graph"
+                    aria-hidden="true"
+                    [attr.title]="commit.relation === 'task' ? 'Task commit' : commit.relation === 'merge' ? 'Merged or integrated commit' : commit.relation === 'base' ? 'Shared base commit' : null"
+                  ><i></i></span>
                   <span class="commit-copy">
                     @if (commit.refs.length > 0) {
                       <span class="references">
@@ -894,6 +1045,10 @@
               <div><span class="file-heading-label">Files</span><strong>{{ working.counts.total }} changed {{ working.counts.total === 1 ? 'file' : 'files' }}</strong></div>
             </header>
             <div class="index-actions" aria-label="Staging actions">
+              @if (reconciledWorkingTreeSelection().size > 0) {
+                <span class="working-tree-selection-count">{{ reconciledWorkingTreeSelection().size }} selected</span>
+                <button type="button" class="clear-working-tree-selection" [disabled]="workspaceActionBusy()" (click)="clearWorkingTreeSelection()">Clear</button>
+              }
               <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageSelected" [title]="indexActionTitle(workingTreeCapabilities().stageSelectedAmbiguous)" (click)="applyIndexChange('stage', false)">{{ mutationInProgress('stage', 'selected') ? 'Staging…' : 'Stage selected' }}</button>
               <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('stage', true)">{{ mutationInProgress('stage', 'all') ? 'Staging…' : 'Stage all' }}</button>
               <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canUnstageSelected" [title]="indexActionTitle(workingTreeCapabilities().unstageSelectedAmbiguous)" (click)="applyIndexChange('unstage', false)">{{ mutationInProgress('unstage', 'selected') ? 'Unstaging…' : 'Unstage selected' }}</button>
@@ -917,7 +1072,7 @@
               @for (file of stagedWorkingTreeFiles(); track file.entryKind + ':' + file.path + ':' + (file.oldPath ?? '') + ':' + file.primaryStatus) {
                 @let pathParts = filePathParts(file.path);
                 <li class="working-tree-file-row">
-                  <input type="checkbox" class="working-tree-file-checkbox" [checked]="workingTreeFileSelected(file)" [disabled]="file.primaryStatus === 'conflicted' || workspaceActionBusy()" [attr.aria-label]="'Select ' + file.path + ' for a staging action'" (change)="toggleWorkingTreeFile(file, $any($event.target).checked)" />
+                  <input type="checkbox" class="working-tree-file-checkbox" [checked]="workingTreeFileSelected(file)" [disabled]="file.primaryStatus === 'conflicted' || workspaceActionBusy()" [attr.aria-label]="'Select ' + file.path" (change)="toggleWorkingTreeFile(file, $any($event.target).checked)" />
                   <button type="button" class="changed-file" [class.selected]="selectedFilePath() === file.path && selectedWorkingTreeEntryKind() === file.entryKind" [attr.aria-pressed]="selectedFilePath() === file.path && selectedWorkingTreeEntryKind() === file.entryKind" [disabled]="file.primaryStatus === 'conflicted'" [title]="file.primaryStatus === 'conflicted' ? 'Conflict diff will be available in the conflict resolver' : 'Open working tree diff for ' + file.path" (click)="openWorkingTreeFileDiff(file)">
                     <span class="file-status" [attr.data-status]="file.primaryStatus" [title]="file.primaryStatus">{{ workingTreeStatusMark(file.primaryStatus) }}</span>
                     <span class="file-path" [title]="file.path"><span class="file-directory">{{ pathParts.directory }}</span>@if (pathParts.directory) { <span class="file-separator" aria-hidden="true">/</span> }<strong class="file-name">{{ pathParts.fileName }}</strong>@if (file.oldPath !== null) { <small class="file-previous-path">from {{ file.oldPath }}</small> }</span>
@@ -932,6 +1087,7 @@
             <header>
               <strong id="unstaged-files-heading">Unstaged</strong>
               <span>{{ unstagedWorkingTreeFiles().length }}</span>
+              <button type="button" class="danger" [disabled]="workspaceActionBusy() || selectedDiscardableWorkingTreeFiles().length === 0" (click)="discardSelectedWorkingTreeFiles()">{{ mutationInProgress('discard', 'selected') ? 'Discarding…' : 'Discard selected' }}</button>
               <button type="button" [disabled]="workspaceActionBusy() || !workingTreeCapabilities().canStageAll" [title]="indexActionTitle(false)" (click)="applyIndexChange('stage', true)">Stage all</button>
             </header>
             @if (unstagedWorkingTreeFiles().length === 0) {
@@ -941,35 +1097,48 @@
               @for (file of unstagedWorkingTreeFiles(); track file.entryKind + ':' + file.path + ':' + (file.oldPath ?? '') + ':' + file.primaryStatus) {
                 @let pathParts = filePathParts(file.path);
                 <li class="working-tree-file-row">
-                  <input type="checkbox" class="working-tree-file-checkbox" [checked]="workingTreeFileSelected(file)" [disabled]="file.primaryStatus === 'conflicted' || workspaceActionBusy()" [attr.aria-label]="'Select ' + file.path + ' for a staging action'" (change)="toggleWorkingTreeFile(file, $any($event.target).checked)" />
+                  <input type="checkbox" class="working-tree-file-checkbox" [checked]="workingTreeFileSelected(file)" [disabled]="file.primaryStatus === 'conflicted' || workspaceActionBusy()" [attr.aria-label]="'Select ' + file.path" (change)="toggleWorkingTreeFile(file, $any($event.target).checked)" />
                   <button type="button" class="changed-file" [class.selected]="selectedFilePath() === file.path && selectedWorkingTreeEntryKind() === file.entryKind" [attr.aria-pressed]="selectedFilePath() === file.path && selectedWorkingTreeEntryKind() === file.entryKind" [disabled]="file.primaryStatus === 'conflicted'" [title]="file.primaryStatus === 'conflicted' ? 'Conflict diff will be available in the conflict resolver' : 'Open working tree diff for ' + file.path" (click)="openWorkingTreeFileDiff(file)">
                     <span class="file-status" [attr.data-status]="file.primaryStatus" [title]="file.primaryStatus">{{ workingTreeStatusMark(file.primaryStatus) }}</span>
                     <span class="file-path" [title]="file.path"><span class="file-directory">{{ pathParts.directory }}</span>@if (pathParts.directory) { <span class="file-separator" aria-hidden="true">/</span> }<strong class="file-name">{{ pathParts.fileName }}</strong>@if (file.oldPath !== null) { <small class="file-previous-path">from {{ file.oldPath }}</small> }</span>
                     @if (file.primaryStatus === 'conflicted') { <small class="conflicts">resolve</small> } @else { <small class="unstaged">unstaged</small> }
                   </button>
-                  <button type="button" class="index-row-action" [disabled]="workingTreeFileActionDisabled('stage', file)" [attr.aria-label]="'Stage ' + file.path" title="Stage file" (click)="applyIndexChangeToFile('stage', file)">+</button>
+                  <span class="working-tree-row-actions">
+                    <button type="button" class="index-row-action" [disabled]="workingTreeFileActionDisabled('stage', file)" [attr.aria-label]="'Stage ' + file.path" title="Stage file" (click)="applyIndexChangeToFile('stage', file)">+</button>
+                    <button type="button" class="index-row-action discard-row-action" [disabled]="workspaceActionBusy() || file.primaryStatus === 'conflicted'" [attr.aria-label]="'Discard changes in ' + file.path" [title]="file.entryKind === 'untracked' ? 'Delete new untracked file' : 'Discard unstaged changes'" (click)="discardWorkingTreeFile(file)"><app-icon name="trash" /></button>
+                  </span>
                 </li>
               }
             </ul>
           </section>
         </div>
         <section class="commit-composer" aria-labelledby="commit-composer-title">
-          <label id="commit-composer-title" for="commit-message">{{ amendMode() ? 'Amend HEAD' : 'Commit message' }}</label>
+          <div class="commit-composer-heading">
+            <label id="commit-composer-title" for="commit-message">{{ amendMode() ? 'Amend HEAD' : 'Commit message' }}</label>
+            @if (enabledAiCommitMessageProviders().length > 0) {
+              <div class="ai-commit-actions" aria-label="Generate commit message with AI">
+                @for (provider of enabledAiCommitMessageProviders(); track provider) {
+                  <button
+                    type="button"
+                    class="ai-commit-action"
+                    [class.generating]="aiCommitMessageProviderIsGenerating(provider)"
+                    [attr.data-ai-provider]="provider"
+                    [disabled]="aiCommitMessageGenerationDisabled()"
+                    [attr.aria-label]="aiCommitMessageProviderIsGenerating(provider) ? 'Generating a commit message with ' + aiCommitMessageProviderLabel(provider) : 'Generate a commit message with ' + aiCommitMessageProviderLabel(provider)"
+                    [title]="aiCommitMessageGenerationDisabled() ? 'Stage changes and resolve conflicts before generating a commit message.' : 'Generate a commit message with ' + aiCommitMessageProviderLabel(provider)"
+                    (click)="generateCommitMessage(provider)"
+                  >
+                    @switch (provider) {
+                      @case ('claude') { <img src="ai-providers/claude.png" alt="" width="18" height="18" draggable="false" /> }
+                      @case ('cursor') { <img src="ai-providers/cursor.png" alt="" width="18" height="18" draggable="false" /> }
+                      @default { <img src="ai-providers/codex.png" alt="" width="18" height="18" draggable="false" /> }
+                    }
+                  </button>
+                }
+              </div>
+            }
+          </div>
           <textarea id="commit-message" rows="3" [placeholder]="amendMode() ? 'New commit message (optional when keeping the current message)' : 'Summary of the staged changes'" [value]="commitMessage()" [disabled]="workspaceActionBusy()" (input)="updateCommitMessage($any($event.target).value)"></textarea>
-          @if (enabledAiCommitMessageProviders().length > 0) {
-            <div class="ai-commit-actions" aria-label="Generate commit message with AI">
-              @for (provider of enabledAiCommitMessageProviders(); track provider) {
-                <button
-                  type="button"
-                  class="ai-commit-action"
-                  [attr.data-ai-provider]="provider"
-                  [disabled]="aiCommitMessageGenerationDisabled()"
-                  [title]="aiCommitMessageGenerationDisabled() ? 'Stage changes and resolve conflicts before generating a commit message.' : 'Generate a commit message with ' + aiCommitMessageProviderLabel(provider)"
-                  (click)="generateCommitMessage(provider)"
-                ><span aria-hidden="true">✦</span>{{ aiCommitMessageProviderIsGenerating(provider) ? 'Generating with ' + aiCommitMessageProviderLabel(provider) + '…' : 'Generate with ' + aiCommitMessageProviderLabel(provider) }}</button>
-              }
-            </div>
-          }
           @if (commitMessageGenerationError()) {
             <p class="commit-message-generation-error" role="alert">{{ commitMessageGenerationError() }}</p>
           }
@@ -1063,7 +1232,20 @@
           <section class="commit-overview" aria-labelledby="inspected-commit-title">
             <div class="commit-overview-title">
               <h2 id="inspected-commit-title">{{ detail.summary || 'Commit without subject' }}</h2>
-              <button type="button" class="create-branch-from-commit" [disabled]="workspaceActionBusy()" (click)="startBranchFromCommit(detail, $any($event.currentTarget))">New branch here</button>
+              <div class="commit-overview-actions" aria-label="Commit actions">
+                <button type="button" class="commit-action create-branch-from-commit" [disabled]="workspaceActionBusy()" title="Create a local branch at this commit" (click)="startBranchFromCommit(detail, $any($event.currentTarget))"><app-icon name="branch" />New branch</button>
+                <button type="button" class="commit-action" [disabled]="workspaceActionBusy() || detail.parents.length > 1" [title]="detail.parents.length > 1 ? 'Cherry-picking merge commits is not supported yet.' : 'Apply this commit to the current branch'" (click)="requestCherryPick(detail)"><app-icon name="cherry-pick" />Cherry-pick</button>
+                <button type="button" class="commit-action" [disabled]="workspaceActionBusy() || detail.parents.length > 1" [title]="detail.parents.length > 1 ? 'Reverting merge commits is not supported yet.' : 'Create a commit that reverses this change'" (click)="requestRevert(detail)"><app-icon name="history" />Revert</button>
+                <span class="reset-control">
+                  <label for="commit-reset-mode">Reset</label>
+                  <select id="commit-reset-mode" aria-label="Reset mode" [value]="resetMode()" [disabled]="workspaceActionBusy()" (change)="setResetMode($any($event.target).value)">
+                    <option value="soft">Soft</option>
+                    <option value="mixed">Mixed</option>
+                    <option value="hard">Hard</option>
+                  </select>
+                  <button type="button" class="commit-action reset-action" [disabled]="workspaceActionBusy()" [class.danger]="resetMode() === 'hard'" [title]="'Reset the current branch to this commit (' + resetMode() + ')'" (click)="requestReset(detail)"><app-icon name="reset" /><span class="sr-only">Reset {{ resetMode() }}</span></button>
+                </span>
+              </div>
             </div>
             <dl class="commit-meta">
               <div class="commit-meta-oid">
@@ -1114,7 +1296,7 @@
             <ul class="changed-files" aria-label="Changed files">
               @for (file of detail.files; track file.path + ':' + (file.oldPath ?? '')) {
                 @let pathParts = filePathParts(file.path);
-                <li>
+                <li class="changed-file-row">
                   <button type="button" class="changed-file" [class.selected]="selectedFilePath() === file.path" [attr.aria-pressed]="selectedFilePath() === file.path" [title]="'Open diff for ' + file.path" (click)="openFileDiff(file)">
                     <span class="file-status" [attr.data-status]="file.status" [title]="fileStatusLabel(file)">{{ fileStatusMark(file) }}</span>
                     <span class="file-path" [title]="file.path">
@@ -1127,6 +1309,13 @@
                       @if (file.binary) { binary } @else { <b>+{{ file.additions ?? 0 }}</b><i>−{{ file.deletions ?? 0 }}</i> }
                     </span>
                   </button>
+                  <a
+                    class="file-history-link"
+                    [routerLink]="['/workspace', repositoryId, 'file-history']"
+                    [queryParams]="{ oid: detail.oid, path: file.path }"
+                    [title]="'Open history and blame for ' + file.path"
+                    [attr.aria-label]="'Open history and blame for ' + file.path"
+                  ><app-icon name="history" /></a>
                 </li>
               }
             </ul>

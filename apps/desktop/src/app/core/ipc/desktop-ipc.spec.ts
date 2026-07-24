@@ -128,6 +128,35 @@ describe('DesktopIpc', () => {
     ).rejects.toThrow('unavailable outside the desktop application');
   });
 
+  it('does not emulate mutating commit operations outside Tauri', async () => {
+    const precondition = {
+      expectedHead: 'a'.repeat(40),
+      expectedHeadName: 'main',
+      expectedDetached: false,
+      expectedUnborn: false,
+      expectedIndexFingerprint: 'index-v1:test',
+      expectedWorktreeFingerprint: 'worktree-v1:test',
+    };
+
+    await expect(service.invoke('repository_cherry_pick_commit', {
+      repositoryId: 'example-repository',
+      operation: { targetOid: 'b'.repeat(40), precondition },
+    })).rejects.toThrow('Commit operations are unavailable');
+    await expect(service.invoke('repository_revert_commit', {
+      repositoryId: 'example-repository',
+      operation: { targetOid: 'b'.repeat(40), precondition },
+    })).rejects.toThrow('Commit operations are unavailable');
+    await expect(service.invoke('repository_reset_commit', {
+      repositoryId: 'example-repository',
+      operation: {
+        targetOid: 'b'.repeat(40),
+        mode: 'hard',
+        confirmHardReset: true,
+        precondition,
+      },
+    })).rejects.toThrow('Commit operations are unavailable');
+  });
+
   it('does not fabricate stash details or stash file diffs outside Tauri', async () => {
     const oid = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
     await expect(
@@ -180,6 +209,28 @@ describe('DesktopIpc', () => {
     ).rejects.toThrow('unavailable outside the desktop application');
   });
 
+  it('does not pretend to discard working-tree changes outside Tauri', async () => {
+    const precondition = {
+      expectedHead: 'abc123', expectedHeadName: 'main', expectedDetached: false, expectedUnborn: false,
+      expectedIndexFingerprint: 'fixture-index', expectedWorktreeFingerprint: 'fixture-worktree',
+    };
+    await expect(service.invoke('repository_discard_worktree_changes', {
+      repositoryId: 'example-repository',
+      operation: {
+        ...precondition,
+        entries: [{ path: 'src/app.ts', oldPath: null, entryKind: 'ordinary' }],
+      },
+    })).rejects.toThrow('unavailable outside the desktop application');
+    await expect(service.invoke('repository_discard_worktree_hunk', {
+      repositoryId: 'example-repository',
+      operation: {
+        ...precondition,
+        entry: { path: 'src/app.ts', oldPath: null, entryKind: 'ordinary' },
+        patch: '@@ -1 +1 @@\n-old\n+new\n',
+      },
+    })).rejects.toThrow('unavailable outside the desktop application');
+  });
+
   it('does not pretend to create commits outside Tauri', async () => {
     await expect(
       service.invoke('repository_create_commit', {
@@ -219,6 +270,23 @@ describe('DesktopIpc', () => {
     await expect(
       service.invoke('repository_navigation', { repositoryId: 'example-repository' }),
     ).resolves.toEqual({ branches: [], worktrees: [], stashes: [] });
+  });
+
+  it('does not fabricate reference comparisons outside Tauri', async () => {
+    const request = {
+      repositoryId: 'example-repository',
+      sourceFullName: 'refs/heads/feature',
+      expectedSourceOid: '0123456789012345678901234567890123456789',
+      targetFullName: 'refs/heads/main',
+      expectedTargetOid: 'abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+    };
+    await expect(service.invoke('repository_compare_refs', request))
+      .rejects.toThrow('unavailable outside the desktop application');
+    await expect(service.invoke('repository_compare_ref_file_diff', {
+      ...request,
+      path: 'src/app.ts',
+      oldPath: null,
+    })).rejects.toThrow('unavailable outside the desktop application');
   });
 
   it('does not pretend to switch branches outside Tauri', async () => {

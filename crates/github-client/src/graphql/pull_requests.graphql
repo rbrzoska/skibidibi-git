@@ -21,6 +21,11 @@ query PullRequestSummaries($query: String!, $first: Int!, $after: String) {
         comments {
           totalCount
         }
+        latestReviews(first: 100) {
+          nodes {
+            state
+          }
+        }
       }
     }
     pageInfo {

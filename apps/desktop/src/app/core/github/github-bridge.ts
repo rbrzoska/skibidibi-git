@@ -37,6 +37,7 @@ export interface GitHubPullRequestSummary {
   readonly updatedAt: string;
   readonly authoredByViewer: boolean;
   readonly commentCount: number;
+  readonly approvalCount: number;
   readonly reviewRequestedFromViewer: boolean | null;
   readonly unresolvedThreadCount: number | null;
 }
@@ -51,6 +52,7 @@ export interface GitHubPullRequestComment {
   readonly path: string | null;
   readonly line: number | null;
   readonly side: 'left' | 'right' | null;
+  readonly diffHunk: string | null;
 }
 
 export interface GitHubReviewThread {
@@ -72,6 +74,21 @@ export interface GitHubPullRequestDetail extends GitHubPullRequestSummary {
   readonly reviewThreads: readonly GitHubReviewThread[];
   readonly conversationTruncated: boolean;
   readonly reviewThreadsTruncated: boolean;
+}
+
+export interface GitHubPullRequestFile {
+  readonly filename: string;
+  readonly previousFilename: string | null;
+  readonly status: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly changes: number;
+  readonly patch: string | null;
+}
+
+export interface GitHubPullRequestFiles {
+  readonly files: readonly GitHubPullRequestFile[];
+  readonly truncated: boolean;
 }
 
 export interface GitHubListPullRequestsRequest {
@@ -127,6 +144,8 @@ export interface GitHubBridge {
   githubListRepositories(request: { readonly accountId: string; readonly cursor: string | null; readonly pageSize: number }): Promise<GitHubRepositoryPage>;
   githubListPullRequests(request: GitHubListPullRequestsRequest): Promise<GitHubListPullRequestsResponse>;
   githubPullRequestDetail(request: GitHubPullRequestDetailRequest): Promise<GitHubPullRequestDetail>;
+  githubPullRequestFiles?(request: GitHubPullRequestDetailRequest): Promise<GitHubPullRequestFiles>;
+  githubApprovePullRequest?(request: GitHubPullRequestDetailRequest): Promise<{ readonly approved: boolean }>;
 }
 
 export const GITHUB_BRIDGE = new InjectionToken<GitHubBridge>('GITHUB_BRIDGE');

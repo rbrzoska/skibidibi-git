@@ -1,0 +1,82 @@
+<main class="code-reviews">
+  <aside class="review-list-panel">
+    <header><p>AI CODE REVIEW</p><h1>Code Reviews</h1></header>
+    @if (listLoading()) {
+      <p class="empty-state">Loading saved reviews…</p>
+    } @else if (reviews().length === 0) {
+      <p class="empty-state">No task reviews have been generated yet.</p>
+    } @else {
+      <ul aria-label="Saved code reviews">
+        @for (review of reviews(); track review.id) {
+          <li>
+            <button type="button" [class.selected]="selectedReview()?.summary?.id === review.id" (click)="selectReview(review)">
+              <strong>{{ review.branch }}</strong>
+              <span>{{ review.repositoryName }} · {{ providerLabel(review.provider) }}</span>
+              <small>{{ formatDate(review.createdAtMs) }} · {{ review.changedFiles }} files</small>
+            </button>
+          </li>
+        }
+      </ul>
+    }
+  </aside>
+
+  <section class="review-content">
+    <header class="review-toolbar">
+      <div><p>CURRENT TASK</p><h2>{{ repository()?.name ?? 'Saved review' }}</h2></div>
+      @if (repositoryId) { <a [routerLink]="['/workspace', repositoryId, 'history']">Back to Workspace</a> }
+    </header>
+
+    @if (repositoryId) {
+      <section class="review-setup" aria-labelledby="review-setup-heading">
+        <div class="setup-heading"><h3 id="review-setup-heading">Analyze current task</h3><small>Committed branch diff + staged, unstaged and untracked files</small></div>
+        <label>Target branch
+          <select [value]="selectedTargetFullName()" [disabled]="workspaceLoading() || generating() || merging()" (change)="selectTarget($any($event.target).value)">
+            @for (branch of localBranches(); track branch.fullName) {
+              @if (!branch.current) { <option [value]="branch.fullName">{{ branch.name }}</option> }
+            }
+          </select>
+        </label>
+        <label>AI provider
+          <select [value]="selectedProvider() ?? ''" [disabled]="generating() || merging()" (change)="selectProvider($any($event.target).value)">
+            @for (provider of availableProviders(); track provider) { <option [value]="provider">{{ providerLabel(provider) }}</option> }
+          </select>
+        </label>
+
+        @if (availableProviders().length === 0) {
+          <p class="setup-warning">Enable at least one detected AI CLI in <a routerLink="/settings">Settings → AI Support</a>.</p>
+        }
+        @if (preflightLoading() || workspaceLoading()) {
+          <p class="setup-state">Preparing the task snapshot…</p>
+        } @else if (preflight(); as snapshot) {
+          <div class="snapshot-stats">
+            <span><b>{{ snapshot.changedFiles }}</b> changed files</span>
+            <span><b>{{ snapshot.myCommits }}</b> my commits</span>
+            <span><b>{{ snapshot.uncommittedFiles }}</b> uncommitted files</span>
+          </div>
+          @if (!snapshot.targetMerged) {
+            <div class="merge-recommendation">
+              <strong>Target branch is not fully merged</strong>
+              <p>Recommended: merge {{ selectedTarget()?.name }} into {{ currentBranch()?.name }} before review so AI sees only the final task diff against the current target.</p>
+              <button type="button" class="recommended" [disabled]="!canAnalyze()" (click)="mergeTargetAndAnalyze()">{{ merging() ? 'Merging target…' : 'Merge target & analyze' }}</button>
+              <button type="button" [disabled]="!canAnalyze()" (click)="analyzeCurrentState()">Analyze without merge</button>
+            </div>
+          } @else {
+            <button type="button" class="primary" [disabled]="!canAnalyze()" (click)="analyzeCurrentState()">{{ generating() ? 'Analyzing task…' : 'Analyze task' }}</button>
+          }
+        }
+      </section>
+    }
+
+    @if (error()) { <div class="review-error" role="alert">{{ error() }}</div> }
+    @if (generating()) {
+      <div class="review-placeholder"><strong>AI is reviewing the frozen task snapshot…</strong><p>This can take several minutes.</p></div>
+    } @else if (selectedReview(); as document) {
+      <article class="review-document">
+        <header><strong>{{ document.summary.branch }}</strong><span>{{ document.summary.repositoryName }} → {{ document.summary.targetBranch }}</span><small>{{ document.summary.markdownFile }}</small></header>
+        <app-safe-markdown class="review-markdown" [source]="document.markdown" />
+      </article>
+    } @else {
+      <div class="review-placeholder"><strong>Select or generate a code review</strong><p>Reports are saved as Markdown in the application data directory.</p></div>
+    }
+  </section>
+</main>

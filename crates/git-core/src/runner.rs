@@ -12,6 +12,11 @@ use thiserror::Error;
 
 const DEFAULT_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// Keep this in sync with repo-runtime's branch-preview cursor bound. A larger skip would turn a
+// syntactically bounded query into an unexpectedly expensive revision traversal.
+const MAX_PAGED_REV_LIST_SKIP: usize = 10_000_000;
+const MAX_FILE_HISTORY_SKIP: usize = 10_000_000;
+const FILE_HISTORY_LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%s%x00%D";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitOutput {
@@ -369,22 +374,90 @@ fn is_allowed_read_only_shape(arguments: &[&str]) -> bool {
         ["remote", "get-url", "--push", "--", remote] => safe_remote_name(remote),
         ["worktree", "list", "--porcelain", "-z"] => true,
         ["for-each-ref", rest @ ..] => allowed_for_each_ref(rest),
-        ["log", rest @ ..] => allowed_log(rest),
+        ["log", rest @ ..] => allowed_file_history_log(rest) || allowed_log(rest),
         ["show", rest @ ..] => allowed_show(rest),
         ["diff", rest @ ..] => allowed_working_tree_diff(rest),
         ["hash-object", "-t", "tree", "--stdin"] => true,
         ["ls-files", "--stage", "-z"] => true,
         ["ls-files", "-z", "--format=%(objectmode)"] => true,
-        ["cat-file", "blob", oid] => valid_object_id(oid),
+        ["cat-file", "blob", object] => valid_object_id(object) || valid_object_path(object),
+        ["cat-file", "-s", object] => valid_object_path(object),
         ["merge-base", "--is-ancestor", oid, "HEAD"] => valid_object_id(oid),
         ["merge-base", "--is-ancestor", ancestor, descendant] => {
             valid_object_id(ancestor) && valid_object_id(descendant)
         }
+        ["merge-base", ancestor, descendant] => {
+            valid_object_id(ancestor) && valid_object_id(descendant)
+        }
+        ["rev-list", rest @ ..] => allowed_rev_list(rest),
+        [
+            "--literal-pathspecs",
+            "blame",
+            "--line-porcelain",
+            "--no-progress",
+            oid,
+            "--",
+            pathspec,
+        ] => valid_object_id(oid) && valid_safe_path(pathspec),
         _ => false,
     }
 }
 
+fn allowed_rev_list(arguments: &[&str]) -> bool {
+    allowed_legacy_rev_list(arguments)
+        || allowed_paged_rev_list(arguments)
+        || matches!(arguments, ["--left-right", "--count", range] if valid_symmetric_revision_range(range))
+}
+
+fn allowed_legacy_rev_list(arguments: &[&str]) -> bool {
+    let Some(arguments) = arguments.strip_prefix(&["--max-count=50000"]) else {
+        return false;
+    };
+    valid_unique_commit_query(arguments)
+}
+
+fn allowed_paged_rev_list(arguments: &[&str]) -> bool {
+    let Some(arguments) = arguments.strip_prefix(&["--topo-order"]) else {
+        return false;
+    };
+    let [skip, max_count, rest @ ..] = arguments else {
+        return false;
+    };
+    let Some(skip) = skip.strip_prefix("--skip=") else {
+        return false;
+    };
+    let Some(max_count) = max_count.strip_prefix("--max-count=") else {
+        return false;
+    };
+    if skip
+        .parse::<usize>()
+        .map_or(true, |skip| skip > MAX_PAGED_REV_LIST_SKIP)
+        || max_count
+            .parse::<usize>()
+            .map_or(true, |max_count| !(1..=250).contains(&max_count))
+    {
+        return false;
+    }
+    valid_unique_commit_query(rest)
+}
+
+fn valid_unique_commit_query(arguments: &[&str]) -> bool {
+    let arguments = arguments
+        .strip_prefix(&["--first-parent"])
+        .unwrap_or(arguments);
+    let [branch_oid, excluded_target] = arguments else {
+        return false;
+    };
+    valid_object_id(branch_oid)
+        && excluded_target
+            .strip_prefix('^')
+            .is_some_and(valid_object_id)
+}
+
 fn safe_config_key(key: &str) -> bool {
+    if matches!(key, "user.name" | "user.email") {
+        return true;
+    }
     let Some(branch) = key
         .strip_prefix("branch.")
         .and_then(|key| key.strip_suffix(".remote"))
@@ -415,13 +488,16 @@ fn allowed_for_each_ref(arguments: &[&str]) -> bool {
 
 fn allowed_ref_filter(value: &str) -> bool {
     matches!(value, "refs/heads" | "refs/remotes" | "refs/stash")
-        || value.strip_prefix("refs/heads/").is_some_and(|branch| {
-            !branch.is_empty()
-                && !branch.starts_with('-')
-                && !branch.chars().any(char::is_control)
-                && !branch.contains("..")
-                && !branch.contains("@{")
-        })
+        || value
+            .strip_prefix("refs/heads/")
+            .or_else(|| value.strip_prefix("refs/remotes/"))
+            .is_some_and(|branch| {
+                !branch.is_empty()
+                    && !branch.starts_with('-')
+                    && !branch.chars().any(char::is_control)
+                    && !branch.contains("..")
+                    && !branch.contains("@{")
+            })
 }
 
 fn allowed_log(arguments: &[&str]) -> bool {
@@ -436,13 +512,38 @@ fn allowed_log(arguments: &[&str]) -> bool {
                 || argument.strip_prefix("--skip=").is_some_and(ascii_digits)
                 || argument.starts_with("--format=")
                 || valid_object_id(argument)
+                || valid_revision_range(argument)
         })
         && arguments
             .iter()
             .any(|argument| argument.starts_with("--format="))
-        && arguments
-            .iter()
-            .any(|argument| *argument == "refs/stash" || valid_object_id(argument))
+        && arguments.iter().any(|argument| {
+            *argument == "refs/stash" || valid_object_id(argument) || valid_revision_range(argument)
+        })
+}
+
+fn allowed_file_history_log(arguments: &[&str]) -> bool {
+    let [
+        "-z",
+        "--topo-order",
+        "--follow",
+        max_count,
+        skip,
+        FILE_HISTORY_LOG_FORMAT,
+        oid,
+        "--",
+        pathspec,
+    ] = arguments
+    else {
+        return false;
+    };
+    *max_count == "--max-count=101"
+        && skip
+            .strip_prefix("--skip=")
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|value| value <= MAX_FILE_HISTORY_SKIP)
+        && valid_object_id(oid)
+        && valid_literal_pathspec(pathspec)
 }
 
 fn allowed_show(arguments: &[&str]) -> bool {
@@ -536,6 +637,72 @@ fn allowed_working_tree_diff(arguments: &[&str]) -> bool {
     {
         return true;
     }
+    if let ["--name-only", "-z", "--no-renames", base, "--"] = arguments {
+        return valid_object_id(base);
+    }
+    if let [
+        "--name-status" | "--numstat",
+        "-z",
+        "-M",
+        base,
+        source,
+        "--",
+    ] = arguments
+    {
+        return valid_object_id(base) && valid_object_id(source);
+    }
+    if let [
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-M",
+        "--unified=2147483647",
+        base,
+        source,
+        "--",
+        pathspecs @ ..,
+    ] = arguments
+    {
+        return valid_object_id(base)
+            && valid_object_id(source)
+            && matches!(pathspecs.len(), 1 | 2)
+            && pathspecs
+                .iter()
+                .all(|pathspec| valid_literal_pathspec(pathspec));
+    }
+    if let [
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-M",
+        "--unified=3",
+        "--",
+        pathspecs @ ..,
+    ] = arguments
+    {
+        return matches!(pathspecs.len(), 1 | 2)
+            && pathspecs
+                .iter()
+                .all(|pathspec| valid_literal_pathspec(pathspec));
+    }
+    if let [
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-M",
+        "--unified=3",
+        base,
+        "--",
+        pathspecs @ ..,
+    ] = arguments
+    {
+        return valid_object_id(base)
+            && !pathspecs.is_empty()
+            && pathspecs.len() <= 200
+            && pathspecs
+                .iter()
+                .all(|pathspec| valid_literal_pathspec(pathspec));
+    }
     let arguments = arguments.strip_prefix(&["--cached"]).unwrap_or(arguments);
     let [
         "--no-color",
@@ -563,12 +730,37 @@ fn valid_literal_pathspec(value: &str) -> bool {
         .is_some_and(|path| !path.is_empty() && !path.contains('\0'))
 }
 
+fn valid_safe_path(value: &str) -> bool {
+    !value.is_empty() && !value.contains('\0')
+}
+
+fn valid_object_path(value: &str) -> bool {
+    let Some((oid, path)) = value.split_once(':') else {
+        return false;
+    };
+    valid_object_id(oid) && !path.is_empty() && !path.contains('\0')
+}
+
 fn ascii_digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn valid_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_revision_range(value: &str) -> bool {
+    let Some((from, to)) = value.split_once("..") else {
+        return false;
+    };
+    !to.contains("..") && valid_object_id(from) && valid_object_id(to)
+}
+
+fn valid_symmetric_revision_range(value: &str) -> bool {
+    let Some((from, to)) = value.split_once("...") else {
+        return false;
+    };
+    !to.contains("...") && valid_object_id(from) && valid_object_id(to)
 }
 
 struct BoundedOutput {
@@ -782,6 +974,288 @@ mod tests {
     }
 
     #[test]
+    fn read_only_policy_allows_only_bounded_oid_rev_list_queries() {
+        let branch = "0123456789012345678901234567890123456789";
+        let target = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        for arguments in [
+            vec![
+                "rev-list",
+                "--max-count=50000",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--max-count=50000",
+                "--first-parent",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=0",
+                "--max-count=1",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=10000000",
+                "--max-count=250",
+                "--first-parent",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+        ] {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            validate_read_only_command(&arguments).expect("bounded rev-list is allowed");
+        }
+
+        for arguments in [
+            vec!["rev-list", branch, target],
+            vec![
+                "rev-list",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec!["rev-list", "--all"],
+            vec!["rev-list", "--max-count=50001", branch, target],
+            vec!["rev-list", "--max-count=50000", "main", target],
+            vec!["rev-list", "--max-count=50000", branch, "^main"],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=0",
+                "--max-count=251",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=0",
+                "--max-count=0",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=not-a-number",
+                "--max-count=250",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=10000001",
+                "--max-count=250",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--skip=0",
+                "--max-count=250",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--max-count=250",
+                "--skip=0",
+                branch,
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec![
+                "rev-list",
+                "--topo-order",
+                "--skip=0",
+                "--max-count=250",
+                "main",
+                "^abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+        ] {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                validate_read_only_command(&arguments),
+                Err(GitRunError::ReadOnlyPolicyViolation { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn file_history_and_blame_allowlists_accept_only_the_bounded_literal_shapes() {
+        let oid = "0123456789012345678901234567890123456789";
+        let allowed = [
+            vec![
+                "log",
+                "-z",
+                "--topo-order",
+                "--follow",
+                "--max-count=101",
+                "--skip=10000000",
+                FILE_HISTORY_LOG_FORMAT,
+                oid,
+                "--",
+                ":(literal)--output=/tmp/not-created",
+            ],
+            vec![
+                "cat-file",
+                "-s",
+                "0123456789012345678901234567890123456789:file.txt",
+            ],
+            vec![
+                "cat-file",
+                "blob",
+                "0123456789012345678901234567890123456789:--output=/tmp/not-created",
+            ],
+            vec![
+                "--literal-pathspecs",
+                "blame",
+                "--line-porcelain",
+                "--no-progress",
+                oid,
+                "--",
+                "src/file.rs",
+            ],
+        ];
+        for arguments in allowed {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            validate_read_only_command(&arguments).expect("safe file-history shape");
+        }
+
+        let forbidden = [
+            vec![
+                "log",
+                "-z",
+                "--topo-order",
+                "--follow",
+                "--max-count=102",
+                "--skip=0",
+                FILE_HISTORY_LOG_FORMAT,
+                oid,
+                "--",
+                ":(literal)src/file.rs",
+            ],
+            vec![
+                "log",
+                "-z",
+                "--topo-order",
+                "--follow",
+                "--max-count=101",
+                "--skip=10000001",
+                FILE_HISTORY_LOG_FORMAT,
+                oid,
+                "--",
+                ":(literal)src/file.rs",
+            ],
+            vec!["cat-file", "-s", "main:file.txt"],
+            vec![
+                "--literal-pathspecs",
+                "blame",
+                "--line-porcelain",
+                oid,
+                "--",
+                "src/file.rs",
+            ],
+        ];
+        for arguments in forbidden {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                validate_read_only_command(&arguments),
+                Err(GitRunError::ReadOnlyPolicyViolation { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn ref_comparison_allowlist_accepts_only_exact_bounded_shapes() {
+        let base = "0123456789012345678901234567890123456789";
+        let source = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let symmetric_range = format!("{base}...{source}");
+        let allowed = [
+            vec![
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00%(symref)%00",
+                "--count=2",
+                "refs/remotes/origin/feature",
+            ],
+            vec![
+                "rev-list",
+                "--left-right",
+                "--count",
+                symmetric_range.as_str(),
+            ],
+            vec!["diff", "--name-status", "-z", "-M", base, source, "--"],
+            vec!["diff", "--numstat", "-z", "-M", base, source, "--"],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=2147483647",
+                base,
+                source,
+                "--",
+                ":(literal)--output=/tmp/not-created",
+            ],
+        ];
+        for arguments in allowed {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            validate_read_only_command(&arguments).expect("comparison shape is allowed");
+        }
+
+        let forbidden = [
+            vec!["rev-list", "--left-right", symmetric_range.as_str()],
+            vec!["rev-list", "--left-right", "--count", "main...feature"],
+            vec!["diff", "--name-status", "-z", "-M", base, "main", "--"],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=2147483647",
+                base,
+                source,
+                "--",
+                "--output=/tmp/not-safe",
+            ],
+        ];
+        for arguments in forbidden {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                validate_read_only_command(&arguments),
+                Err(GitRunError::ReadOnlyPolicyViolation { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn read_only_policy_preserves_fixed_status_metadata_history_and_navigation_queries() {
         let oid = "0123456789012345678901234567890123456789";
         let descendant = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -859,6 +1333,84 @@ mod tests {
                 .map(OsString::from)
                 .collect::<Vec<_>>();
             validate_read_only_command(&arguments).expect("known read-only query is allowed");
+        }
+    }
+
+    #[test]
+    fn task_review_allowlist_accepts_only_bounded_object_ids_and_literal_paths() {
+        let base = "0123456789012345678901234567890123456789";
+        let head = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let allowed = [
+            vec!["config", "--get", "user.name"],
+            vec!["config", "--get", "user.email"],
+            vec!["merge-base", head, base],
+            vec![
+                "log",
+                "-z",
+                "--format=%H%x00%an%x00%ae%x00%s",
+                "0123456789012345678901234567890123456789..abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            ],
+            vec!["diff", "--name-only", "-z", "--no-renames", base, "--"],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=3",
+                base,
+                "--",
+                ":(literal)src/task.rs",
+            ],
+        ];
+        for arguments in allowed {
+            validate_read_only_command(
+                &arguments
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("task review query is allowlisted");
+        }
+
+        let rejected = [
+            vec!["config", "--get", "credential.helper"],
+            vec!["merge-base", "HEAD", base],
+            vec!["log", "-z", "--format=%H", "main..HEAD"],
+            vec!["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-M",
+                "--unified=3",
+                base,
+                "--",
+                "src/task.rs",
+            ],
+            vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--textconv",
+                "-M",
+                "--unified=3",
+                base,
+                "--",
+                ":(literal)src/task.rs",
+            ],
+        ];
+        for arguments in rejected {
+            assert!(matches!(
+                validate_read_only_command(
+                    &arguments
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect::<Vec<_>>()
+                ),
+                Err(GitRunError::ReadOnlyPolicyViolation { .. })
+            ));
         }
     }
 
@@ -983,6 +1535,18 @@ mod tests {
         .map(OsString::from);
         validate_read_only_command(&cached_allowed)
             .expect("exact cached collision diff is allowed");
+        let unstaged_allowed = [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-M",
+            "--unified=3",
+            "--",
+            ":(literal)file.txt",
+        ]
+        .map(OsString::from);
+        validate_read_only_command(&unstaged_allowed).expect("exact unstaged hunk diff is allowed");
 
         for rejected in [
             vec![

@@ -1,6 +1,6 @@
 <header class="app-bar">
   <a class="product" routerLink="/repositories" aria-label="Skibidibi Git repositories">
-    <span class="product-mark" aria-hidden="true"></span>
+    <img class="product-mark" src="/brand/skibidibi-git.svg" alt="" aria-hidden="true" />
     <strong>Skibidibi Git</strong>
   </a>
   <nav class="screen-tabs" aria-label="Application navigation">
@@ -8,6 +8,8 @@
       <a [routerLink]="workspace" routerLinkActive="active" ariaCurrentWhenActive="page">Workspace</a>
     }
     <a routerLink="/repositories" routerLinkActive="active" ariaCurrentWhenActive="page">Repositories</a>
+    <a routerLink="/pull-requests" routerLinkActive="active" ariaCurrentWhenActive="page">Pull Requests</a>
+    <a routerLink="/code-reviews" routerLinkActive="active" ariaCurrentWhenActive="page">Code Reviews</a>
     <a routerLink="/settings" routerLinkActive="active" ariaCurrentWhenActive="page">Settings</a>
   </nav>
   <div class="app-controls">
@@ -21,8 +23,6 @@
       <span>{{ accountLabel() }}</span>
     </a>
   </div>
-  @if (uiScale.error()) {
-    <span class="visually-hidden" role="status">{{ uiScale.error() }}</span>
-  }
 </header>
 <router-outlet />
+<app-ui-feedback-host />

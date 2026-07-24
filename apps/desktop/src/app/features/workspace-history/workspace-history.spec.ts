@@ -7,6 +7,8 @@ import {
   type DesktopIpcClient,
   type RepositoryCommitDetailResponse,
   type RepositoryCommitSummary,
+  type RepositoryNavigationResponse,
+  type RepositoryStatusResponse,
 } from '../../core/ipc/desktop-ipc';
 import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT } from '../../core/ai-support/ai-support.store';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
@@ -67,7 +69,7 @@ function detailFor(commit: RepositoryCommitSummary): RepositoryCommitDetailRespo
   };
 }
 
-function repositoryStatus() {
+function repositoryStatus(): RepositoryStatusResponse {
   return {
     indexFingerprint: 'index-before',
     worktreeFingerprint: 'worktree-before',
@@ -286,7 +288,7 @@ describe('WorkspaceHistory', () => {
     if (command === 'repository_status') {
       return Promise.resolve(repositoryStatus());
     }
-    if (command === 'repository_history') {
+    if (command === 'repository_history' || command === 'repository_branch_history') {
       const cursor = (request as { cursor: string | null }).cursor;
       return Promise.resolve(
         cursor === null
@@ -516,17 +518,26 @@ describe('WorkspaceHistory', () => {
     }
     if (command === 'repository_working_tree_file_diff') {
       const { path } = request as { path: string };
+      const patch = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old working line\n+new working line`;
       return Promise.resolve({
         path,
         binary: false,
         truncated: false,
-        patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old working line\n+new working line`,
+        patch,
+        unstagedPatch: patch + '\n',
       });
     }
     if (command === 'repository_apply_index_change') {
       return Promise.resolve({
         changed: true,
         status: { ...repositoryStatus(), indexFingerprint: 'index-after' },
+      });
+    }
+    if (command === 'repository_discard_worktree_changes' || command === 'repository_discard_worktree_hunk') {
+      return Promise.resolve({
+        discardedEntries: 1,
+        deletedUntrackedFiles: 0,
+        status: { ...repositoryStatus(), worktreeFingerprint: 'worktree-after-discard', entries: [] },
       });
     }
     if (command === 'repository_create_commit') {
@@ -552,7 +563,37 @@ describe('WorkspaceHistory', () => {
         },
       });
     }
+    if (
+      command === 'repository_cherry_pick_commit' ||
+      command === 'repository_revert_commit' ||
+      command === 'repository_reset_commit'
+    ) {
+      const targetOid = (request as { operation: { targetOid: string } }).operation.targetOid;
+      return Promise.resolve({
+        state: 'succeeded',
+        targetOid,
+        headBefore: 'abc',
+        headAfter: 'f'.repeat(40),
+        status: {
+          ...repositoryStatus(),
+          branch: { ...repositoryStatus().branch, oid: 'f'.repeat(40) },
+          entries: [],
+        },
+        errorMessage: null,
+        mutationMayHaveOccurred: true,
+      });
+    }
     return Promise.reject(new Error(`Unexpected command: ${command}`));
+  }
+
+  async function defaultIpcWithoutCheckedOutFeature(
+    command: string,
+    request: unknown,
+  ): Promise<unknown> {
+    const response = await defaultIpc(command, request);
+    return command === 'repository_navigation'
+      ? { ...(response as RepositoryNavigationResponse), worktrees: [] }
+      : response;
   }
 
   it('hides AI commit-message generators until a locally available CLI is enabled', async () => {
@@ -570,7 +611,9 @@ describe('WorkspaceHistory', () => {
     const button = fixture.nativeElement.querySelector(
       '[data-ai-provider="codex"]',
     ) as HTMLButtonElement;
-    expect(button.textContent).toContain('Generate with Codex');
+    expect(button.getAttribute('aria-label')).toBe('Generate a commit message with Codex');
+    expect((button.querySelector('img') as HTMLImageElement).getAttribute('src')).toBe('ai-providers/codex.png');
+    expect(button.closest('.commit-composer-heading')).not.toBeNull();
     expect(button.disabled).toBe(false);
   });
 
@@ -653,6 +696,87 @@ describe('WorkspaceHistory', () => {
     expect(element.querySelectorAll('.commit-row .graph')).toHaveLength(2);
     expect(element.textContent).toContain('Add repository history');
     expect(element.textContent).not.toContain('History backend is next');
+
+    (element.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const fileHistoryLink = element.querySelector('.file-history-link') as HTMLAnchorElement;
+    expect(fileHistoryLink.getAttribute('href')).toContain('/workspace/skibidibi-git/file-history');
+    expect(fileHistoryLink.getAttribute('href')).toContain(`oid=${'a'.repeat(40)}`);
+    expect(fileHistoryLink.getAttribute('href')).toContain('path=');
+  });
+
+  it('confirms and cherry-picks the inspected non-merge commit with the current repository snapshot', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const cherryPick = fixture.nativeElement.querySelector(
+      'button[title="Apply this commit to the current branch"]',
+    ) as HTMLButtonElement;
+    expect(cherryPick.disabled).toBe(false);
+    cherryPick.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-title')?.textContent)
+      .toContain('Cherry-pick');
+
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('repository_cherry_pick_commit', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        targetOid: 'a'.repeat(40),
+        precondition: {
+          expectedHead: 'abc',
+          expectedHeadName: 'main',
+          expectedDetached: false,
+          expectedUnborn: false,
+          expectedIndexFingerprint: 'index-before',
+          expectedWorktreeFingerprint: 'worktree-before',
+        },
+      },
+    });
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent)
+      .toContain('Cherry-picked');
+  });
+
+  it('makes hard reset visually destructive and sends the explicit backend confirmation', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const mode = fixture.nativeElement.querySelector('#commit-reset-mode') as HTMLSelectElement;
+    mode.value = 'hard';
+    mode.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.reset-action') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.destructive-action-description')?.textContent)
+      .toContain('permanently discard tracked staged and unstaged changes');
+    expect(fixture.nativeElement.querySelector('#confirm-destructive-action')?.classList)
+      .toContain('danger');
+
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_reset_commit', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        targetOid: 'a'.repeat(40),
+        mode: 'hard',
+        confirmHardReset: true,
+        precondition: expect.objectContaining({
+          expectedHead: 'abc',
+          expectedIndexFingerprint: 'index-before',
+          expectedWorktreeFingerprint: 'worktree-before',
+        }),
+      },
+    });
   });
 
   it('inspects a stash by immutable OID, opens its rename diff, and returns to the stash context', async () => {
@@ -771,12 +895,13 @@ describe('WorkspaceHistory', () => {
       }
       return defaultIpc(command, request);
     };
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const { fixture } = await createFixture(ipc);
     (fixture.nativeElement.querySelector('.stash-inspect') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
     (fixture.nativeElement.querySelector('[aria-label="Drop stash@{0}"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -785,7 +910,6 @@ describe('WorkspaceHistory', () => {
       'Commit inspector',
     );
     expect(fixture.nativeElement.querySelector('.selected.stash-inspect')).toBeNull();
-    confirm.mockRestore();
   });
 
   it('summarizes working tree changes above commit history', async () => {
@@ -818,6 +942,8 @@ describe('WorkspaceHistory', () => {
     expect(workingRow.textContent).toContain('→1');
     expect(workingRow.textContent).toContain('−4');
     expect(workingRow.textContent).toContain('8 uncommitted · 6 staged');
+    expect(workingRow.querySelector('.graph.working-tree-graph > i')).not.toBeNull();
+    expect(workingRow.querySelector('.working-tree-dot')).toBeNull();
     expect(workingRow.querySelector('.commit-author')?.textContent).toContain('you');
     expect(workingRow.querySelector('time')?.textContent).toContain('now');
     expect(workingRow.querySelector('code')?.textContent).toContain('—');
@@ -948,7 +1074,7 @@ describe('WorkspaceHistory', () => {
     fixture.detectChanges();
 
     const checkbox = fixture.nativeElement.querySelector(
-      '[aria-label="Select new.ts for a staging action"]',
+      '[aria-label="Select new.ts"]',
     ) as HTMLInputElement;
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event('change'));
@@ -1000,6 +1126,83 @@ describe('WorkspaceHistory', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_history')).toHaveLength(1);
   });
 
+  it('confirms and discards selected files with a permanent-deletion warning for untracked files', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({ kind: 'ready', status: repositoryStatus() });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const checkbox = fixture.nativeElement.querySelector(
+      '[aria-label="Select new.ts"]',
+    ) as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    const discard = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.working-tree-file-group:last-child > header button')]
+      .find((button) => button.textContent?.includes('Discard selected')) as HTMLButtonElement;
+    discard.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-description')?.textContent).toContain('permanently deleted');
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_discard_worktree_changes', {
+      repositoryId: 'skibidibi-git',
+      operation: {
+        entries: [{ path: 'new.ts', oldPath: null, entryKind: 'untracked' }],
+        expectedHead: 'abc',
+        expectedHeadName: 'main',
+        expectedDetached: false,
+        expectedUnborn: false,
+        expectedIndexFingerprint: 'index-before',
+        expectedWorktreeFingerprint: 'worktree-before',
+      },
+    });
+  });
+
+  it('confirms and discards one fresh hunk from the working-tree diff', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const path = 'website/front-end-ng/src/app/features/customers/services/customers-dialog.service.ts';
+    const statusStore = statusStoreFor(fixture);
+    statusStore.state.set({
+      kind: 'ready',
+      status: {
+        ...repositoryStatus(),
+        entries: [{ kind: 'ordinary', path, originalPath: null, indexStatus: 'unmodified', worktreeStatus: 'modified', submodule: null }],
+      },
+    });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-files .changed-file') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const discard = fixture.nativeElement.querySelector('.discard-hunk') as HTMLButtonElement;
+    expect(discard.textContent).toContain('Discard chunk 1');
+    expect(discard.closest('.diff-row.hunk-header')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.diff-toolbar .discard-hunk')).toBeNull();
+    const heading = fixture.nativeElement.querySelector('.diff-file-path') as HTMLElement;
+    expect(heading.title).toBe(path);
+    expect(heading.querySelector('.file-directory')?.textContent).toBe('website/front-end-ng/src/app/features/customers/services');
+    expect(heading.querySelector('.file-name')?.textContent).toBe('customers-dialog.service.ts');
+    expect(fixture.nativeElement.querySelector('.diff-row.file-header')).toBeNull();
+    discard.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-description')?.textContent).toContain('Discard this change block');
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('repository_discard_worktree_hunk', expect.objectContaining({
+      operation: expect.objectContaining({
+        entry: { path, oldPath: null, entryKind: 'ordinary' },
+        patch: expect.stringContaining('@@ -1 +1 @@'),
+      }),
+    }));
+  });
+
   it('ignores a pending mutation result after the workspace is destroyed', async () => {
     let resolveMutation!: (value: unknown) => void;
     const mutation = new Promise((resolve) => { resolveMutation = resolve; });
@@ -1012,7 +1215,7 @@ describe('WorkspaceHistory', () => {
     (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
     fixture.detectChanges();
     const checkbox = fixture.nativeElement.querySelector(
-      '[aria-label="Select new.ts for a staging action"]',
+      '[aria-label="Select new.ts"]',
     ) as HTMLInputElement;
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event('change'));
@@ -1162,6 +1365,60 @@ describe('WorkspaceHistory', () => {
     expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
   });
 
+  it('uses the refreshed navigation OID when reloading classified history after a commit', async () => {
+    let headOid = 'before-commit';
+    const taskStatus = (entries: ReturnType<typeof repositoryStatus>['entries']) => ({
+      ...repositoryStatus(),
+      branch: { ...repositoryStatus().branch, oid: headOid, head: 'demo/task', upstream: 'origin/demo/task' },
+      entries,
+    });
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        return Promise.resolve(taskStatus([]));
+      }
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/demo/task', name: 'demo/task', oid: headOid, current: true, upstream: 'origin/demo/task', ahead: 1, behind: 0, upstreamGone: false, symbolicTarget: null },
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'main-oid', current: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [],
+          stashes: [],
+        });
+      }
+      if (command === 'repository_create_commit') {
+        headOid = 'after-commit';
+        return Promise.resolve({
+          oid: headOid,
+          status: taskStatus([]),
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const stagedEntry = {
+      kind: 'ordinary' as const,
+      path: 'app.ts',
+      originalPath: null,
+      indexStatus: 'modified' as const,
+      worktreeStatus: 'unmodified' as const,
+      submodule: null,
+    };
+    statusStoreFor(fixture).state.set({ kind: 'ready', status: taskStatus([stagedEntry]) });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    textarea.value = 'Commit task';
+    textarea.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('.commit-composer .primary-action') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    const historyRequests = invoke.mock.calls.filter(([command]) => command === 'repository_branch_history');
+    expect(historyRequests.at(-1)?.[1]).toMatchObject({ expectedBranchOid: 'after-commit' });
+  });
+
   it('opens amend mode from the workspace toolbar when the working tree is clean', async () => {
     const cleanStatus = { ...repositoryStatus(), entries: [] };
     const ipc = (command: string, request: unknown): Promise<unknown> =>
@@ -1234,7 +1491,6 @@ describe('WorkspaceHistory', () => {
       }
       return defaultIpc(command, request);
     };
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const { fixture, invoke } = await createFixture(ipc);
     (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
     fixture.detectChanges();
@@ -1242,9 +1498,11 @@ describe('WorkspaceHistory', () => {
       .find((button) => button.textContent?.includes('keep message')) as HTMLButtonElement;
     keepMessage.click();
     fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-title')?.textContent).toContain('published');
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    fixture.detectChanges();
     keepMessage.click();
 
-    expect(confirm).toHaveBeenCalledOnce();
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_amend_commit')).toHaveLength(1);
     expect(invoke).toHaveBeenCalledWith('repository_amend_commit', expect.objectContaining({
       operation: expect.objectContaining({ message: null, confirmUpstreamRewrite: true }),
@@ -1259,7 +1517,6 @@ describe('WorkspaceHistory', () => {
     });
     await pendingAmend;
     await fixture.whenStable();
-    confirm.mockRestore();
   });
 
   it('keeps amend mode and its message after a failed amend and refreshes status', async () => {
@@ -1384,7 +1641,7 @@ describe('WorkspaceHistory', () => {
     (fixture.nativeElement.querySelector('.working-tree-files .changed-file') as HTMLButtonElement).click();
 
     const checkbox = fixture.nativeElement.querySelector(
-      '[aria-label="Select new.ts for a staging action"]',
+      '[aria-label="Select new.ts"]',
     ) as HTMLInputElement;
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event('change'));
@@ -1405,6 +1662,7 @@ describe('WorkspaceHistory', () => {
       binary: false,
       truncated: false,
       patch: 'diff --git a/new.ts b/new.ts\n@@ -0,0 +1 @@\n+stale content',
+      unstagedPatch: '',
     });
     await Promise.resolve();
     fixture.detectChanges();
@@ -1667,20 +1925,238 @@ describe('WorkspaceHistory', () => {
     ).toContain('feature');
   });
 
-  it('confirms and switches a non-current local branch, then refreshes workspace data', async () => {
+  it('opens Compare with the active branch and a distinct main ref as its default target', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect((fixture.nativeElement.querySelector('.compare-entry') as HTMLButtonElement).disabled).toBe(false);
+    });
+    const router = fixture.debugElement.injector.get(Router);
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+
+    (fixture.nativeElement.querySelector('.compare-entry') as HTMLButtonElement).click();
+
+    expect(navigate).toHaveBeenCalledWith(
+      ['/workspace', 'skibidibi-git', 'compare'],
+      {
+        queryParams: {
+          source: 'refs/heads/main',
+          target: 'refs/remotes/origin/main',
+        },
+      },
+    );
+  });
+
+  it('prefers the remembered release branch as the Compare target', async () => {
+    globalThis.localStorage.setItem(
+      releaseBranchStorageKey('skibidibi-git'),
+      'refs/heads/rb/feature',
+    );
+    const { fixture } = await createFixture(defaultIpc);
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect((fixture.nativeElement.querySelector('.compare-entry') as HTMLButtonElement).disabled).toBe(false);
+    });
+    const router = fixture.debugElement.injector.get(Router);
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+
+    (fixture.nativeElement.querySelector('.compare-entry') as HTMLButtonElement).click();
+
+    expect(navigate).toHaveBeenCalledWith(
+      ['/workspace', 'skibidibi-git', 'compare'],
+      {
+        queryParams: {
+          source: 'refs/heads/main',
+          target: 'refs/heads/rb/feature',
+        },
+      },
+    );
+  });
+
+  it('previews a local branch without switching its active worktree and compares it with main by default', async () => {
+    const { fixture, invoke } = await createFixture(defaultIpc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    ([...local.querySelectorAll<HTMLButtonElement>('button.branch-row')]
+      .find((button) => button.title.includes('Preview rb/feature')) as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(invoke).toHaveBeenCalledWith('repository_branch_history', {
+      repositoryId: 'skibidibi-git',
+      branchFullName: 'refs/heads/rb/feature',
+      expectedBranchOid: 'def',
+      targetFullName: 'refs/heads/main',
+      expectedTargetOid: 'abc',
+      cursor: null,
+      limit: 50,
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch')).toHaveLength(0);
+    expect(fixture.nativeElement.querySelector('.branch-preview-banner')?.textContent).toContain('rb/feature');
+    expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
+
+    (fixture.nativeElement.querySelector('.branch-preview-banner button') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.branch-preview-banner')).toBeNull();
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history')).toHaveLength(2);
+  });
+
+  it('clears a read-only preview after a successful real checkout', async () => {
+    const { fixture } = await createFixture(defaultIpcWithoutCheckedOutFeature);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...local.querySelectorAll<HTMLButtonElement>('button.branch-row')]
+      .find((button) => button.title.includes('Preview rb/feature')) as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.branch-preview-banner')).not.toBeNull();
+
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.branch-context-menu button')]
+      .find((button) => button.textContent?.includes('Checkout in active worktree')) as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#confirm-branch-switch') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.branch-preview-banner')).toBeNull();
+  });
+
+  it('renders task, merge, and shared-base classifications without text labels', async () => {
+    const previewCommits = [
+      { ...commits[0], relation: 'task' as const },
+      { ...commits[1], relation: 'merge' as const },
+      { ...commits[1], oid: 'cccccccccccccccccccccccccccccccccccccccc', relation: 'base' as const },
+    ];
     const ipc = (command: string, request: unknown): Promise<unknown> =>
-      command === 'repository_status'
-        ? Promise.resolve({ ...repositoryStatus(), entries: [] })
+      command === 'repository_branch_history'
+        ? Promise.resolve({ commits: previewCommits, nextCursor: null })
+        : defaultIpc(command, request);
+    const { fixture } = await createFixture(ipc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...local.querySelectorAll<HTMLButtonElement>('button.branch-row')]
+      .find((button) => button.title.includes('Preview rb/feature')) as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.commit-task .graph')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.commit-merge .graph')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.commit-base .graph')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.commit-relation')).toBeNull();
+  });
+
+  it('classifies the active branch against the marked release branch', async () => {
+    globalThis.localStorage.setItem(
+      releaseBranchStorageKey('skibidibi-git'),
+      'refs/heads/rb/feature',
+    );
+    const classifiedCommits = [
+      { ...commits[0], relation: 'task' as const },
+      { ...commits[1], relation: 'merge' as const },
+    ];
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_branch_history'
+        ? Promise.resolve({ commits: classifiedCommits, nextCursor: null })
+        : defaultIpc(command, request);
+
+    const { fixture, invoke } = await createFixture(ipc);
+
+    expect(invoke).toHaveBeenCalledWith('repository_branch_history', {
+      repositoryId: 'skibidibi-git',
+      branchFullName: 'refs/heads/main',
+      expectedBranchOid: 'abc',
+      targetFullName: 'refs/heads/rb/feature',
+      expectedTargetOid: 'def',
+      cursor: null,
+      limit: 50,
+    });
+    expect(fixture.nativeElement.querySelector('.commit-task')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.commit-merge')).not.toBeNull();
+  });
+
+  it('classifies an active task branch against main when no release is marked', async () => {
+    const classifiedCommits = [
+      { ...commits[0], relation: 'task' as const },
+      { ...commits[1], relation: 'base' as const },
+    ];
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/demo/task', name: 'demo/task', oid: 'def', current: true, upstream: null, ahead: 2, behind: 0, upstreamGone: false, symbolicTarget: null },
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: false, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [],
+          stashes: [],
+        });
+      }
+      return command === 'repository_branch_history'
+        ? Promise.resolve({ commits: classifiedCommits, nextCursor: null })
+        : defaultIpc(command, request);
+    };
+
+    const { fixture, invoke } = await createFixture(ipc);
+
+    expect(invoke).toHaveBeenCalledWith('repository_branch_history', {
+      repositoryId: 'skibidibi-git',
+      branchFullName: 'refs/heads/demo/task',
+      expectedBranchOid: 'def',
+      targetFullName: 'refs/heads/main',
+      expectedTargetOid: 'abc',
+      cursor: null,
+      limit: 50,
+    });
+    expect(fixture.nativeElement.querySelector('.commit-task')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.commit-base')).not.toBeNull();
+  });
+
+  it('opens a local branch in VS Code through the explicit context action', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'open_branch_workspace'
+        ? Promise.resolve({ path: '/work/feature-tree', worktreeCreated: true, target: 'vsCode' })
         : defaultIpc(command, request);
     const { fixture, invoke } = await createFixture(ipc);
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
-    const branch = [...local.querySelectorAll<HTMLButtonElement>('button.branch-row')].find(
-      (button) => button.title.includes('rb/feature'),
-    );
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.branch-context-menu button')]
+      .find((button) => button.textContent?.includes('Open in VS Code')) as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
 
-    branch?.click();
+    expect(invoke).toHaveBeenCalledWith('open_branch_workspace', {
+      request: {
+        repositoryId: 'skibidibi-git',
+        branchFullName: 'refs/heads/rb/feature',
+        expectedOid: 'def',
+        target: 'vsCode',
+      },
+    });
+    expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('Created a managed worktree');
+  });
+
+  it('confirms and checks out a non-current local branch from its explicit context action, then refreshes workspace data', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'repository_status'
+        ? Promise.resolve({ ...repositoryStatus(), entries: [] })
+        : defaultIpcWithoutCheckedOutFeature(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.branch-context-menu button')]
+      .find((button) => button.textContent?.includes('Checkout in active worktree')) as HTMLButtonElement).click();
     fixture.detectChanges();
 
     const dialog = fixture.nativeElement.querySelector('.switch-confirmation') as HTMLDialogElement;
@@ -1701,6 +2177,47 @@ describe('WorkspaceHistory', () => {
       },
     });
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
+  });
+
+  it('opens the existing worktree instead of switching a branch that is checked out there', async () => {
+    const worktreeRepository = {
+      ...rememberedRepository,
+      id: 'feature-tree',
+      repositoryGroupId: 'shared-git-directory',
+      worktreeRole: 'linked' as const,
+      canonicalPath: '/work/feature-tree',
+      displayName: 'feature-tree',
+    };
+    const ipc = (command: string, request: unknown): Promise<unknown> =>
+      command === 'remember_repository' ? Promise.resolve(worktreeRepository) : defaultIpc(command, request);
+    const { fixture, invoke } = await createFixture(ipc);
+    const router = TestBed.inject(Router);
+    const navigateByUrl = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
+    (local.querySelector('.folder-row') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.branch-context-menu button')]
+      .find((button) => button.textContent?.includes('Checkout in active worktree')) as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const dialog = fixture.nativeElement.querySelector('.switch-confirmation') as HTMLDialogElement;
+    expect(dialog.textContent).toContain('already checked out in worktree “feature-tree”');
+    expect(dialog.textContent).toContain('take you to that worktree');
+    expect(dialog.textContent).toContain('uncommitted changes will stay unchanged');
+    expect(dialog.textContent).toContain('/work/feature-tree');
+    expect(dialog.querySelector('input[type="checkbox"]')).toBeNull();
+    expect((dialog.querySelector('#confirm-branch-switch') as HTMLButtonElement).textContent).toContain('Open worktree');
+
+    (dialog.querySelector('#confirm-branch-switch') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke.mock.calls.filter(([command]) => command === 'switch_repository_branch')).toHaveLength(0);
+    expect(invoke).toHaveBeenCalledWith('remember_repository', { repositoryPath: '/work/feature-tree' });
+    expect(navigateByUrl).toHaveBeenCalledWith('/repositories', { skipLocationChange: true });
+    expect(navigate).toHaveBeenCalledWith(['/workspace', 'feature-tree', 'history']);
   });
 
   it('creates a local branch from current HEAD without checking it out', async () => {
@@ -1864,7 +2381,7 @@ describe('WorkspaceHistory', () => {
   it('offers to stash a dirty working tree and retries the branch switch with a WIP message', async () => {
     const ipc = (command: string, request: unknown): Promise<unknown> => {
       if (command !== 'switch_repository_branch') {
-        return defaultIpc(command, request);
+        return defaultIpcWithoutCheckedOutFeature(command, request);
       }
       const operation = (request as { operation: { stashOnDirty: boolean } }).operation;
       return operation.stashOnDirty
@@ -1892,11 +2409,10 @@ describe('WorkspaceHistory', () => {
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
-    const branch = [...local.querySelectorAll<HTMLButtonElement>('button.branch-row')].find(
-      (button) => button.title.includes('rb/feature'),
-    );
-
-    branch?.click();
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.branch-context-menu button')]
+      .find((button) => button.textContent?.includes('Checkout in active worktree')) as HTMLButtonElement).click();
     fixture.detectChanges();
     const dialog = fixture.nativeElement.querySelector('.switch-confirmation') as HTMLDialogElement;
     expect((dialog.querySelector('input[type="checkbox"]') as HTMLInputElement).checked).toBe(true);
@@ -1939,19 +2455,23 @@ describe('WorkspaceHistory', () => {
               cleanupError: null,
             },
           })
-        : defaultIpc(command, request);
+        : defaultIpcWithoutCheckedOutFeature(command, request);
     const { fixture, invoke } = await createFixture(ipc);
     const local = fixture.nativeElement.querySelector('[aria-label="Local branches"]') as HTMLElement;
     (local.querySelector('.folder-row') as HTMLButtonElement).click();
     fixture.detectChanges();
-    ([...local.querySelectorAll<HTMLButtonElement>('button.branch-row')]
-      .find((button) => button.title.includes('rb/feature')) as HTMLButtonElement).click();
+    (local.querySelector('[aria-label="Actions for rb/feature"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    ([...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.branch-context-menu button')]
+      .find((button) => button.textContent?.includes('Checkout in active worktree')) as HTMLButtonElement).click();
     fixture.detectChanges();
     (fixture.nativeElement.querySelector('#confirm-branch-switch') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
     const alert = fixture.nativeElement.querySelector('.navigation-action-error') as HTMLElement;
+    expect(alert.closest('.workspace-toasts')).not.toBeNull();
+    expect(alert.closest('.navigation')).toBeNull();
     expect(alert.textContent).toContain('checkout failed');
     expect(alert.textContent).toContain('Operation: switch failed');
     expect(alert.textContent).toContain('Restore: changes were applied with conflicts');
@@ -1962,6 +2482,9 @@ describe('WorkspaceHistory', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_history').length).toBeGreaterThan(1);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
+    (alert.querySelector('[aria-label="Dismiss workspace error"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.navigation-action-error')).toBeNull();
   });
 
   it('creates a manual stash including untracked files with a full state precondition', async () => {
@@ -1970,11 +2493,15 @@ describe('WorkspaceHistory', () => {
         ? Promise.resolve(navigationWithStash())
         : defaultIpc(command, request);
     const { fixture, invoke } = await createFixture(ipc);
+    [...fixture.nativeElement.querySelectorAll('.workspace-bar button')]
+      .find((button: HTMLButtonElement) => button.textContent?.trim() === 'Stash')?.click();
+    fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[aria-label="Stash message"]') as HTMLInputElement;
+    expect(input.value).toMatch(/^WIP \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} main$/);
     input.value = 'Pause current work';
     input.dispatchEvent(new Event('input'));
     fixture.detectChanges();
-    (fixture.nativeElement.querySelector('.stash-create-form button[type="submit"]') as HTMLButtonElement).click();
+    (fixture.nativeElement.querySelector('.stash-creation-dialog button[type="submit"]') as HTMLButtonElement).click();
     await fixture.whenStable();
 
     expect(invoke).toHaveBeenCalledWith('repository_push_stash', {
@@ -2012,11 +2539,14 @@ describe('WorkspaceHistory', () => {
       return defaultIpc(command, request);
     };
     const { fixture, invoke } = await createFixture(ipc);
+    [...fixture.nativeElement.querySelectorAll('.workspace-bar button')]
+      .find((button: HTMLButtonElement) => button.textContent?.trim() === 'Stash')?.click();
+    fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[aria-label="Stash message"]') as HTMLInputElement;
     input.value = 'Do not retry blindly';
     input.dispatchEvent(new Event('input'));
     fixture.detectChanges();
-    (fixture.nativeElement.querySelector('.stash-create-form button[type="submit"]') as HTMLButtonElement).click();
+    (fixture.nativeElement.querySelector('.stash-creation-dialog button[type="submit"]') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -2046,11 +2576,14 @@ describe('WorkspaceHistory', () => {
       return defaultIpc(command, request);
     };
     const { fixture } = await createFixture(ipc);
+    [...fixture.nativeElement.querySelectorAll('.workspace-bar button')]
+      .find((button: HTMLButtonElement) => button.textContent?.trim() === 'Stash')?.click();
+    fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('[aria-label="Stash message"]') as HTMLInputElement;
     input.value = 'Verified stash';
     input.dispatchEvent(new Event('input'));
     fixture.detectChanges();
-    (fixture.nativeElement.querySelector('.stash-create-form button[type="submit"]') as HTMLButtonElement).click();
+    (fixture.nativeElement.querySelector('.stash-creation-dialog button[type="submit"]') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -2123,8 +2656,8 @@ describe('WorkspaceHistory', () => {
       }
       return defaultIpc(command, request);
     };
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const { fixture } = await createFixture(ipc);
+    expect(fixture.nativeElement.querySelector('.stash-action-menu [role="menu"]')).not.toBeNull();
 
     (fixture.nativeElement.querySelector('[aria-label="Apply stash@{0}"]') as HTMLButtonElement).click();
     await fixture.whenStable();
@@ -2140,11 +2673,12 @@ describe('WorkspaceHistory', () => {
     expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('stash dropped');
 
     (fixture.nativeElement.querySelector('[aria-label="Drop stash@{0}"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.navigation-action-error')).toBeNull();
     expect(fixture.nativeElement.querySelector('.navigation-action-notice')?.textContent).toContain('Dropped stash@{0}');
-    confirm.mockRestore();
   });
 
   it('applies an exact stash identity with index restore and reports conflicts without hiding retention', async () => {
@@ -2206,7 +2740,6 @@ describe('WorkspaceHistory', () => {
       }
       return defaultIpc(command, request);
     };
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const { fixture, invoke } = await createFixture(ipc);
     (fixture.nativeElement.querySelector('[aria-label="Pop stash@{0}"]') as HTMLButtonElement).click();
     await fixture.whenStable();
@@ -2218,13 +2751,14 @@ describe('WorkspaceHistory', () => {
     expect(fixture.nativeElement.querySelector('.navigation-action-error')?.textContent).toContain('stash ref changed concurrently');
 
     (fixture.nativeElement.querySelector('[aria-label="Drop stash@{0}"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-description')?.textContent).toContain('Drop stash@{0}');
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
     await fixture.whenStable();
-    expect(confirm).toHaveBeenCalledWith('Drop stash@{0} “Saved work”? This cannot be undone.');
     expect(invoke).toHaveBeenCalledWith('repository_drop_stash', {
       repositoryId: 'skibidibi-git',
       operation: { stash: { oid: 'stash-oid', selector: 'stash@{0}' } },
     });
-    confirm.mockRestore();
   });
 
   it('persists current-only mode and hides unrelated references while keeping current items expanded', async () => {
@@ -3003,7 +3537,6 @@ describe('WorkspaceHistory', () => {
   });
 
   it('retries a dirty pull with the selected strategy and a dated auto-stash message', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     let pulls = 0;
     const ipc = (command: string, request: unknown): Promise<unknown> => {
       if (command === 'repository_pull' && ++pulls === 1) {
@@ -3021,6 +3554,13 @@ describe('WorkspaceHistory', () => {
     pull.click();
     await vi.waitFor(() => {
       fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('#destructive-action-description')?.textContent)
+        .toContain('Pull requires a clean working tree');
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === 'repository_pull')).toHaveLength(1);
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
       expect(fixture.nativeElement.textContent).toContain('Pull succeeded.');
     });
 
@@ -3030,17 +3570,14 @@ describe('WorkspaceHistory', () => {
     expect(calls[1][1].operation.strategy).toBe('rebase');
     expect(calls[1][1].operation.autoStash.message).toMatch(/^WIP \d{4}-\d{2}-\d{2}T.* main$/);
     expect(fixture.nativeElement.textContent).toContain('create=created, restore=applied, cleanup=dropped');
-    expect(confirm).toHaveBeenCalledOnce();
   });
 
   it('does not offer auto-stash for an unrelated pull failure', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const ipc = (command: string, request: unknown): Promise<unknown> =>
       command === 'repository_pull'
         ? Promise.reject(new Error('authentication failed'))
         : defaultIpc(command, request);
     const { fixture, invoke } = await createFixture(ipc);
-    confirm.mockClear();
     const pull = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
       .find((button) => button.textContent?.trim() === 'Pull')!;
     pull.click();
@@ -3050,12 +3587,11 @@ describe('WorkspaceHistory', () => {
       expect(fixture.nativeElement.textContent).toContain('authentication failed');
     });
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_pull')).toHaveLength(1);
-    expect(confirm).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('#destructive-action-description')).toBeNull();
   });
 
   it('blocks unsafe push analysis and confirms origin setup when no upstream exists', async () => {
     let readiness: 'behind' | 'noUpstream' = 'behind';
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const ipc = (command: string, request: unknown): Promise<unknown> => {
       if (command === 'repository_status') {
         const status = repositoryStatus();
@@ -3080,10 +3616,72 @@ describe('WorkspaceHistory', () => {
     push = [...(created.fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
       .find((button) => button.textContent?.trim() === 'Push')!;
     push.click();
+    await vi.waitFor(() => {
+      created.fixture.detectChanges();
+      expect(created.fixture.nativeElement.querySelector('#destructive-action-description')?.textContent)
+        .toContain('Push “main” to origin/main and set it as upstream?');
+    });
+    expect(created.invoke.mock.calls.some(([command]) => command === 'repository_push')).toBe(false);
+    (created.fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(created.invoke.mock.calls.some(([command]) => command === 'repository_push')).toBe(true));
     const pushCall = created.invoke.mock.calls.find(([command]) => command === 'repository_push')!;
     expect(pushCall[1].operation.target).toEqual({ kind: 'setUpstream', remote: 'origin', remoteBranch: 'main' });
-    expect(confirm).toHaveBeenCalledWith('Push “main” to origin/main and set it as upstream?');
+  });
+
+  it('requires explicit confirmation before setting a natural upstream and supports cancel', async () => {
+    const upstreamStatus = {
+      ...repositoryStatus(),
+      branch: { ...repositoryStatus().branch, upstream: null },
+    };
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_status') {
+        return Promise.resolve(upstreamStatus);
+      }
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'abc', current: true, upstream: null, ahead: 1, behind: 0, upstreamGone: false, symbolicTarget: null },
+            { kind: 'remote', fullName: 'refs/remotes/origin/main', name: 'origin/main', oid: 'origin-abc', current: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [],
+          stashes: [],
+        });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const remoteBranch = {
+      kind: 'remote' as const,
+      fullName: 'refs/remotes/origin/main',
+      name: 'origin/main',
+      oid: 'origin-abc',
+      current: false,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      upstreamGone: false,
+      symbolicTarget: null,
+    };
+    (fixture.componentInstance as unknown as { setNaturalUpstream(branch: typeof remoteBranch): Promise<void> })
+      .setNaturalUpstream(remoteBranch);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-description')?.textContent)
+      .toContain('Set origin/main as the upstream for main?');
+    expect(invoke.mock.calls.some(([command]) => command === 'repository_set_upstream')).toBe(false);
+
+    (fixture.nativeElement.querySelector('#cancel-destructive-action') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(invoke.mock.calls.some(([command]) => command === 'repository_set_upstream')).toBe(false);
+
+    (fixture.componentInstance as unknown as { setNaturalUpstream(branch: typeof remoteBranch): Promise<void> })
+      .setNaturalUpstream(remoteBranch);
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(invoke.mock.calls.some(([command]) => command === 'repository_set_upstream')).toBe(true));
+    expect(invoke).toHaveBeenCalledWith('repository_set_upstream', {
+      repositoryId: 'skibidibi-git',
+      operation: expect.objectContaining({ remoteFullName: 'refs/remotes/origin/main', expectedOid: 'origin-abc' }),
+    });
   });
 
   it('loads exact conflict stages and resolves edited content with repository preconditions', async () => {
@@ -3136,7 +3734,6 @@ describe('WorkspaceHistory', () => {
   });
 
   it('requires confirmation before staging unchanged conflict markers', async () => {
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
     const ipc = (command: string, request: unknown): Promise<unknown> => {
       if (command === 'repository_status') {
         return Promise.resolve(conflictedStatus());
@@ -3150,7 +3747,6 @@ describe('WorkspaceHistory', () => {
       return defaultIpc(command, request);
     };
     const { fixture, invoke } = await createFixture(ipc);
-    confirm.mockClear();
     (fixture.nativeElement.querySelector('.working-tree-history-row') as HTMLButtonElement).click();
     fixture.detectChanges();
     (fixture.nativeElement.querySelector('.conflict-files button') as HTMLButtonElement).click();
@@ -3160,9 +3756,10 @@ describe('WorkspaceHistory', () => {
       .find((button) => button.textContent?.includes('edited content'))!;
     resolve.click();
 
-    expect(confirm).toHaveBeenCalledWith(
-      'The resolved content is unchanged or still contains conflict markers. Stage it as resolved anyway?',
-    );
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#destructive-action-description')?.textContent)
+      .toContain('The resolved content is unchanged or still contains conflict markers.');
+    (fixture.nativeElement.querySelector('#cancel-destructive-action') as HTMLButtonElement).click();
     expect(invoke.mock.calls.some(([command]) => command === 'repository_resolve_conflict')).toBe(false);
   });
 

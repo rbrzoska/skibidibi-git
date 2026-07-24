@@ -1,0 +1,134 @@
+<main class="ref-comparison">
+  <header class="comparison-toolbar">
+    <a class="back" [routerLink]="['/workspace', repositoryId, 'history']"><span aria-hidden="true">←</span> Back to history</a>
+    <div class="comparison-title">
+      <p>REF COMPARISON</p>
+      <strong>{{ repository()?.name ?? 'Repository' }}</strong>
+    </div>
+    <div class="ref-selectors">
+      <label>Source
+        <select [value]="sourceFullName()" [disabled]="loadingRefs()" (change)="selectSource($any($event.target).value)">
+          @for (ref of references(); track ref.fullName) {
+            <option [value]="ref.fullName">{{ ref.kind === 'remote' ? 'Remote · ' : '' }}{{ ref.name }}</option>
+          }
+        </select>
+      </label>
+      <button type="button" class="swap" [disabled]="!canCompare()" title="Swap source and target" aria-label="Swap source and target" (click)="swapReferences()">⇄</button>
+      <label>Target
+        <select [value]="targetFullName()" [disabled]="loadingRefs()" (change)="selectTarget($any($event.target).value)">
+          @for (ref of references(); track ref.fullName) {
+            <option [value]="ref.fullName">{{ ref.kind === 'remote' ? 'Remote · ' : '' }}{{ ref.name }}</option>
+          }
+        </select>
+      </label>
+      <button type="button" class="compare" [disabled]="!canCompare() || comparisonState().kind === 'loading'" (click)="compare()">
+        {{ comparisonState().kind === 'loading' ? 'Comparing…' : 'Compare' }}
+      </button>
+    </div>
+  </header>
+
+  @if (loadingRefs()) {
+    <div class="comparison-state"><span class="spinner" aria-hidden="true"></span><strong>Loading references…</strong></div>
+  } @else if (references().length < 2) {
+    <div class="comparison-state"><strong>Two direct references are required</strong><p>Add a local or remote branch before comparing changes.</p></div>
+  } @else if (comparisonState(); as state) {
+    @if (state.kind === 'error') {
+      <div class="comparison-state error" role="alert"><strong>Comparison unavailable</strong><p>{{ state.message }}</p><button type="button" [disabled]="!canCompare()" (click)="compare()">Try again</button></div>
+    } @else if (comparison(); as result) {
+      <section class="comparison-summary" aria-label="Comparison summary">
+        <div><span>Changes source would introduce into target</span><strong>{{ source()?.name }} <i aria-hidden="true">→</i> {{ target()?.name }}</strong></div>
+        <dl>
+          <div><dt>Ahead</dt><dd class="ahead">↑ {{ result.ahead }}</dd></div>
+          <div><dt>Behind</dt><dd class="behind">↓ {{ result.behind }}</dd></div>
+          <div><dt>Files</dt><dd>{{ result.files.length + (result.filesTruncated ? '+' : '') }}</dd></div>
+          <div><dt>Merge base</dt><dd><code>{{ shortOid(result.mergeBaseOid) }}</code></dd></div>
+        </dl>
+      </section>
+
+      <section class="comparison-body">
+        <nav class="comparison-tabs" aria-label="Comparison details">
+          <button type="button" [class.active]="tab() === 'commits'" [attr.aria-pressed]="tab() === 'commits'" (click)="selectTab('commits')">Commits <span>{{ result.commits.length + (result.commitsTruncated ? '+' : '') }}</span></button>
+          <button type="button" [class.active]="tab() === 'files'" [attr.aria-pressed]="tab() === 'files'" (click)="selectTab('files')">Files <span>{{ result.files.length + (result.filesTruncated ? '+' : '') }}</span></button>
+        </nav>
+        @if (tab() === 'commits') {
+          <div class="commit-results" role="list" aria-label="Commits in source not in target">
+            @if (result.commitsTruncated) { <p class="result-note">The commit list is bounded; refine the selected references for the complete history.</p> }
+            @if (result.commits.length === 0) {
+              <div class="empty-result">No commits would be introduced into the target.</div>
+            } @else {
+              @for (commit of result.commits; track commit.oid) {
+                <article class="commit-result" role="listitem">
+                  <span class="commit-dot" aria-hidden="true"></span>
+                  <div><strong>{{ commit.summary || 'Commit without subject' }}</strong><small>{{ commit.author.name }} · {{ formatDate(commit.author.authoredAt) }}</small></div>
+                  <code>{{ shortOid(commit.oid) }}</code>
+                </article>
+              }
+            }
+          </div>
+        } @else {
+          <div class="file-results" aria-label="Files changed between references">
+            @if (result.filesTruncated) { <p class="result-note">The file list is bounded; only the first files can be inspected here.</p> }
+            @if (result.files.length === 0) {
+              <div class="empty-result">No file changes would be introduced into the target.</div>
+            } @else {
+              @for (file of result.files; track file.path + ':' + file.oldPath) {
+                @let parts = filePathParts(file.path);
+                <button type="button" class="file-result" [class.selected]="selectedDiffPath() === file.path" (click)="openFileDiff(file)">
+                  <span class="file-status" [attr.data-status]="file.status">{{ file.status.charAt(0).toUpperCase() }}</span>
+                  <span class="file-path" [title]="file.path"><small>{{ parts.directory }}@if (parts.directory) {/}</small><strong>{{ parts.fileName }}</strong></span>
+                  <span class="file-stats">@if (file.additions !== null) { <b>+{{ file.additions }}</b> } @if (file.deletions !== null) { <i>−{{ file.deletions }}</i> }</span>
+                </button>
+              }
+            }
+          </div>
+        }
+      </section>
+    } @else {
+      <div class="comparison-state"><strong>Select source and target, then compare</strong><p>The comparison is read-only and never changes either worktree.</p></div>
+    }
+  }
+
+  @if (fileDiffState(); as fileState) {
+    @if (fileState.kind !== 'idle') {
+    <aside class="file-diff" aria-label="Selected file diff">
+      <header>
+        <div>
+          <p>FILE DIFF</p>
+          @if (fileState.kind === 'ready') { <strong [title]="fileState.response.path">{{ fileState.response.path }}</strong> }
+          @else { <strong>{{ fileState.path }}</strong> }
+        </div>
+        <div class="diff-actions">
+          @if (fileState.kind === 'ready' && !fileState.response.binary) {
+            <button type="button" (click)="toggleDiffDisplay()">{{ diffDisplay() === 'contextual' ? 'Show full file' : 'Show sections' }}</button>
+          }
+          <button type="button" class="close" aria-label="Close file diff" title="Close file diff" (click)="closeFileDiff()">×</button>
+        </div>
+      </header>
+      @if (fileState.kind === 'loading') {
+        <div class="diff-state"><span class="spinner" aria-hidden="true"></span>Loading diff…</div>
+      } @else if (fileState.kind === 'error') {
+        <div class="diff-state error" role="alert"><p>{{ fileState.message }}</p><button type="button" (click)="retryFileDiff()">Try again</button></div>
+      } @else if (fileState.kind === 'ready' && fileState.response.binary) {
+        <div class="diff-state">Binary file; no text diff is available.</div>
+      } @else if (fileState.kind === 'ready' && parsedDiff()?.isEmpty) {
+        <div class="diff-state">No text diff is available for this file.</div>
+      } @else {
+        @if (fileState.kind === 'ready' && fileState.response.truncated) { <p class="diff-warning">This diff was truncated to keep the application responsive.</p> }
+        <div class="diff-table" role="table" aria-label="Unified diff">
+          @for (row of displayedDiffRows(); track row.key) {
+            @if (row.kind === 'omitted-range') {
+              <div class="diff-row omitted"><span></span><span></span><em>… {{ row.omittedLineCount }} unchanged lines hidden …</em></div>
+            } @else if (row.kind === 'hunk-header') {
+              <div class="diff-row hunk"><span></span><span></span><code>{{ row.raw }}</code></div>
+            } @else if (row.kind === 'addition' || row.kind === 'deletion' || row.kind === 'context') {
+              <div class="diff-row" [class.addition]="row.kind === 'addition'" [class.deletion]="row.kind === 'deletion'"><span>{{ row.oldLineNumber ?? '' }}</span><span>{{ row.newLineNumber ?? '' }}</span><code>{{ row.kind === 'addition' ? '+' : row.kind === 'deletion' ? '−' : ' ' }}{{ row.content }}</code></div>
+            } @else {
+              <div class="diff-row metadata"><span></span><span></span><code>{{ row.raw }}</code></div>
+            }
+          }
+        </div>
+      }
+    </aside>
+    }
+  }
+</main>

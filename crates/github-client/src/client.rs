@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use app_domain::{
     GitHubApiResult, GitHubPage, GitHubPatValidation, GitHubRateLimit, GitHubRepository,
-    GitHubUser, IssueComment, PullRequestDetail, PullRequestMergeability, PullRequestState,
-    PullRequestSummary, ReviewComment, ReviewCommentSide, ReviewThread,
+    GitHubUser, IssueComment, PullRequestDetail, PullRequestFile, PullRequestMergeability,
+    PullRequestState, PullRequestSummary, ReviewComment, ReviewCommentSide, ReviewThread,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -60,7 +60,7 @@ pub enum PullRequestListScope {
 impl PullRequestListScope {
     fn qualifier(self) -> &'static str {
         match self {
-            Self::AssignedToViewer => "assignee",
+            Self::AssignedToViewer => "review-requested",
             Self::AuthoredByViewer => "author",
         }
     }
@@ -198,6 +198,72 @@ impl<T: GitHubTransport> GitHubClient<T> {
         Ok(GitHubApiResult {
             value: pull.into(),
             rate_limit,
+        })
+    }
+
+    pub fn pull_request_files(
+        &self,
+        owner: &str,
+        repository: &str,
+        number: u64,
+        page_size: u16,
+        cursor: Option<&str>,
+    ) -> Result<GitHubPage<PullRequestFile>, GitHubClientError> {
+        validate_number(number)?;
+        validate_page_size(page_size)?;
+        let page = decode_page_cursor(cursor)?;
+        let expected_path = self.rest_path(&[
+            "repos",
+            owner,
+            repository,
+            "pulls",
+            &number.to_string(),
+            "files",
+        ])?;
+        let mut url = self.config.api_base_url.clone();
+        url.set_path(&expected_path);
+        url.query_pairs_mut()
+            .append_pair("per_page", &page_size.to_string())
+            .append_pair("page", &page.to_string());
+        let response = self.get(url)?;
+        let files: Vec<RestPullRequestFile> = decode_json(&response)?;
+        let next_cursor = next_rest_cursor(
+            response.headers.get("link"),
+            &self.config.api_base_url,
+            &expected_path,
+        )?;
+        Ok(GitHubPage {
+            items: files.into_iter().map(Into::into).collect(),
+            next_cursor,
+            rate_limit: rate_limit(&response.headers),
+        })
+    }
+
+    pub fn approve_pull_request(
+        &self,
+        owner: &str,
+        repository: &str,
+        number: u64,
+    ) -> Result<GitHubApiResult<()>, GitHubClientError> {
+        validate_number(number)?;
+        let body = serde_json::to_vec(&serde_json::json!({ "event": "APPROVE" }))
+            .map_err(|_| invalid_response())?;
+        let response = self.execute(GitHubRequest {
+            method: GitHubMethod::Post,
+            url: self.rest_url(&[
+                "repos",
+                owner,
+                repository,
+                "pulls",
+                &number.to_string(),
+                "reviews",
+            ])?,
+            headers: BTreeMap::new(),
+            body: Some(body),
+        })?;
+        Ok(GitHubApiResult {
+            value: (),
+            rate_limit: rate_limit(&response.headers),
         })
     }
 
@@ -718,6 +784,7 @@ impl From<RestPullRequest> for PullRequestSummary {
             html_url: pull.html_url,
             updated_at: pull.updated_at,
             comment_count: pull.comments.saturating_add(pull.review_comments),
+            approval_count: 0,
         }
     }
 }
@@ -734,6 +801,31 @@ struct RestPullRequestDetail {
     #[serde(default)]
     changed_files: u64,
     mergeable: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RestPullRequestFile {
+    filename: String,
+    previous_filename: Option<String>,
+    status: String,
+    additions: u64,
+    deletions: u64,
+    changes: u64,
+    patch: Option<String>,
+}
+
+impl From<RestPullRequestFile> for PullRequestFile {
+    fn from(file: RestPullRequestFile) -> Self {
+        Self {
+            filename: file.filename,
+            previous_filename: file.previous_filename,
+            status: file.status,
+            additions: file.additions,
+            deletions: file.deletions,
+            changes: file.changes,
+            patch: file.patch,
+        }
+    }
 }
 
 impl From<RestPullRequestDetail> for PullRequestDetail {
@@ -838,6 +930,17 @@ struct GraphQlPullRequestSummary {
     url: String,
     updated_at: String,
     comments: GraphQlTotalCount,
+    latest_reviews: GraphQlReviewConnection,
+}
+
+#[derive(Deserialize)]
+struct GraphQlReviewConnection {
+    nodes: Vec<GraphQlReview>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlReview {
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -922,6 +1025,7 @@ struct GraphQlComment {
     path: Option<String>,
     line: Option<u64>,
     diff_side: Option<String>,
+    diff_hunk: Option<String>,
     created_at: String,
     updated_at: String,
     url: Option<String>,
@@ -964,6 +1068,12 @@ impl From<GraphQlPullRequestSummary> for PullRequestSummary {
             html_url: pull.url,
             updated_at: pull.updated_at,
             comment_count: pull.comments.total_count,
+            approval_count: pull
+                .latest_reviews
+                .nodes
+                .iter()
+                .filter(|review| review.state == "APPROVED")
+                .count() as u64,
         }
     }
 }
@@ -991,6 +1101,7 @@ impl From<GraphQlComment> for ReviewComment {
             path: comment.path,
             line: comment.line,
             side: parse_side(comment.diff_side.as_deref()),
+            diff_hunk: comment.diff_hunk,
             created_at: comment.created_at,
             updated_at: comment.updated_at,
             html_url: comment.url,
@@ -1177,7 +1288,8 @@ mod tests {
                 "headRefName":"feature/comments","baseRefName":"main",
                 "url":"https://github.test/acme/widget/pull/17",
                 "updatedAt":"2026-07-17T08:30:00Z",
-                "comments":{"totalCount":7}
+                "comments":{"totalCount":7},
+                "latestReviews":{"nodes":[{"state":"APPROVED"},{"state":"CHANGES_REQUESTED"},{"state":"APPROVED"}]}
               }],
               "pageInfo":{"hasNextPage":true,"endCursor":"cursor-2"}
             }}}"#,
@@ -1196,6 +1308,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(page.items[0].comment_count, 7);
+        assert_eq!(page.items[0].approval_count, 2);
         assert_eq!(page.items[0].number, 17);
         assert_eq!(page.items[0].title, "Accurate comments");
         assert_eq!(page.items[0].state, PullRequestState::Open);
@@ -1218,7 +1331,7 @@ mod tests {
         assert_eq!(body["query"], PULL_REQUESTS_QUERY);
         assert_eq!(
             body["variables"]["query"],
-            "repo:acme/widget is:pr is:open assignee:octo"
+            "repo:acme/widget is:pr is:open review-requested:octo"
         );
         assert_eq!(body["variables"]["first"], 20);
         assert!(body["variables"]["after"].is_null());
@@ -1254,6 +1367,54 @@ mod tests {
             "repo:acme/widget is:pr is:open author:octo"
         );
         assert_eq!(body["variables"]["after"], "cursor-1");
+    }
+
+    #[test]
+    fn pull_request_files_returns_patches_and_file_metadata() {
+        let client = client(vec![response(
+            200,
+            r#"[{"filename":"src/new.ts","previous_filename":"src/old.ts","status":"renamed","additions":3,"deletions":1,"changes":4,"patch":"@@ -1 +1 @@\n-old\n+new"}]"#,
+        )]);
+
+        let page = client
+            .pull_request_files("acme", "widget", 17, 50, None)
+            .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].filename, "src/new.ts");
+        assert_eq!(
+            page.items[0].previous_filename.as_deref(),
+            Some("src/old.ts")
+        );
+        assert_eq!(page.items[0].status, "renamed");
+        assert_eq!(
+            page.items[0].patch.as_deref(),
+            Some("@@ -1 +1 @@\n-old\n+new")
+        );
+        let requests = client.transport.requests.lock().unwrap();
+        assert_eq!(requests[0].method, GitHubMethod::Get);
+        assert_eq!(
+            requests[0].url.path(),
+            "/api/v3/repos/acme/widget/pulls/17/files"
+        );
+        assert_eq!(requests[0].url.query(), Some("per_page=50&page=1"));
+    }
+
+    #[test]
+    fn approve_pull_request_posts_an_approve_review() {
+        let client = client(vec![response(200, r#"{}"#)]);
+
+        client.approve_pull_request("acme", "widget", 17).unwrap();
+
+        let requests = client.transport.requests.lock().unwrap();
+        assert_eq!(requests[0].method, GitHubMethod::Post);
+        assert_eq!(
+            requests[0].url.path(),
+            "/api/v3/repos/acme/widget/pulls/17/reviews"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["event"], "APPROVE");
     }
 
     #[test]
@@ -1361,7 +1522,14 @@ mod tests {
                 "nodes": [{
                   "id": "thread-1", "isResolved": false, "isOutdated": false,
                   "path": "src/lib.rs", "line": 12, "diffSide": "RIGHT",
-                  "comments": {"nodes": []}
+                  "comments": {"nodes": [{
+                    "id": "comment-1", "author": null, "body": "Inline note",
+                    "path": "src/lib.rs", "line": 12, "diffSide": "RIGHT",
+                    "diffHunk": "@@ -10,2 +10,3 @@\n old\n+new",
+                    "createdAt": "2026-07-15T12:00:00Z",
+                    "updatedAt": "2026-07-15T12:00:00Z",
+                    "url": "https://github.com/acme/widget/pull/7#discussion_r1"
+                  }]}
                 }],
                 "pageInfo": {"hasNextPage": true, "endCursor": "cursor-2"}
               }}}}
@@ -1374,11 +1542,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(page.items[0].path, "src/lib.rs");
+        assert_eq!(
+            page.items[0].comments[0].diff_hunk.as_deref(),
+            Some("@@ -10,2 +10,3 @@\n old\n+new")
+        );
         assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
         let requests = client.transport.requests.lock().unwrap();
         let body: serde_json::Value =
             serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
         assert_eq!(body["query"], REVIEW_THREADS_QUERY);
+        assert_eq!(REVIEW_THREADS_QUERY.matches("diffSide").count(), 1);
+        assert!(REVIEW_THREADS_QUERY.contains("diffHunk"));
         assert_eq!(body["variables"]["number"], 7);
         assert_eq!(body["variables"]["first"], 25);
     }

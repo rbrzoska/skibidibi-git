@@ -4,6 +4,9 @@ import {
   DESKTOP_IPC,
   type AiCliProvider,
   type AiCliStatus,
+  type AiTaskReviewPreflightRequest,
+  type AiTaskReviewPreflightResponse,
+  type AiCodeReviewDocument,
   type GenerateAiCommitMessageResponse,
 } from '../ipc/desktop-ipc';
 
@@ -11,6 +14,7 @@ const STORAGE_KEY = 'skibidibi-git.ai-support.v1';
 const MAX_PROMPT_TEMPLATE_LENGTH = 4096;
 
 export const DEFAULT_AI_COMMIT_PROMPT = 'Write one concise English sentence describing the staged changes as a commit message. Return only that single sentence with no body, bullets, prefixes, descriptions, signatures, or metadata.';
+export const DEFAULT_AI_REVIEW_PROMPT = 'Review the current task diff as a senior engineer. Find actionable correctness, security, data-loss, performance, maintainability, and test-coverage problems. Produce concise Markdown with a verdict, findings ranked by severity, file references, and residual testing risks. Do not praise the implementation or restate the diff.';
 
 const PROVIDERS = [
   { provider: 'codex', displayName: 'Codex' },
@@ -21,6 +25,7 @@ const PROVIDERS = [
 interface PersistedAiSupportSettings {
   readonly enabledProviders?: unknown;
   readonly promptTemplate?: unknown;
+  readonly reviewPromptTemplate?: unknown;
 }
 
 export interface GenerateCommitMessageInput {
@@ -37,6 +42,7 @@ export class AiSupportStore {
   private readonly enabledProviders = signal<readonly AiCliProvider[]>(this.restored.enabledProviders);
 
   readonly promptTemplate = signal(this.restored.promptTemplate);
+  readonly reviewPromptTemplate = signal(this.restored.reviewPromptTemplate);
   readonly providerStatuses = signal<readonly AiCliStatus[]>(defaultStatuses());
   readonly availabilityLoading = signal(false);
   readonly availabilityError = signal<string | null>(null);
@@ -93,6 +99,34 @@ export class AiSupportStore {
     this.persist();
   }
 
+  updateReviewPromptTemplate(template: string): void {
+    this.reviewPromptTemplate.set(normalizeReviewPromptTemplate(template));
+    this.persist();
+  }
+
+  resetReviewPromptTemplate(): void {
+    this.reviewPromptTemplate.set(DEFAULT_AI_REVIEW_PROMPT);
+    this.persist();
+  }
+
+  taskReviewPreflight(input: AiTaskReviewPreflightRequest): Promise<AiTaskReviewPreflightResponse> {
+    return this.ipc.invoke('ai_task_review_preflight', input);
+  }
+
+  generateTaskReview(
+    provider: AiCliProvider,
+    input: AiTaskReviewPreflightRequest,
+  ): Promise<AiCodeReviewDocument> {
+    if (!this.isProviderEnabled(provider)) {
+      return Promise.reject(new Error(`${provider} is not enabled for AI task review.`));
+    }
+    return this.ipc.invoke('ai_generate_task_review', {
+      ...input,
+      provider,
+      promptTemplate: this.reviewPromptTemplate(),
+    });
+  }
+
   generateCommitMessage(
     provider: AiCliProvider,
     input: GenerateCommitMessageInput,
@@ -112,6 +146,7 @@ export class AiSupportStore {
       globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify({
         enabledProviders: this.enabledProviders(),
         promptTemplate: this.promptTemplate(),
+        reviewPromptTemplate: this.reviewPromptTemplate(),
       }));
     } catch {
       // Settings continue to apply for this session when storage is unavailable.
@@ -144,11 +179,11 @@ function normalizeStatuses(statuses: readonly AiCliStatus[]): readonly AiCliStat
   });
 }
 
-function restoreSettings(): { readonly enabledProviders: readonly AiCliProvider[]; readonly promptTemplate: string } {
+function restoreSettings(): { readonly enabledProviders: readonly AiCliProvider[]; readonly promptTemplate: string; readonly reviewPromptTemplate: string } {
   try {
     const raw = globalThis.localStorage?.getItem(STORAGE_KEY);
     if (raw === null || raw === undefined) {
-      return { enabledProviders: [], promptTemplate: DEFAULT_AI_COMMIT_PROMPT };
+      return { enabledProviders: [], promptTemplate: DEFAULT_AI_COMMIT_PROMPT, reviewPromptTemplate: DEFAULT_AI_REVIEW_PROMPT };
     }
     const parsed = JSON.parse(raw) as PersistedAiSupportSettings;
     const storedProviders: readonly unknown[] = Array.isArray(parsed.enabledProviders)
@@ -161,10 +196,18 @@ function restoreSettings(): { readonly enabledProviders: readonly AiCliProvider[
       promptTemplate: typeof parsed.promptTemplate === 'string'
         ? normalizePromptTemplate(parsed.promptTemplate)
         : DEFAULT_AI_COMMIT_PROMPT,
+      reviewPromptTemplate: typeof parsed.reviewPromptTemplate === 'string'
+        ? normalizeReviewPromptTemplate(parsed.reviewPromptTemplate)
+        : DEFAULT_AI_REVIEW_PROMPT,
     };
   } catch {
-    return { enabledProviders: [], promptTemplate: DEFAULT_AI_COMMIT_PROMPT };
+    return { enabledProviders: [], promptTemplate: DEFAULT_AI_COMMIT_PROMPT, reviewPromptTemplate: DEFAULT_AI_REVIEW_PROMPT };
   }
+}
+
+function normalizeReviewPromptTemplate(template: string): string {
+  const bounded = template.slice(0, 16_384);
+  return bounded.trim().length > 0 ? bounded : DEFAULT_AI_REVIEW_PROMPT;
 }
 
 function normalizePromptTemplate(template: string): string {

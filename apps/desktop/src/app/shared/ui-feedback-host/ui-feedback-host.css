@@ -1,0 +1,34 @@
+:host { display: contents; }
+.skibi-loading-overlay { position: fixed; z-index: 1800; inset: var(--topbar-h, 38px) 0 0; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--tx2); background: rgb(5 7 11 / 68%); backdrop-filter: blur(3px); animation: overlay-in .16s ease-out both; }
+.skibi-loading-overlay strong { font-size: var(--fs-sm); font-weight: 650; letter-spacing: .02em; opacity: .72; }
+.skibi-loader { width: clamp(104px, 13vw, 148px); height: clamp(104px, 13vw, 148px); opacity: .88; filter: drop-shadow(0 16px 35px rgb(0 0 0 / 48%)); }
+.skibi-loader svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.loader-arc { transform-origin: 80px 80px; animation: loader-spin 1.1s linear infinite; }
+.loader-light { transform-origin: 80px 30px; animation: loader-pulse 1s ease-in-out infinite; }
+.loader-eyes { transform-origin: 81px 72px; animation: loader-blink 3s ease-in-out infinite; }
+.loader-pupil { animation: loader-orbit 1.1s linear infinite; }
+.loader-pupil.left { transform-origin: 70px 72px; }
+.loader-pupil.right { transform-origin: 92px 72px; }
+.skibi-toast-container { position: fixed; z-index: 1700; right: 16px; bottom: 14px; display: grid; justify-items: end; width: min(390px, calc(100vw - 24px)); gap: 9px; pointer-events: none; }
+.skibi-toast { display: grid; grid-template-columns: minmax(0, 1fr) 58px; align-items: end; width: min(360px, 100%); pointer-events: auto; animation: toast-in .28s cubic-bezier(.2,.8,.2,1) both; }
+.speech-bubble { position: relative; display: grid; gap: 3px; min-width: 0; min-height: 64px; border: 2px solid var(--green); border-radius: 12px; padding: 10px 30px 10px 13px; color: #1e2128; background: #fff; box-shadow: var(--shadow-toast, 0 12px 40px rgb(0 0 0 / 50%)); }
+.speech-bubble::after { position: absolute; right: -12px; bottom: 11px; width: 20px; height: 20px; border-right: 2px solid var(--green); border-bottom: 2px solid var(--green); background: #fff; content: ''; transform: rotate(-45deg); }
+.speech-bubble strong, .speech-bubble p { position: relative; z-index: 1; margin: 0; overflow-wrap: anywhere; }
+.speech-bubble strong { font-size: 12px; font-weight: 800; line-height: 1.2; }
+.speech-bubble p { color: #697082; font-size: 11px; font-weight: 520; line-height: 1.35; }
+.speech-bubble button { position: absolute; z-index: 2; top: 5px; right: 6px; display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 5px; padding: 0; color: #697082; background: transparent; font-size: 16px; cursor: pointer; }
+.speech-bubble button:hover, .speech-bubble button:focus-visible { outline: 0; color: #1e2128; background: #e9edf4; }
+.toast-bot { align-self: end; width: 58px; height: 58px; margin: 0 0 2px -2px; filter: drop-shadow(0 8px 14px rgb(0 0 0 / 35%)); }
+.skibi-toast[data-kind='warning'] .speech-bubble { border-color: var(--amber); }
+.skibi-toast[data-kind='warning'] .speech-bubble::after { border-color: var(--amber); }
+.skibi-toast[data-kind='error'] .speech-bubble { border-color: var(--red); }
+.skibi-toast[data-kind='error'] .speech-bubble::after { border-color: var(--red); }
+.skibi-toast[data-kind='info'] .speech-bubble { border-color: var(--ac); }
+.skibi-toast[data-kind='info'] .speech-bubble::after { border-color: var(--ac); }
+@keyframes overlay-in { from { opacity: 0; } }
+@keyframes loader-spin { to { transform: rotate(360deg); } }
+@keyframes loader-pulse { 50% { opacity: .55; transform: scale(1.18); } }
+@keyframes loader-orbit { to { transform: rotate(360deg); } }
+@keyframes loader-blink { 0%, 90%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.08); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(14px) scale(.96); } }
+@media (prefers-reduced-motion: reduce) { .skibi-loading-overlay, .skibi-toast, .loader-arc, .loader-light, .loader-eyes, .loader-pupil { animation: none; } }

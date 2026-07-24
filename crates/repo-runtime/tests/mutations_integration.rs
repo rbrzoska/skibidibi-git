@@ -2,7 +2,8 @@ use std::{fs, path::Path, process::Command};
 
 use app_domain::{
     AmendCommitRequest, AmendCommitState, ApplyIndexChangeRequest, ChangeSelection,
-    CreateCommitRequest, IndexAction, RepositoryStatus, StatusEntry, WorkingTreeEntrySelector,
+    CreateCommitRequest, DiscardWorkingTreeChangesRequest, DiscardWorkingTreeHunkRequest,
+    IndexAction, RepositoryStatus, StatusEntry, WorkingTreeEntrySelector,
 };
 use repo_runtime::{MutationRuntimeError, RepositoryRuntime};
 
@@ -81,6 +82,152 @@ fn amend_request(
         expected_index_fingerprint: status.index_fingerprint.clone(),
         expected_worktree_fingerprint: status.worktree_fingerprint.clone(),
     }
+}
+
+fn discard_request(
+    status: &RepositoryStatus,
+    entries: Vec<WorkingTreeEntrySelector>,
+) -> DiscardWorkingTreeChangesRequest {
+    DiscardWorkingTreeChangesRequest {
+        entries,
+        expected_head: status.branch.oid.clone(),
+        expected_head_name: status.branch.head.clone(),
+        expected_detached: status.branch.detached,
+        expected_unborn: status.branch.unborn,
+        expected_index_fingerprint: status.index_fingerprint.clone(),
+        expected_worktree_fingerprint: status.worktree_fingerprint.clone(),
+    }
+}
+
+fn first_hunk_patch(patch: &str) -> String {
+    let lines = patch.split_inclusive('\n').collect::<Vec<_>>();
+    let first = lines
+        .iter()
+        .position(|line| line.starts_with("@@ -"))
+        .unwrap();
+    let end = lines[first + 1..]
+        .iter()
+        .position(|line| line.starts_with("@@ -"))
+        .map_or(lines.len(), |offset| first + 1 + offset);
+    format!("{}{}", lines[..first].concat(), lines[first..end].concat())
+}
+
+#[test]
+fn discards_selected_unstaged_changes_and_deletes_confirmed_untracked_files() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    fs::write(repository.path().join("tracked.txt"), "staged\n").unwrap();
+    git(repository.path(), &["add", "tracked.txt"]);
+    fs::write(repository.path().join("tracked.txt"), "unstaged\n").unwrap();
+    fs::write(repository.path().join("new.txt"), "delete me\n").unwrap();
+    let before = runtime.status(repository.path()).unwrap();
+    let entries = before.entries.iter().map(selector).collect();
+
+    let result = runtime
+        .discard_worktree_changes(repository.path(), &discard_request(&before, entries))
+        .unwrap();
+
+    assert_eq!(result.discarded_entries, 2);
+    assert_eq!(result.deleted_untracked_files, 1);
+    assert_eq!(
+        fs::read_to_string(repository.path().join("tracked.txt")).unwrap(),
+        "staged\n"
+    );
+    assert!(!repository.path().join("new.txt").exists());
+    let cached = git_output(repository.path(), &["diff", "--cached"]);
+    assert!(String::from_utf8_lossy(&cached.stdout).contains("+staged"));
+}
+
+#[test]
+fn discards_only_the_selected_fresh_unstaged_hunk() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    let original = (1..=20)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    fs::write(repository.path().join("tracked.txt"), &original).unwrap();
+    git(repository.path(), &["add", "tracked.txt"]);
+    git(repository.path(), &["commit", "-qm", "many lines"]);
+    let changed = original
+        .replace("line 2\n", "changed 2\n")
+        .replace("line 18\n", "changed 18\n");
+    fs::write(repository.path().join("tracked.txt"), changed).unwrap();
+    let before = runtime.status(repository.path()).unwrap();
+    let entry = before
+        .entries
+        .iter()
+        .find(|entry| entry.path == "tracked.txt")
+        .unwrap();
+    let target = selector(entry);
+    let diff = runtime
+        .working_tree_file_diff(
+            repository.path(),
+            &target.path,
+            target.old_path.as_deref(),
+            target.entry_kind,
+        )
+        .unwrap();
+    assert_eq!(diff.unstaged_patch.matches("@@ -").count(), 2);
+
+    runtime
+        .discard_worktree_hunk(
+            repository.path(),
+            &DiscardWorkingTreeHunkRequest {
+                entry: target,
+                patch: first_hunk_patch(&diff.unstaged_patch),
+                expected_head: before.branch.oid.clone(),
+                expected_head_name: before.branch.head.clone(),
+                expected_detached: before.branch.detached,
+                expected_unborn: before.branch.unborn,
+                expected_index_fingerprint: before.index_fingerprint.clone(),
+                expected_worktree_fingerprint: before.worktree_fingerprint.clone(),
+            },
+        )
+        .unwrap();
+
+    let content = fs::read_to_string(repository.path().join("tracked.txt")).unwrap();
+    assert!(content.contains("line 2\n"));
+    assert!(content.contains("changed 18\n"));
+}
+
+#[test]
+fn refuses_a_discard_hunk_that_no_longer_matches_the_current_diff() {
+    let repository = init_repository(true);
+    let runtime = RepositoryRuntime::default();
+    fs::write(repository.path().join("tracked.txt"), "first change\n").unwrap();
+    let first_status = runtime.status(repository.path()).unwrap();
+    let first_entry = first_status.entries.first().unwrap();
+    let target = selector(first_entry);
+    let stale_patch = first_hunk_patch(
+        &runtime
+            .working_tree_file_diff(repository.path(), &target.path, None, target.entry_kind)
+            .unwrap()
+            .unstaged_patch,
+    );
+    fs::write(repository.path().join("tracked.txt"), "different change\n").unwrap();
+    let current = runtime.status(repository.path()).unwrap();
+
+    let error = runtime
+        .discard_worktree_hunk(
+            repository.path(),
+            &DiscardWorkingTreeHunkRequest {
+                entry: target,
+                patch: stale_patch,
+                expected_head: current.branch.oid.clone(),
+                expected_head_name: current.branch.head.clone(),
+                expected_detached: current.branch.detached,
+                expected_unborn: current.branch.unborn,
+                expected_index_fingerprint: current.index_fingerprint.clone(),
+                expected_worktree_fingerprint: current.worktree_fingerprint.clone(),
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, MutationRuntimeError::InvalidDiscardHunk));
+    assert_eq!(
+        fs::read_to_string(repository.path().join("tracked.txt")).unwrap(),
+        "different change\n"
+    );
 }
 
 #[test]

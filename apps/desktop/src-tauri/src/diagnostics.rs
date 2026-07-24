@@ -140,6 +140,11 @@ impl DiagnosticsState {
         }
     }
 
+    pub(crate) fn data_root(&self) -> Result<PathBuf, CommandError> {
+        let store = self.inner.lock().map_err(|_| unavailable())?;
+        Ok(store.root.clone())
+    }
+
     fn settings(&self) -> Result<DiagnosticsSettingsResponse, CommandError> {
         let store = self.inner.lock().map_err(|_| unavailable())?;
         Ok(store.settings_response())

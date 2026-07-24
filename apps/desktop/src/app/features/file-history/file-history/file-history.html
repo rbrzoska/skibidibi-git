@@ -1,0 +1,67 @@
+<main class="file-history">
+  <header class="file-history-toolbar">
+    <a class="back" [routerLink]="['/workspace', repositoryId, 'history']">← Back to history</a>
+    <div class="file-heading">
+      <p>FILE HISTORY</p>
+      <strong [title]="path"><span>{{ pathParts().directory }}</span>@if (pathParts().directory) {<i>/</i>}{{ pathParts().fileName || 'Select a file' }}</strong>
+    </div>
+    <div class="snapshot" [title]="oid"><span>Snapshot</span><code>{{ shortOid(oid) }}</code></div>
+  </header>
+
+  <nav class="file-tabs" aria-label="File details">
+    <button type="button" [class.active]="tab() === 'history'" [attr.aria-pressed]="tab() === 'history'" (click)="selectTab('history')">History</button>
+    <button type="button" [class.active]="tab() === 'blame'" [attr.aria-pressed]="tab() === 'blame'" (click)="selectTab('blame')">Blame</button>
+    <small>{{ repository()?.name ?? 'Repository snapshot' }}</small>
+  </nav>
+
+  @if (tab() === 'history') {
+    @if (historyState(); as state) {
+      @if (state.kind === 'loading') {
+        <div class="state"><span class="spinner" aria-hidden="true"></span><strong>Loading file history…</strong></div>
+      } @else if (state.kind === 'error') {
+        <div class="state error" role="alert"><strong>File history unavailable</strong><p>{{ state.message }}</p><button type="button" (click)="retryHistory()">Try again</button></div>
+      } @else if (state.kind === 'ready') {
+        <section class="history-list" aria-label="File commit history">
+          @if (state.value.commits.length === 0) {
+            <div class="state"><strong>No commits changed this file at the selected snapshot.</strong></div>
+          } @else {
+            @for (commit of state.value.commits; track commit.oid) {
+              <article class="history-row">
+                <span class="commit-dot" aria-hidden="true"></span>
+                <div class="commit-main"><strong>{{ commit.summary || 'Commit without subject' }}</strong><small>{{ commit.author.name }} · {{ formatDate(commit.author.authoredAt) }}</small></div>
+                <code>{{ shortOid(commit.oid) }}</code>
+              </article>
+            }
+            @if (state.value.nextCursor !== null) {
+              <button type="button" class="more" [disabled]="loadingMore()" (click)="loadMore()">{{ loadingMore() ? 'Loading…' : 'Load older commits' }}</button>
+            }
+            @if (paginationError(); as error) {
+              <p class="pagination-error" role="alert">{{ error }} <button type="button" (click)="retryMore()">Retry</button></p>
+            }
+          }
+        </section>
+      } @else {
+        <div class="state"><strong>Choose a file to inspect its history.</strong></div>
+      }
+    }
+  } @else if (blameState(); as state) {
+    @if (state.kind === 'idle' || state.kind === 'loading') {
+      <div class="state"><span class="spinner" aria-hidden="true"></span><strong>Loading blame…</strong></div>
+    } @else if (state.kind === 'error') {
+      <div class="state error" role="alert"><strong>Blame unavailable</strong><p>{{ state.message }}</p><button type="button" (click)="retryBlame()">Try again</button></div>
+    } @else if (state.value.state !== 'available') {
+      <div class="state"><strong>Blame is unavailable for this file.</strong><p>{{ state.value.state === 'binary' ? 'This file is binary.' : 'This file exceeds the safe blame display limit.' }}</p></div>
+    } @else {
+      <section class="blame-table" aria-label="File blame">
+        @if (state.value.truncated) { <p class="warning">Only the safe, bounded portion of this file can be shown.</p> }
+        @for (line of state.value.lines; track line.lineNumber) {
+          <article class="blame-row">
+            <code class="line-number">{{ line.lineNumber }}</code>
+            <div class="attribution" [title]="line.authorName + ' · ' + line.summary"><code>{{ shortOid(line.oid) }}</code><span>{{ line.authorName }}</span></div>
+            <code class="line-content">{{ line.content }}</code>
+          </article>
+        }
+      </section>
+    }
+  }
+</main>

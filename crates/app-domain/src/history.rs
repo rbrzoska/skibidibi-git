@@ -17,6 +17,16 @@ pub struct CommitListItem {
     pub author: CommitAuthor,
     pub summary: String,
     pub refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<CommitRelation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommitRelation {
+    Task,
+    Merge,
+    Base,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,4 +71,63 @@ pub struct CommitDetails {
     pub full_message: String,
     pub refs: Vec<String>,
     pub files: Vec<ChangedFileSummary>,
+}
+
+/// A stable, read-only comparison between two exact branch snapshots.
+///
+/// Ref names are retained for display while every Git query is executed against the immutable
+/// object ids. The native boundary verifies both refs before and after building this response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefComparison {
+    pub source_full_name: String,
+    pub source_oid: String,
+    pub target_full_name: String,
+    pub target_oid: String,
+    pub merge_base_oid: String,
+    pub ahead: u64,
+    pub behind: u64,
+    pub commits: Vec<CommitListItem>,
+    pub commits_truncated: bool,
+    pub files: Vec<ChangedFileSummary>,
+    pub files_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefComparisonFileDiff {
+    pub source_full_name: String,
+    pub source_oid: String,
+    pub target_full_name: String,
+    pub target_oid: String,
+    pub path: String,
+    pub old_path: Option<String>,
+    pub patch: String,
+    pub binary: bool,
+    pub truncated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RefComparisonFileDiff;
+
+    #[test]
+    fn ref_comparison_file_diff_serializes_rename_identity_in_camel_case() {
+        let response = RefComparisonFileDiff {
+            source_full_name: "refs/heads/feature".to_owned(),
+            source_oid: "a".repeat(40),
+            target_full_name: "refs/heads/main".to_owned(),
+            target_oid: "b".repeat(40),
+            path: "new-name.rs".to_owned(),
+            old_path: Some("old-name.rs".to_owned()),
+            patch: String::new(),
+            binary: false,
+            truncated: false,
+        };
+
+        let value = serde_json::to_value(response).expect("serialize file diff");
+
+        assert_eq!(value["oldPath"], "old-name.rs");
+        assert!(value.get("old_path").is_none());
+    }
 }

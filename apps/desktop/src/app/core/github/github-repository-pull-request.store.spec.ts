@@ -17,6 +17,7 @@ function summary(number: number): GitHubPullRequestSummary {
     updatedAt: '2026-07-15T12:00:00Z',
     authoredByViewer: number === 1,
     commentCount: 3,
+    approvalCount: 1,
     reviewRequestedFromViewer: false,
     unresolvedThreadCount: 0,
   };
@@ -46,6 +47,8 @@ describe('GitHubRepositoryPullRequestStore', () => {
         .mockResolvedValueOnce({ pullRequests: [summary(1)], nextCursor: 'page-2' })
         .mockResolvedValueOnce({ pullRequests: [summary(1), summary(2)], nextCursor: null }),
       githubPullRequestDetail: vi.fn(),
+      githubPullRequestFiles: vi.fn(),
+      githubApprovePullRequest: vi.fn(),
     };
     TestBed.configureTestingModule({ providers: [GitHubRepositoryPullRequestStore, { provide: GITHUB_BRIDGE, useValue: bridge }] });
     const store = TestBed.inject(GitHubRepositoryPullRequestStore);
@@ -81,6 +84,8 @@ describe('GitHubRepositoryPullRequestStore', () => {
       githubPullRequestDetail: vi.fn()
         .mockReturnValueOnce(new Promise((resolve) => { resolveOldDetail = resolve; }))
         .mockResolvedValueOnce(detail(2)),
+      githubPullRequestFiles: vi.fn(),
+      githubApprovePullRequest: vi.fn(),
     };
     TestBed.configureTestingModule({ providers: [GitHubRepositoryPullRequestStore, { provide: GITHUB_BRIDGE, useValue: bridge }] });
     const store = TestBed.inject(GitHubRepositoryPullRequestStore);
@@ -118,6 +123,8 @@ describe('GitHubRepositoryPullRequestStore', () => {
         .mockResolvedValueOnce({ pullRequests: [summary(2)], nextCursor: null }),
       githubPullRequestDetail: vi.fn()
         .mockReturnValueOnce(new Promise((resolve) => { resolveAssignedDetail = resolve; })),
+      githubPullRequestFiles: vi.fn(),
+      githubApprovePullRequest: vi.fn(),
     };
     TestBed.configureTestingModule({ providers: [GitHubRepositoryPullRequestStore, { provide: GITHUB_BRIDGE, useValue: bridge }] });
     const store = TestBed.inject(GitHubRepositoryPullRequestStore);
@@ -145,5 +152,32 @@ describe('GitHubRepositoryPullRequestStore', () => {
     const state = store.listState();
     expect(state.kind === 'ready' ? state.pullRequests.map(({ number }) => number) : []).toEqual([2]);
     expect(store.detailState()).toEqual({ kind: 'idle' });
+  });
+
+  it('loads changed files lazily and approves the selected pull request', async () => {
+    const bridge = {
+      githubPullRequestDetail: vi.fn().mockResolvedValue(detail(2)),
+      githubPullRequestFiles: vi.fn().mockResolvedValue({
+        files: [{ filename: 'src/app.ts', previousFilename: null, status: 'modified', additions: 2, deletions: 1, changes: 3, patch: '@@ -1 +1 @@\n-old\n+new' }],
+        truncated: false,
+      }),
+      githubApprovePullRequest: vi.fn().mockResolvedValue({ approved: true }),
+    } as unknown as GitHubBridge;
+    TestBed.configureTestingModule({ providers: [GitHubRepositoryPullRequestStore, { provide: GITHUB_BRIDGE, useValue: bridge }] });
+    const store = TestBed.inject(GitHubRepositoryPullRequestStore);
+    store.configure('repo-1', 'account-1');
+    await store.select(2);
+
+    await store.loadFiles(2);
+    await store.approve(2);
+
+    expect(bridge.githubPullRequestFiles).toHaveBeenCalledWith({ repositoryId: 'repo-1', accountId: 'account-1', number: 2 });
+    expect(store.filesState()).toEqual(expect.objectContaining({ kind: 'ready', number: 2, truncated: false }));
+    expect(bridge.githubApprovePullRequest).toHaveBeenCalledWith({ repositoryId: 'repo-1', accountId: 'account-1', number: 2 });
+    expect(store.approvalState()).toEqual({ kind: 'approved', number: 2 });
+    expect(store.detailState()).toEqual(expect.objectContaining({
+      kind: 'ready',
+      detail: expect.objectContaining({ approvalCount: 2 }),
+    }));
   });
 });

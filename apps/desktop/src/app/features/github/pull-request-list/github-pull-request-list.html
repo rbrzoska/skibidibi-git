@@ -2,7 +2,7 @@
   @let state = store.listState();
   <div class="pr-controls">
     <div class="pr-scope" role="group" aria-label="Pull request filter">
-      <button type="button" [class.active]="store.scope() === 'assignedToViewer'" [attr.aria-pressed]="store.scope() === 'assignedToViewer'" (click)="setScope('assignedToViewer')">Assigned to me</button>
+      <button type="button" [class.active]="store.scope() === 'assignedToViewer'" [attr.aria-pressed]="store.scope() === 'assignedToViewer'" (click)="setScope('assignedToViewer')">Review requested</button>
       <button type="button" [class.active]="store.scope() === 'authoredByViewer'" [attr.aria-pressed]="store.scope() === 'authoredByViewer'" (click)="setScope('authoredByViewer')">My PRs</button>
     </div>
     <span class="pr-count" [attr.aria-label]="state.kind === 'ready' ? state.pullRequests.length + ' pull requests loaded' : 'Pull request count unavailable'">

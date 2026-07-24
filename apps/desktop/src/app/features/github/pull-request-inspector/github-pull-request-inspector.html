@@ -50,6 +50,21 @@
       @for (thread of state.detail.reviewThreads; track thread.id) {
         <article class="thread" [class.resolved]="thread.resolved">
           <header><strong><span aria-hidden="true">⌘</span> {{ thread.path }}{{ thread.line === null ? '' : ':' + thread.line }}</strong><span class="thread-state" [class.outdated]="thread.outdated">{{ thread.outdated ? 'Outdated' : thread.resolved ? 'Resolved' : 'Open' }}</span></header>
+          @if (threadDiffHunk(thread.comments); as diffHunk) {
+            <section class="review-code" [attr.aria-label]="'Code context for ' + thread.path">
+              <header><strong [title]="thread.path">{{ thread.path }}</strong><span>{{ thread.outdated ? 'Historical diff' : 'Commented diff' }}</span></header>
+              <div class="review-diff" role="table" aria-label="Commented code diff">
+                @for (row of reviewDiffRows(diffHunk); track $index) {
+                  <div class="review-diff-row" [attr.data-kind]="row.kind" role="row">
+                    <code class="old-line" role="cell">{{ row.oldLine ?? '' }}</code>
+                    <code class="new-line" role="cell">{{ row.newLine ?? '' }}</code>
+                    <code class="marker" role="cell">{{ row.marker }}</code>
+                    <code class="diff-content" role="cell">{{ row.content }}</code>
+                  </div>
+                }
+              </div>
+            </section>
+          }
           @for (comment of thread.comments; track comment.id) {
             <div class="comment"><header><span class="avatar" aria-hidden="true">{{ comment.authorLogin.charAt(0).toUpperCase() }}</span><strong>{{ comment.authorLogin }}</strong><time [attr.datetime]="comment.createdAt">{{ comment.createdAt }}</time></header><app-safe-markdown class="comment-body" [source]="comment.body" /></div>
           }

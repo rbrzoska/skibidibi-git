@@ -168,10 +168,12 @@ button {
   font: inherit;
 }
 
-.workspace .reference-confirmation { gap: .45rem; width: min(24rem, calc(100vw - 1.25rem)); height: fit-content; max-height: min(34rem, calc(100dvh - 1.25rem)); overflow: auto; border: 1px solid #8c2f39; border-radius: .5rem; padding: .65rem; color: #e6edf3; background: #161b22; box-shadow: 0 1.2rem 3rem rgb(0 0 0 / 55%); }
+.workspace .reference-confirmation { position: relative; gap: .45rem; width: min(24rem, calc(100vw - 1.25rem)); height: fit-content; max-height: min(34rem, calc(100dvh - 1.25rem)); overflow: auto; border: 1px solid #8c2f39; border-radius: .5rem; padding: .65rem; color: #e6edf3; background: #161b22; box-shadow: 0 1.2rem 3rem rgb(0 0 0 / 55%); }
 .workspace .reference-confirmation[open] { display: grid; grid-auto-rows: max-content; align-content: start; }
 .workspace .reference-confirmation::backdrop { background: rgb(1 4 9 / 72%); backdrop-filter: blur(3px); }
 .workspace .reference-confirmation h2 { margin: 0; font-size: .95rem; line-height: 1.25; }
+.workspace .reference-confirmation .dialog-bot { position: absolute; top: .38rem; right: .45rem; width: 3rem; height: 3rem; opacity: .92; filter: drop-shadow(0 .35rem .55rem rgb(0 0 0 / 35%)); }
+.workspace .reference-confirmation:has(.dialog-bot) > .eyebrow, .workspace .reference-confirmation:has(.dialog-bot) > h2 { padding-right: 3.3rem; }
 .workspace .destructive-eyebrow { display: inline-flex; align-items: center; gap: .3rem; color: #ff7b72; }
 .workspace .reference-confirmation-description { display: grid; gap: .3rem; color: #b1bac4; font-size: .7rem; line-height: 1.4; overflow-wrap: anywhere; }
 .workspace .reference-confirmation-description strong { color: #f0f6fc; }
@@ -227,9 +229,16 @@ button {
 .workspace .deleted { color: #ff7b72; }
 .workspace .conflicts { color: #ffa657; }
 .workspace .commit-list { display: grid; padding: .5rem; }
-.workspace .working-tree-history-row { display: grid; grid-template-columns: 1.45rem minmax(0, 1fr); align-items: center; gap: .4rem; min-width: 0; width: 100%; border: 1px solid #30363d; border-radius: .3rem; padding: .42rem .4rem; color: #c9d1d9; background: #161b22; text-align: left; cursor: pointer; }
+.workspace .working-tree-history-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) 88px 56px 58px; align-items: center; gap: 8px; min-width: 0; width: 100%; min-height: 25px; border: 0; border-radius: 0; padding: 0 12px; color: #c9d1d9; background: #161b22; text-align: left; cursor: pointer; }
 .workspace .working-tree-history-row:hover, .workspace .working-tree-history-row:focus-visible, .workspace .working-tree-history-row.selected { outline: 0; border-color: #388bfd; background: #162334; }
-.workspace .working-tree-dot { justify-self: center; width: .6rem; height: .6rem; border: 2px solid #d29922; border-radius: 50%; background: #0d1117; }
+.workspace .working-tree-history-row { height: 25px; overflow: hidden; }
+.workspace .working-tree-copy { align-items: center; overflow: hidden; }
+.workspace .working-tree-counts { flex-wrap: nowrap; }
+.workspace .working-tree-graph::before, .workspace .commit-row .graph::before { left: 50%; height: auto; transform: translateX(-50%); }
+.workspace .working-tree-graph::before { top: 50%; bottom: -13px; background: var(--ac); }
+.workspace .working-tree-graph i { width: 8px; height: 8px; border-color: var(--amber); background: var(--bg0); }
+.workspace .working-tree-history-row.selected .working-tree-graph i { background: var(--amber); }
+.workspace .commit-row .graph::before { top: -13px; bottom: -13px; }
 .workspace .working-tree-counts, .workspace .working-tree-inspector-counts { display: flex; flex-wrap: wrap; gap: .25rem .7rem; min-width: 0; font-size: .72rem; }
 .workspace .working-tree-counts strong, .workspace .working-tree-inspector-counts strong { font-weight: 700; white-space: nowrap; }
 .workspace .commit-row { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto 4rem; align-items: center; gap: .75rem; min-width: 0; width: 100%; border: 1px solid transparent; border-radius: .4rem; padding: .55rem .65rem; color: #c9d1d9; background: transparent; text-align: left; cursor: pointer; }
@@ -248,10 +257,17 @@ button {
 .workspace .working-tree-overview { display: grid; gap: .55rem; border-bottom: 1px solid #30363d; padding: .85rem 0 1rem; }
 .workspace .working-tree-overview h2 { margin: 0; color: #f0f6fc; font-size: 1rem; }
 .workspace .commit-overview h2 { margin: 0; color: #f0f6fc; font-size: 1rem; line-height: 1.4; }
-.workspace .commit-overview-title { display: flex; align-items: start; justify-content: space-between; gap: .6rem; }
-.workspace .create-branch-from-commit { flex: 0 0 auto; border: 1px solid #388bfd; border-radius: .35rem; padding: .32rem .5rem; color: #fff; background: #1f6feb; font-size: .65rem; cursor: pointer; }
-.workspace .create-branch-from-commit:hover:not(:disabled), .workspace .create-branch-from-commit:focus-visible { outline: 0; border-color: #79c0ff; background: #388bfd; }
-.workspace .create-branch-from-commit:disabled { cursor: not-allowed; opacity: .5; }
+.workspace .commit-overview-title { display: grid; gap: .5rem; }
+.workspace .commit-overview-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.workspace .commit-action { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 22px; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px; color: #b1bac4; background: #21262d; font: 600 10px/1.2 system-ui, sans-serif; white-space: nowrap; cursor: pointer; }
+.workspace .commit-action:hover:not(:disabled), .workspace .commit-action:focus-visible { outline: 0; border-color: #388bfd; color: #f0f6fc; background: #1c2d41; }
+.workspace .commit-action:disabled { cursor: not-allowed; opacity: .45; }
+.workspace .commit-action app-icon { width: 12px; height: 12px; }
+.workspace .reset-control { display: inline-flex; align-items: center; min-height: 22px; border: 1px solid #30363d; border-radius: 4px; overflow: hidden; background: #0d1117; }
+.workspace .reset-control label { padding-inline: 6px 3px; color: #8b949e; font-size: 9px; font-weight: 650; text-transform: uppercase; }
+.workspace .reset-control select { height: 20px; border: 0; padding: 0 2px; color: #c9d1d9; background: transparent; font-size: 10px; }
+.workspace .reset-control .reset-action { min-width: 24px; min-height: 20px; border-block: 0; border-right: 0; border-radius: 0; padding-inline: 5px; }
+.workspace .reset-control .reset-action.danger { color: #ff7b72; background: #3d171c; }
 .workspace .commit-meta { display: grid; gap: .5rem; margin: 0; }
 .workspace .commit-meta > div { display: grid; grid-template-columns: 3.7rem minmax(0, 1fr); align-items: baseline; gap: .6rem; min-width: 0; }
 .workspace .commit-meta dt { color: #6e7681; font-size: .62rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
@@ -278,6 +294,9 @@ button {
 .workspace .graph i { width: .5rem; height: .5rem; }
 .workspace .changed-files { flex: 1 1 auto; min-height: 0; gap: .2rem; overflow: auto; overscroll-behavior: contain; }
 .workspace .changed-files li { min-width: 0; }
+.workspace .changed-file-row { display: grid; grid-template-columns: minmax(0, 1fr) 24px; align-items: center; gap: 3px; }
+.workspace .file-history-link { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid #30363d; border-radius: .3rem; color: #8b949e; background: #161b22; text-decoration: none; }
+.workspace .file-history-link:hover, .workspace .file-history-link:focus-visible { outline: 0; border-color: #388bfd; color: #79c0ff; background: #1c2d41; }
 .workspace .changed-file { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; gap: .5rem; width: 100%; border: 1px solid #21262d; border-radius: .35rem; padding: .48rem .5rem; color: #b1bac4; background: #0d111780; text-align: left; cursor: pointer; }
 .workspace .changed-file:hover, .workspace .changed-file:focus-visible, .workspace .changed-file.selected { outline: 0; border-color: #24496f; color: #fff; background: #1c2d41; }
 .workspace .changed-file:disabled { cursor: not-allowed; opacity: .65; }
@@ -347,6 +366,16 @@ button {
 .workspace .working-tree-file-checkbox:disabled { cursor: not-allowed; opacity: .5; }
 .workspace .navigation-toggles { display: flex; flex-wrap: wrap; gap: .35rem .65rem; border-bottom: 1px solid #30363d; padding: .65rem .15rem; }
 .workspace .navigation-action-notice { margin: .45rem .15rem 0; border: 1px solid #2ea04366; border-radius: .35rem; padding: .45rem .55rem; color: #7ee787; background: #23863614; font-size: .66rem; overflow-wrap: anywhere; }
+.workspace .workspace-toasts { position: fixed; z-index: 1000; top: 3.25rem; right: .75rem; display: grid; width: min(24rem, calc(100vw - 1.5rem)); gap: .4rem; pointer-events: none; }
+.workspace .workspace-toast { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .65rem; margin: 0; border: 1px solid #30363d; border-radius: .5rem; padding: .6rem .65rem; color: #c9d1d9; background: #161b22f5; box-shadow: 0 .5rem 1.5rem #0009; font-size: .7rem; line-height: 1.4; overflow-wrap: anywhere; pointer-events: auto; backdrop-filter: blur(12px); }
+.workspace .workspace-toast.error { border-color: #f8514977; color: #ffb3ad; background: #241518f5; }
+.workspace .workspace-toast.success, .workspace .workspace-toast.navigation-action-notice { border-color: #2ea04366; color: #7ee787; background: #142119f5; }
+.workspace .workspace-toast button { display: grid; place-items: center; width: 1.35rem; height: 1.35rem; border: 0; border-radius: .25rem; padding: 0; color: currentColor; background: transparent; font-size: 1rem; line-height: 1; cursor: pointer; }
+.workspace .workspace-toast button:hover, .workspace .workspace-toast button:focus-visible { outline: 0; background: #ffffff14; }
+.workspace .workspace-notification-compat { top: 0; left: 0; right: auto; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); pointer-events: none; }
+.workspace .worktree-switch-description { display: grid; gap: .55rem; color: #b1bac4; font-size: .72rem; line-height: 1.45; }
+.workspace .worktree-switch-description strong { color: #e6edf3; }
+.workspace .worktree-switch-description code { overflow: hidden; border: 1px solid #30363d; border-radius: .35rem; padding: .45rem .5rem; color: #8cbeff; background: #0d1117; font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
 .workspace .navigation-inline-form, .workspace .stash-create-form { display: grid; gap: .35rem; margin: .45rem .15rem; border: 1px solid #30363d; border-radius: .4rem; padding: .5rem; background: #161b22; font-size: .65rem; }
 .workspace .navigation-inline-form label { overflow: hidden; color: #b1bac4; text-overflow: ellipsis; white-space: nowrap; }
 .workspace .navigation-inline-form input, .workspace .stash-create-form > input { min-width: 0; border: 1px solid #30363d; border-radius: .3rem; padding: .35rem .4rem; color: #e6edf3; background: #0d1117; font-size: .68rem; }

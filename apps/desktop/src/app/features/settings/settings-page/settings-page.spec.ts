@@ -3,7 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT } from '../../../core/ai-support/ai-support.store';
+import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT, DEFAULT_AI_REVIEW_PROMPT } from '../../../core/ai-support/ai-support.store';
 import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../../core/github';
 import { DESKTOP_IPC } from '../../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../../core/repositories/repository-catalog';
@@ -66,6 +66,7 @@ describe('SettingsPage', () => {
       { provider: 'cursor' as const, displayName: 'Cursor', available: true, version: '0.9.0', detail: null },
     ]),
     promptTemplate: signal(DEFAULT_AI_COMMIT_PROMPT),
+    reviewPromptTemplate: signal(DEFAULT_AI_REVIEW_PROMPT),
     availabilityLoading: signal(false),
     availabilityError: signal<string | null>(null),
     loadAvailability: vi.fn().mockResolvedValue(undefined),
@@ -73,6 +74,8 @@ describe('SettingsPage', () => {
     setProviderEnabled: vi.fn(),
     updatePromptTemplate: vi.fn(),
     resetPromptTemplate: vi.fn(),
+    updateReviewPromptTemplate: vi.fn(),
+    resetReviewPromptTemplate: vi.fn(),
   };
   const maintenanceStats = {
     repositoryBytes: 12_582_912,
@@ -116,6 +119,8 @@ describe('SettingsPage', () => {
     aiSupport.setProviderEnabled.mockClear();
     aiSupport.updatePromptTemplate.mockClear();
     aiSupport.resetPromptTemplate.mockClear();
+    aiSupport.updateReviewPromptTemplate.mockClear();
+    aiSupport.resetReviewPromptTemplate.mockClear();
     await TestBed.configureTestingModule({
       imports: [SettingsPage],
       providers: [
@@ -145,6 +150,7 @@ describe('SettingsPage', () => {
     expect(text).toContain('Defaults');
     expect(text).toContain('AI Support');
     expect(text).toContain('Commit prompt template');
+    expect(text).toContain('Task review prompt template');
     expect(text).toContain('Codex');
     expect(text).toContain('1.2.3');
     expect(text).toContain('Claude Code');

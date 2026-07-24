@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { vi } from 'vitest';
 
 import { DESKTOP_IPC, type DesktopIpcClient } from '../ipc/desktop-ipc';
-import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT } from './ai-support.store';
+import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT, DEFAULT_AI_REVIEW_PROMPT } from './ai-support.store';
 
 describe('AiSupportStore', () => {
   const invoke = vi.fn<DesktopIpcClient['invoke']>();
@@ -37,6 +37,7 @@ describe('AiSupportStore', () => {
     const store = TestBed.inject(AiSupportStore);
 
     expect(store.promptTemplate()).toBe(DEFAULT_AI_COMMIT_PROMPT);
+    expect(store.reviewPromptTemplate()).toBe(DEFAULT_AI_REVIEW_PROMPT);
     expect(store.enabledAvailableProviders()).toEqual([]);
     await store.loadAvailability();
     expect(store.enabledAvailableProviders()).toEqual([]);
@@ -52,7 +53,20 @@ describe('AiSupportStore', () => {
     expect(JSON.parse(globalThis.localStorage.getItem('skibidibi-git.ai-support.v1') ?? '{}')).toEqual({
       enabledProviders: ['codex'],
       promptTemplate: 'Create a concise English commit summary.',
+      reviewPromptTemplate: DEFAULT_AI_REVIEW_PROMPT,
     });
+  });
+
+  it('persists, bounds, and resets the task-review prompt', () => {
+    const store = TestBed.inject(AiSupportStore);
+    store.updateReviewPromptTemplate('Review only correctness risks.');
+    expect(store.reviewPromptTemplate()).toBe('Review only correctness risks.');
+
+    store.updateReviewPromptTemplate('x'.repeat(17_000));
+    expect(store.reviewPromptTemplate()).toHaveLength(16_384);
+
+    store.resetReviewPromptTemplate();
+    expect(store.reviewPromptTemplate()).toBe(DEFAULT_AI_REVIEW_PROMPT);
   });
 
   it('does not enable unavailable providers and removes providers which become unavailable', async () => {
@@ -111,6 +125,27 @@ describe('AiSupportStore', () => {
       expectedHead: 'head',
       indexFingerprint: 'index',
       worktreeFingerprint: 'worktree',
+    });
+  });
+
+  it('runs task-review preflight and generation with the saved review prompt', async () => {
+    const store = TestBed.inject(AiSupportStore);
+    const request = {
+      repositoryId: 'repo-1', targetFullName: 'refs/heads/main', targetOid: 'target',
+      expectedHead: 'head', indexFingerprint: 'index', worktreeFingerprint: 'worktree',
+    };
+
+    await store.taskReviewPreflight(request);
+    expect(invoke).toHaveBeenLastCalledWith('ai_task_review_preflight', request);
+
+    await store.loadAvailability();
+    store.setProviderEnabled('codex', true);
+    store.updateReviewPromptTemplate('Focus on regressions.');
+    await store.generateTaskReview('codex', request);
+    expect(invoke).toHaveBeenLastCalledWith('ai_generate_task_review', {
+      ...request,
+      provider: 'codex',
+      promptTemplate: 'Focus on regressions.',
     });
   });
 });

@@ -56,6 +56,7 @@ fn parse_list_record(fields: &[&[u8]]) -> Result<CommitListItem, HistoryParseErr
         },
         summary: text(fields[5], "summary")?.to_owned(),
         refs: parse_refs(text(fields[6], "refs")?),
+        relation: None,
     })
 }
 

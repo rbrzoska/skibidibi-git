@@ -10,7 +10,8 @@ use app_domain::{
     GitHubAccountState, GitHubAccountSummary, GitHubAuthKind, GitHubDeviceFlowStart,
     GitHubDeviceFlowState, GitHubRateLimit, GitHubRepository, IntegrationHealth,
     IntegrationHealthIssue, IntegrationHealthState, IssueComment, PullRequestDetail,
-    PullRequestState, PullRequestSummary, RepositoryHealthUpdate, ReviewComment, ReviewThread,
+    PullRequestFile, PullRequestState, PullRequestSummary, RepositoryHealthUpdate, ReviewComment,
+    ReviewThread,
 };
 use app_store::{
     GitHubAccount, GitHubAccountStore, UpsertGitHubAccount, UpsertGitHubRepositoryBinding,
@@ -217,6 +218,7 @@ struct GitHubPullRequestSummaryResponse {
     updated_at: String,
     authored_by_viewer: bool,
     comment_count: u64,
+    approval_count: u64,
     review_requested_from_viewer: Option<bool>,
     unresolved_thread_count: Option<usize>,
 }
@@ -239,6 +241,19 @@ pub(crate) struct GitHubPullRequestDetailResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct GitHubPullRequestFilesResponse {
+    files: Vec<PullRequestFile>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitHubApprovePullRequestResponse {
+    approved: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GitHubCommentResponse {
     id: String,
     author_login: String,
@@ -249,6 +264,7 @@ struct GitHubCommentResponse {
     path: Option<String>,
     line: Option<u64>,
     side: Option<app_domain::ReviewCommentSide>,
+    diff_hunk: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -720,6 +736,8 @@ pub(crate) async fn github_list_pull_requests(
         None
     };
     let viewer_login = context.account.login.clone();
+    let review_requested_from_viewer =
+        matches!(scope, GitHubPullRequestScope::AssignedToViewer).then_some(true);
     let query_viewer_login = viewer_login.clone();
     let owner = context.owner.clone();
     let name = context.name.clone();
@@ -775,7 +793,9 @@ pub(crate) async fn github_list_pull_requests(
                 pull_requests: page
                     .items
                     .into_iter()
-                    .map(|pull| summary_response(pull, &viewer_login, None))
+                    .map(|pull| {
+                        summary_response(pull, &viewer_login, review_requested_from_viewer, None)
+                    })
                     .collect(),
                 next_cursor: page.next_cursor,
             })
@@ -885,6 +905,116 @@ pub(crate) async fn github_pull_request_detail(
             {
                 return Err(stale_account_error());
             }
+            mark_repository_github_health(&state, &repository_id, Some(&error))?;
+            Err(client_command_error(error))
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn github_pull_request_files(
+    account_id: String,
+    repository_id: String,
+    number: u64,
+    state: State<'_, AppState>,
+) -> Result<GitHubPullRequestFilesResponse, GitHubCommandError> {
+    let context = request_context(&state, &account_id, &repository_id)?;
+    let _cli_operation_guard = if context.account.auth_kind == GitHubAuthKind::GitHubCli {
+        Some(state.github_cli_operations.lock().await)
+    } else {
+        None
+    };
+    let owner = context.owner.clone();
+    let name = context.name.clone();
+    let client = load_client(&state, &context.account, context.account_generation).await?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut files = Vec::new();
+        let mut cursor = None;
+        let mut truncated = false;
+        for page_index in 0..MAX_DETAIL_PAGES {
+            let page = client.pull_request_files(
+                &owner,
+                &name,
+                number,
+                DETAIL_PAGE_SIZE,
+                cursor.as_deref(),
+            )?;
+            files.extend(page.items);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+            truncated = page_index + 1 == MAX_DETAIL_PAGES;
+        }
+        Ok::<_, GitHubClientError>((files, truncated))
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("GitHub pull request files task failed: {error}"),
+    })?;
+    verify_cli_account(&state, &context.account).await?;
+    let _finalize_guard = state.github_mutations.lock().await;
+    if account_generation(&state, &context.account.id) != context.account_generation {
+        return Err(stale_account_error());
+    }
+    match result {
+        Ok((files, truncated)) => {
+            update_account_state_locked(
+                &state,
+                &context.account,
+                context.account_generation,
+                GitHubAccountState::Connected,
+            )?;
+            mark_repository_github_health(&state, &repository_id, None)?;
+            Ok(GitHubPullRequestFilesResponse { files, truncated })
+        }
+        Err(error) => {
+            mark_repository_github_health(&state, &repository_id, Some(&error))?;
+            Err(client_command_error(error))
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn github_approve_pull_request(
+    account_id: String,
+    repository_id: String,
+    number: u64,
+    state: State<'_, AppState>,
+) -> Result<GitHubApprovePullRequestResponse, GitHubCommandError> {
+    let context = request_context(&state, &account_id, &repository_id)?;
+    let _cli_operation_guard = if context.account.auth_kind == GitHubAuthKind::GitHubCli {
+        Some(state.github_cli_operations.lock().await)
+    } else {
+        None
+    };
+    let owner = context.owner.clone();
+    let name = context.name.clone();
+    let client = load_client(&state, &context.account, context.account_generation).await?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        client.approve_pull_request(&owner, &name, number)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("GitHub pull request approval task failed: {error}"),
+    })?;
+    verify_cli_account(&state, &context.account).await?;
+    let _finalize_guard = state.github_mutations.lock().await;
+    if account_generation(&state, &context.account.id) != context.account_generation {
+        return Err(stale_account_error());
+    }
+    match result {
+        Ok(_) => {
+            update_account_state_locked(
+                &state,
+                &context.account,
+                context.account_generation,
+                GitHubAccountState::Connected,
+            )?;
+            mark_repository_github_health(&state, &repository_id, None)?;
+            Ok(GitHubApprovePullRequestResponse { approved: true })
+        }
+        Err(error) => {
             mark_repository_github_health(&state, &repository_id, Some(&error))?;
             Err(client_command_error(error))
         }
@@ -1526,6 +1656,7 @@ fn mark_repository_github_issue(
 fn summary_response(
     pull: PullRequestSummary,
     viewer_login: &str,
+    review_requested_from_viewer: Option<bool>,
     unresolved_thread_count: Option<usize>,
 ) -> GitHubPullRequestSummaryResponse {
     let author_login = pull
@@ -1545,7 +1676,8 @@ fn summary_response(
         base_ref_name: pull.base_ref,
         updated_at: pull.updated_at,
         comment_count: pull.comment_count,
-        review_requested_from_viewer: None,
+        approval_count: pull.approval_count,
+        review_requested_from_viewer,
         unresolved_thread_count,
     }
 }
@@ -1560,7 +1692,12 @@ fn detail_response(
 ) -> GitHubPullRequestDetailResponse {
     let unresolved_thread_count = threads.iter().filter(|thread| !thread.resolved).count();
     GitHubPullRequestDetailResponse {
-        summary: summary_response(detail.summary, viewer_login, Some(unresolved_thread_count)),
+        summary: summary_response(
+            detail.summary,
+            viewer_login,
+            None,
+            Some(unresolved_thread_count),
+        ),
         body: detail.body_markdown.unwrap_or_default(),
         additions: detail.additions,
         deletions: detail.deletions,
@@ -1642,6 +1779,7 @@ fn issue_comment_response(comment: IssueComment) -> GitHubCommentResponse {
         path: None,
         line: None,
         side: None,
+        diff_hunk: None,
     }
 }
 
@@ -1674,6 +1812,7 @@ fn review_comment_response(comment: ReviewComment) -> GitHubCommentResponse {
         path: comment.path,
         line: comment.line,
         side: comment.side,
+        diff_hunk: comment.diff_hunk,
     }
 }
 
@@ -1852,12 +1991,13 @@ mod tests {
             html_url: "https://github.com/example/repo/pull/42".to_owned(),
             updated_at: "2026-07-15T12:00:00Z".to_owned(),
             comment_count: 1,
+            approval_count: 2,
         }
     }
 
     #[test]
     fn summary_mapping_marks_the_authenticated_author_without_inventing_review_state() {
-        let summary = summary_response(pull_request(), "OctoCat", Some(2));
+        let summary = summary_response(pull_request(), "OctoCat", None, Some(2));
 
         assert!(summary.authored_by_viewer);
         assert_eq!(summary.review_requested_from_viewer, None);
@@ -1897,6 +2037,7 @@ mod tests {
                 path: Some("src/lib.rs".to_owned()),
                 line: Some(12),
                 side: Some(ReviewCommentSide::Right),
+                diff_hunk: Some("@@ -10,3 +10,4 @@\n old\n+new\n tail".to_owned()),
                 created_at: "2026-07-15T12:02:00Z".to_owned(),
                 updated_at: "2026-07-15T12:02:00Z".to_owned(),
                 html_url: None,
@@ -1909,6 +2050,12 @@ mod tests {
         assert_eq!(
             response.review_threads[0].comments[0].body,
             "Inline comment"
+        );
+        assert!(
+            response.review_threads[0].comments[0]
+                .diff_hunk
+                .as_deref()
+                .is_some_and(|hunk| hunk.contains("+new"))
         );
         assert_eq!(response.summary.unresolved_thread_count, Some(1));
     }

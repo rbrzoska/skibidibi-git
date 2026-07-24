@@ -8,26 +8,30 @@ use std::{
 use app_domain::{
     AmendCommitRequest, AmendCommitResult, ApplyIndexChangeRequest, ApplyIndexChangeResult,
     ApplyStashRequest, ApplyStashResult, CloneRepositoryRequest, CommitDetails, CommitHistoryPage,
-    ConflictFileDetail, ConflictFileDetailRequest, ConflictListResult, CreateBranchRequest,
-    CreateBranchResult, CreateCommitRequest, CreateCommitResult, DeleteBranchRequest,
-    DeleteBranchResult, DropStashRequest, DropStashResult, FetchRepositoryResult, FileDiff,
+    CommitOperationRequest, CommitOperationResult, ConflictFileDetail, ConflictFileDetailRequest,
+    ConflictListResult, CreateBranchRequest, CreateBranchResult, CreateCommitRequest,
+    CreateCommitResult, DeleteBranchRequest, DeleteBranchResult, DiscardWorkingTreeChangesRequest,
+    DiscardWorkingTreeChangesResult, DiscardWorkingTreeHunkRequest, DropStashRequest,
+    DropStashResult, FetchRepositoryResult, FileBlame, FileDiff, FileHistoryPage,
     IntegrationHealth, IntegrationHealthIssue, IntegrationHealthState, MergeBranchRequest,
     MergeBranchResult, PopStashRequest, PopStashResult, PullInactiveBranchRequest,
     PullInactiveBranchResult, PullRequest, PullResult, PushAnalysis, PushRequest, PushResult,
-    PushStashRequest, PushStashResult, RememberRepositoryInput, RememberedRepository,
-    RemoveWorktreeRequest, RemoveWorktreeResult, RepositoryAvailability, RepositoryGitIdentity,
-    RepositoryGroupRelation, RepositoryHealthUpdate, RepositoryNavigation, RepositoryProvider,
-    RepositoryStatus, RepositorySubmodules, RepositoryTransport, RepositoryWorktreeRole,
-    ResolveConflictRequest, ResolveConflictResult, SetUpstreamRequest, SetUpstreamResult,
-    StashDetails, StashFileDiff, StashFileDiffRequest, StashFileSource, SubmoduleCommitState,
-    SubmoduleWorktreeState, SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff,
-    WorktreeDirtyState, WorktreeRemovalMode,
+    PushStashRequest, PushStashResult, RefComparison, RefComparisonFileDiff,
+    RememberRepositoryInput, RememberedRepository, RemoveWorktreeRequest, RemoveWorktreeResult,
+    RepositoryAvailability, RepositoryGitIdentity, RepositoryGroupRelation, RepositoryHealthUpdate,
+    RepositoryNavigation, RepositoryProvider, RepositoryStatus, RepositorySubmodules,
+    RepositoryTransport, RepositoryWorktreeRole, ResetCommitRequest, ResolveConflictRequest,
+    ResolveConflictResult, SetUpstreamRequest, SetUpstreamResult, StashDetails, StashFileDiff,
+    StashFileDiffRequest, StashFileSource, SubmoduleCommitState, SubmoduleWorktreeState,
+    SwitchBranchRequest, SwitchBranchResult, WorkingTreeFileDiff, WorktreeDirtyState,
+    WorktreeRemovalMode,
 };
 use app_store::{CatalogError, RepositoryCatalog, RepositoryCatalogReconciliation};
 use repo_runtime::{
-    BranchCreationError, BranchOperationError, BranchSwitchError, CloneRepositoryError,
-    ConflictResolutionError, FileDiffRuntimeError, HistoryRuntimeError, MaintenanceError,
-    MutationRuntimeError, NavigationRuntimeError, NetworkOperationError, RepositoryRuntime,
+    BranchCreationError, BranchOperationError, BranchPreviewError, BranchSwitchError,
+    CloneRepositoryError, CommitOperationError, ConflictResolutionError, FileDiffRuntimeError,
+    FileHistoryRuntimeError, HistoryRuntimeError, MaintenanceError, MutationRuntimeError,
+    NavigationRuntimeError, NetworkOperationError, RefComparisonError, RepositoryRuntime,
     RepositoryRuntimeError, StashActionError, StashInspectionError, SubmodulesRuntimeError,
     WorkingTreeDiffRuntimeError,
 };
@@ -38,6 +42,7 @@ use uuid::Uuid;
 
 mod ai;
 mod diagnostics;
+mod external_workspace;
 mod github;
 mod maintenance_stats;
 
@@ -184,6 +189,14 @@ impl From<HistoryRuntimeError> for CommandError {
     }
 }
 
+impl From<BranchPreviewError> for CommandError {
+    fn from(error: BranchPreviewError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
 impl From<NavigationRuntimeError> for CommandError {
     fn from(error: NavigationRuntimeError) -> Self {
         Self {
@@ -268,6 +281,30 @@ impl From<FileDiffRuntimeError> for CommandError {
     fn from(error: FileDiffRuntimeError) -> Self {
         Self {
             message: error.to_string(),
+        }
+    }
+}
+
+impl From<RefComparisonError> for CommandError {
+    fn from(error: RefComparisonError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<FileHistoryRuntimeError> for CommandError {
+    fn from(error: FileHistoryRuntimeError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<CommitOperationError> for CommandError {
+    fn from(error: CommitOperationError) -> Self {
+        Self {
+            message: format!("{}: {}", error.code(), error),
         }
     }
 }
@@ -500,6 +537,39 @@ async fn repository_history(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn repository_branch_history(
+    repository_id: String,
+    branch_full_name: String,
+    expected_branch_oid: String,
+    target_full_name: String,
+    expected_target_oid: String,
+    cursor: Option<String>,
+    limit: usize,
+    state: State<'_, AppState>,
+) -> Result<CommitHistoryPage, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .branch_history_page(
+                &repository_path,
+                &branch_full_name,
+                &expected_branch_oid,
+                &target_full_name,
+                &expected_target_oid,
+                limit,
+                cursor.as_deref(),
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("branch preview history task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
 async fn repository_commit_detail(
     repository_id: String,
     oid: String,
@@ -536,6 +606,109 @@ async fn repository_file_diff(
     .await
     .map_err(|error| CommandError {
         message: format!("file diff task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn repository_compare_refs(
+    repository_id: String,
+    source_full_name: String,
+    expected_source_oid: String,
+    target_full_name: String,
+    expected_target_oid: String,
+    state: State<'_, AppState>,
+) -> Result<RefComparison, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .compare_refs(
+                &repository_path,
+                &source_full_name,
+                &expected_source_oid,
+                &target_full_name,
+                &expected_target_oid,
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("ref comparison task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn repository_compare_ref_file_diff(
+    repository_id: String,
+    source_full_name: String,
+    expected_source_oid: String,
+    target_full_name: String,
+    expected_target_oid: String,
+    path: String,
+    old_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<RefComparisonFileDiff, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .compare_ref_file_diff(
+                &repository_path,
+                &source_full_name,
+                &expected_source_oid,
+                &target_full_name,
+                &expected_target_oid,
+                &path,
+                old_path.as_deref(),
+            )
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("ref comparison file diff task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_file_history(
+    repository_id: String,
+    start_oid: String,
+    path: String,
+    cursor: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<FileHistoryPage, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .file_history(&repository_path, &start_oid, &path, cursor.as_deref())
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("file history task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_file_blame(
+    repository_id: String,
+    oid: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<FileBlame, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories
+            .file_blame(&repository_path, &oid, &path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("file blame task failed: {error}"),
     })?
 }
 
@@ -845,6 +1018,52 @@ async fn repository_apply_index_change(
 }
 
 #[tauri::command]
+async fn repository_discard_worktree_changes(
+    repository_id: String,
+    operation: DiscardWorkingTreeChangesRequest,
+    state: State<'_, AppState>,
+) -> Result<DiscardWorkingTreeChangesResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .discard_worktree_changes(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("working-tree discard task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_discard_worktree_hunk(
+    repository_id: String,
+    operation: DiscardWorkingTreeHunkRequest,
+    state: State<'_, AppState>,
+) -> Result<DiscardWorkingTreeChangesResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .discard_worktree_hunk(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("working-tree hunk discard task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
 async fn repository_create_commit(
     repository_id: String,
     operation: CreateCommitRequest,
@@ -887,6 +1106,75 @@ async fn repository_amend_commit(
     .await
     .map_err(|error| CommandError {
         message: format!("amend task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_cherry_pick_commit(
+    repository_id: String,
+    operation: CommitOperationRequest,
+    state: State<'_, AppState>,
+) -> Result<CommitOperationResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .cherry_pick_commit(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("cherry-pick task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_revert_commit(
+    repository_id: String,
+    operation: CommitOperationRequest,
+    state: State<'_, AppState>,
+) -> Result<CommitOperationResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .revert_commit(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("revert task failed: {error}"),
+    })?
+}
+
+#[tauri::command]
+async fn repository_reset_commit(
+    repository_id: String,
+    operation: ResetCommitRequest,
+    state: State<'_, AppState>,
+) -> Result<CommitOperationResult, CommandError> {
+    let repository_path = resolve_repository_path(&repository_id, &state)?;
+    let mutation = mutation_lock(&state, &repository_path)?;
+    let repositories = state.repositories.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = mutation.lock().map_err(|_| CommandError {
+            message: "repository mutation queue is unavailable".to_owned(),
+        })?;
+        repositories
+            .reset_commit(&repository_path, &operation)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|error| CommandError {
+        message: format!("reset task failed: {error}"),
     })?
 }
 
@@ -1545,16 +1833,26 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ai::ai_cli_status,
             ai::ai_generate_commit_message,
+            ai::ai_task_review_preflight,
+            ai::ai_generate_task_review,
+            ai::code_review_list,
+            ai::code_review_read,
             diagnostics::diagnostics_settings,
             diagnostics::diagnostics_update_settings,
             diagnostics::diagnostics_read,
             diagnostics::diagnostics_clear,
             diagnostics::select_diagnostics_directory,
+            external_workspace::open_branch_workspace,
             set_application_zoom,
             repository_status,
             repository_history,
+            repository_branch_history,
             repository_commit_detail,
             repository_file_diff,
+            repository_compare_refs,
+            repository_compare_ref_file_diff,
+            repository_file_history,
+            repository_file_blame,
             repository_stash_detail,
             repository_stash_file_diff,
             repository_push_analysis,
@@ -1569,8 +1867,13 @@ pub fn run() {
             repository_resolve_conflict,
             repository_working_tree_file_diff,
             repository_apply_index_change,
+            repository_discard_worktree_changes,
+            repository_discard_worktree_hunk,
             repository_create_commit,
             repository_amend_commit,
+            repository_cherry_pick_commit,
+            repository_revert_commit,
+            repository_reset_commit,
             repository_navigation,
             create_repository_branch,
             repository_push_stash,
@@ -1602,7 +1905,9 @@ pub fn run() {
             github::github_disconnect_account,
             github::github_list_repositories,
             github::github_list_pull_requests,
-            github::github_pull_request_detail
+            github::github_pull_request_detail,
+            github::github_pull_request_files,
+            github::github_approve_pull_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running the desktop application");

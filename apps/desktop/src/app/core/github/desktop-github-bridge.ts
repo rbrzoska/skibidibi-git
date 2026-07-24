@@ -10,6 +10,7 @@ import type {
   GitHubListPullRequestsResponse,
   GitHubPullRequestDetail,
   GitHubPullRequestDetailRequest,
+  GitHubPullRequestFiles,
   GitHubRepositoryPage,
 } from './github-bridge';
 
@@ -72,5 +73,15 @@ export class DesktopGitHubBridge implements GitHubBridge {
     request: GitHubPullRequestDetailRequest,
   ): Promise<GitHubPullRequestDetail> {
     return this.ipc.invoke('github_pull_request_detail', request);
+  }
+
+  githubPullRequestFiles(request: GitHubPullRequestDetailRequest): Promise<GitHubPullRequestFiles> {
+    return this.ipc.invoke('github_pull_request_files', request);
+  }
+
+  githubApprovePullRequest(
+    request: GitHubPullRequestDetailRequest,
+  ): Promise<{ readonly approved: boolean }> {
+    return this.ipc.invoke('github_approve_pull_request', request);
   }
 }

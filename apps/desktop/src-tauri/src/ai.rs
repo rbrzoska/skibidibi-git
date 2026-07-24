@@ -5,14 +5,15 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use app_domain::{
-    AiCliStatus, AiCliStatuses, AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult,
-    AiProvider,
+    AiCliStatus, AiCliStatuses, AiCodeReviewDocument, AiCodeReviewList, AiCodeReviewSummary,
+    AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult, AiGenerateTaskReviewRequest,
+    AiProvider, AiTaskReviewPreflightRequest, AiTaskReviewPreflightResult, RepositoryBranchKind,
 };
-use repo_runtime::staged_ai_context_default;
+use repo_runtime::{staged_ai_context_default, task_review_context_default};
 use serde_json::Value;
 use tauri::State;
 
@@ -24,6 +25,10 @@ const VERSION_LIMIT: usize = 8 * 1024;
 const STDOUT_LIMIT: usize = 32 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
 const MAX_PROMPT_TEMPLATE: usize = 4 * 1024;
+const MAX_REVIEW_PROMPT_TEMPLATE: usize = 16 * 1024;
+const REVIEW_GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
+const REVIEW_STDOUT_LIMIT: usize = 2 * 1024 * 1024;
+const REVIEW_DIRECTORY: &str = "code-reviews";
 
 #[derive(Debug, Clone)]
 struct ProviderExecutable {
@@ -106,6 +111,153 @@ pub(crate) async fn ai_generate_commit_message(
     result
 }
 
+#[tauri::command]
+pub(crate) async fn ai_task_review_preflight(
+    repository_id: String,
+    target_full_name: String,
+    target_oid: String,
+    expected_head: String,
+    index_fingerprint: String,
+    worktree_fingerprint: String,
+    state: State<'_, AppState>,
+) -> Result<AiTaskReviewPreflightResult, CommandError> {
+    let request = AiTaskReviewPreflightRequest {
+        repository_id,
+        target_full_name,
+        target_oid,
+        expected_head,
+        index_fingerprint,
+        worktree_fingerprint,
+    };
+    let repository = resolve_repository_path(&request.repository_id, &state)?;
+    validate_review_target(
+        &state,
+        &repository,
+        &request.target_full_name,
+        &request.target_oid,
+    )?;
+    let target_oid = request.target_oid.clone();
+    let context = tauri::async_runtime::spawn_blocking(move || {
+        task_review_context_default(&repository, &target_oid)
+    })
+    .await
+    .map_err(|_| command_error("task review preflight failed"))?
+    .map_err(|error| command_error(error.to_string()))?;
+    validate_review_snapshot(
+        &context.status,
+        &request.expected_head,
+        &request.index_fingerprint,
+        &request.worktree_fingerprint,
+    )?;
+    Ok(AiTaskReviewPreflightResult {
+        branch: context.branch,
+        head: request.expected_head,
+        target_full_name: request.target_full_name,
+        target_oid: request.target_oid,
+        merge_base: context.merge_base,
+        target_merged: context.target_merged,
+        uncommitted_files: context.status.entries.len(),
+        changed_files: context.changed_files.len(),
+        my_commits: context.my_commits.len(),
+        index_fingerprint: context.status.index_fingerprint,
+        worktree_fingerprint: context.status.worktree_fingerprint,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri maps each camelCase IPC field to a command argument.
+pub(crate) async fn ai_generate_task_review(
+    repository_id: String,
+    provider: AiProvider,
+    prompt_template: String,
+    target_full_name: String,
+    target_oid: String,
+    expected_head: String,
+    index_fingerprint: String,
+    worktree_fingerprint: String,
+    state: State<'_, AppState>,
+) -> Result<AiCodeReviewDocument, CommandError> {
+    let request = AiGenerateTaskReviewRequest {
+        repository_id,
+        provider,
+        prompt_template,
+        target_full_name,
+        target_oid,
+        expected_head,
+        index_fingerprint,
+        worktree_fingerprint,
+    };
+    validate_review_prompt(&request.prompt_template)?;
+    let repository = resolve_repository_path(&request.repository_id, &state)?;
+    validate_review_target(
+        &state,
+        &repository,
+        &request.target_full_name,
+        &request.target_oid,
+    )?;
+    let data_root = state.diagnostics.data_root()?;
+    let provider = request.provider;
+    state.diagnostics.record_ai_event(
+        "info",
+        "ai_task_review_started",
+        "AI task review started",
+        provider_id(provider),
+    );
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        generate_task_review(request, repository, data_root)
+    })
+    .await
+    .map_err(|_| command_error("AI task review failed"))?;
+    match &result {
+        Ok(_) => state.diagnostics.record_ai_event(
+            "info",
+            "ai_task_review_succeeded",
+            "AI task review completed",
+            provider_id(provider),
+        ),
+        Err(error) => state.diagnostics.record_ai_event(
+            "error",
+            diagnostic_event_code(&error.message),
+            "AI task review failed",
+            provider_id(provider),
+        ),
+    }
+    result
+}
+
+#[tauri::command]
+pub(crate) fn code_review_list(
+    state: State<'_, AppState>,
+) -> Result<AiCodeReviewList, CommandError> {
+    let directory = state.diagnostics.data_root()?.join(REVIEW_DIRECTORY);
+    let mut reviews = read_review_summaries(&directory)?;
+    reviews.sort_by_key(|review| std::cmp::Reverse(review.created_at_ms));
+    Ok(AiCodeReviewList { reviews })
+}
+
+#[tauri::command]
+pub(crate) fn code_review_read(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<AiCodeReviewDocument, CommandError> {
+    if !valid_review_id(&id) {
+        return Err(command_error("invalid code review id"));
+    }
+    let directory = state.diagnostics.data_root()?.join(REVIEW_DIRECTORY);
+    let summary = read_review_summary(&directory.join(format!("{id}.json")))?;
+    if summary.id != id {
+        return Err(command_error("code review metadata is invalid"));
+    }
+    let markdown = fs::read_to_string(directory.join(format!("{id}.md")))
+        .map_err(|_| command_error("code review document is unavailable"))?;
+    if markdown.len() > REVIEW_STDOUT_LIMIT {
+        return Err(command_error(
+            "code review document exceeds the safety limit",
+        ));
+    }
+    Ok(AiCodeReviewDocument { summary, markdown })
+}
+
 fn generate(
     request: AiGenerateCommitMessageRequest,
     repository: PathBuf,
@@ -152,6 +304,238 @@ fn generate(
         index_fingerprint: context.status.index_fingerprint,
         worktree_fingerprint: context.status.worktree_fingerprint,
     })
+}
+
+fn generate_task_review(
+    request: AiGenerateTaskReviewRequest,
+    repository: PathBuf,
+    data_root: PathBuf,
+) -> Result<AiCodeReviewDocument, CommandError> {
+    let context = task_review_context_default(&repository, &request.target_oid)
+        .map_err(|error| command_error(error.to_string()))?;
+    validate_review_snapshot(
+        &context.status,
+        &request.expected_head,
+        &request.index_fingerprint,
+        &request.worktree_fingerprint,
+    )?;
+    let executable = detect_provider(request.provider)
+        .ok_or_else(|| command_error("the selected AI CLI is not available"))?;
+    let input = format!(
+        "{}\n\nReturn a single self-contained Markdown code-review report. Focus on correctness, security, data loss, regressions, performance, and missing tests. Rank actionable findings by severity and reference files or diff sections. Do not modify files, run tools, or include hidden reasoning. If no actionable issue is found, say so explicitly and list the residual testing risks.\n\n{}",
+        request.prompt_template, context.text
+    );
+    let temporary = tempfile::tempdir()
+        .map_err(|_| command_error("could not create an isolated AI working directory"))?;
+    let output = run_bounded_process(
+        &executable.path,
+        &provider_arguments(request.provider),
+        input.into_bytes(),
+        temporary.path(),
+        REVIEW_GENERATION_TIMEOUT,
+        REVIEW_STDOUT_LIMIT,
+        STDERR_LIMIT,
+    )?;
+    if !output.success {
+        return Err(command_error(classify_cli_error(
+            request.provider,
+            &output.stdout,
+            &output.stderr,
+        )));
+    }
+    let review = normalize_review_response(&output.stdout)?;
+    let created_at_ms = now_millis()?;
+    let repository_name = repository
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repository")
+        .to_owned();
+    let id = format!(
+        "{}-{}-{}",
+        created_at_ms,
+        safe_file_token(&repository_name),
+        &request.expected_head[..7.min(request.expected_head.len())]
+    );
+    let directory = data_root.join(REVIEW_DIRECTORY);
+    fs::create_dir_all(&directory)
+        .map_err(|_| command_error("code review directory could not be created"))?;
+    let markdown_path = directory.join(format!("{id}.md"));
+    let markdown = format!(
+        "# Code Review: {}\n\n> Repository: `{}`  \n> Target: `{}`  \n> Provider: `{}`  \n> Changed files: {} · My commits: {} · Uncommitted files: {}\n\n{}\n",
+        context.branch,
+        repository_name,
+        request.target_full_name,
+        provider_id(request.provider),
+        context.changed_files.len(),
+        context.my_commits.len(),
+        context.status.entries.len(),
+        review.trim(),
+    );
+    write_atomic(&markdown_path, markdown.as_bytes())?;
+    let summary = AiCodeReviewSummary {
+        id: id.clone(),
+        repository_id: request.repository_id,
+        repository_name,
+        branch: context.branch,
+        target_branch: request.target_full_name,
+        provider: request.provider,
+        created_at_ms,
+        changed_files: context.changed_files.len(),
+        my_commits: context.my_commits.len(),
+        uncommitted_files: context.status.entries.len(),
+        markdown_file: markdown_path.to_string_lossy().into_owned(),
+    };
+    let metadata = serde_json::to_vec_pretty(&summary)
+        .map_err(|_| command_error("code review metadata could not be encoded"))?;
+    if let Err(error) = write_atomic(&directory.join(format!("{id}.json")), &metadata) {
+        let _ = fs::remove_file(&markdown_path);
+        return Err(error);
+    }
+    Ok(AiCodeReviewDocument { summary, markdown })
+}
+
+fn validate_review_prompt(prompt: &str) -> Result<(), CommandError> {
+    if prompt.trim().is_empty() || prompt.len() > MAX_REVIEW_PROMPT_TEMPLATE {
+        return Err(command_error(
+            "AI review prompt template must contain 1–16384 bytes",
+        ));
+    }
+    if prompt.chars().any(|character| character == '\0') {
+        return Err(command_error(
+            "AI review prompt template contains an invalid character",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_review_target(
+    state: &AppState,
+    repository: &Path,
+    full_name: &str,
+    expected_oid: &str,
+) -> Result<(), CommandError> {
+    if !full_name.starts_with("refs/heads/") || full_name.chars().any(char::is_control) {
+        return Err(command_error("task review target must be a local branch"));
+    }
+    let navigation = state
+        .repositories
+        .navigation(repository)
+        .map_err(|_| command_error("task review target could not be verified"))?;
+    let valid = navigation.branches.iter().any(|branch| {
+        branch.kind == RepositoryBranchKind::Local
+            && branch.full_name == full_name
+            && branch.oid == expected_oid
+    });
+    if !valid {
+        return Err(command_error(
+            "task review target changed; refresh and select it again",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_review_snapshot(
+    status: &app_domain::RepositoryStatus,
+    expected_head: &str,
+    index_fingerprint: &str,
+    worktree_fingerprint: &str,
+) -> Result<(), CommandError> {
+    if status.branch.oid.as_deref() != Some(expected_head)
+        || status.index_fingerprint != index_fingerprint
+        || status.worktree_fingerprint != worktree_fingerprint
+    {
+        return Err(command_error(
+            "repository state changed; refresh before reviewing the task",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_review_response(stdout: &[u8]) -> Result<String, CommandError> {
+    let raw = std::str::from_utf8(stdout)
+        .map_err(|_| command_error("AI CLI returned invalid review text"))?;
+    let candidate = parse_json_candidate(raw).unwrap_or_else(|| raw.to_owned());
+    let review = candidate.trim().trim_matches('`').trim();
+    if review.is_empty()
+        || review.len() > REVIEW_STDOUT_LIMIT
+        || review
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(command_error("AI CLI returned an invalid review report"));
+    }
+    Ok(review.to_owned())
+}
+
+fn read_review_summaries(directory: &Path) -> Result<Vec<AiCodeReviewSummary>, CommandError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(command_error("code review list is unavailable")),
+    };
+    let mut reviews = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(summary) = read_review_summary(&path) {
+            reviews.push(summary);
+        }
+    }
+    Ok(reviews)
+}
+
+fn read_review_summary(path: &Path) -> Result<AiCodeReviewSummary, CommandError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| command_error("code review metadata is unavailable"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+        return Err(command_error("code review metadata is invalid"));
+    }
+    let bytes = fs::read(path).map_err(|_| command_error("code review metadata is unavailable"))?;
+    serde_json::from_slice::<AiCodeReviewSummary>(&bytes)
+        .map_err(|_| command_error("code review metadata is invalid"))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, bytes)
+        .map_err(|_| command_error("code review file could not be written"))?;
+    fs::rename(&temporary, path).map_err(|_| {
+        let _ = fs::remove_file(&temporary);
+        command_error("code review file could not be published")
+    })
+}
+
+fn valid_review_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 160
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn safe_file_token(value: &str) -> String {
+    let token = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    token.trim_matches('-').chars().take(48).collect::<String>()
+}
+
+fn now_millis() -> Result<u64, CommandError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| command_error("system clock is before the Unix epoch"))?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| command_error("system clock value is too large"))
 }
 
 fn provider_arguments(provider: AiProvider) -> Vec<OsString> {
@@ -610,6 +994,23 @@ mod tests {
             normalize_response(br#"{"type":"item.completed","item":{"type":"agent_message","text":"Fix checkout validation"}}"#).unwrap(),
             "Fix checkout validation"
         );
+    }
+
+    #[test]
+    fn task_review_output_accepts_markdown_and_rejects_unsafe_control_bytes() {
+        assert_eq!(
+            normalize_review_response(b"# Verdict\n\n## High\n- `src/task.rs`: regression")
+                .unwrap(),
+            "# Verdict\n\n## High\n- `src/task.rs`: regression"
+        );
+        assert_eq!(
+            normalize_review_response(br##"{"result":"# Review\n\nNo actionable issues."}"##)
+                .unwrap(),
+            "# Review\n\nNo actionable issues."
+        );
+        assert!(normalize_review_response(b"review\x00secret").is_err());
+        assert!(!valid_review_id("../outside"));
+        assert!(valid_review_id("123-project-abcdef0"));
     }
 
     #[test]

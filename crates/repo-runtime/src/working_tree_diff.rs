@@ -30,7 +30,7 @@ const STATUS_ARGUMENTS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkingTreeDiffQuery {
-    base: String,
+    base: Option<String>,
     path: String,
     old_path: Option<String>,
     cached_only: bool,
@@ -39,10 +39,19 @@ pub struct WorkingTreeDiffQuery {
 impl WorkingTreeDiffQuery {
     fn new(base: &str, entry: &StatusEntry, cached_only: bool) -> Self {
         Self {
-            base: base.to_owned(),
+            base: Some(base.to_owned()),
             path: entry.path.clone(),
             old_path: entry.original_path.clone(),
             cached_only,
+        }
+    }
+
+    fn unstaged(entry: &StatusEntry) -> Self {
+        Self {
+            base: None,
+            path: entry.path.clone(),
+            old_path: entry.original_path.clone(),
+            cached_only: false,
         }
     }
 
@@ -56,10 +65,17 @@ impl WorkingTreeDiffQuery {
             "--no-ext-diff".to_owned(),
             "--no-textconv".to_owned(),
             "-M".to_owned(),
-            "--unified=2147483647".to_owned(),
-            self.base.clone(),
-            "--".to_owned(),
+            if self.base.is_some() {
+                "--unified=2147483647"
+            } else {
+                "--unified=3"
+            }
+            .to_owned(),
         ]);
+        if let Some(base) = &self.base {
+            arguments.push(base.clone());
+        }
+        arguments.push("--".to_owned());
         let mut arguments = arguments
             .into_iter()
             .map(OsString::from)
@@ -212,11 +228,14 @@ pub fn working_tree_file_diff<E: WorkingTreeDiffGitExecutor>(
                 WorkingTreeDiffQuery::new(&base, entry, collides_with_untracked),
             )?;
             let patch = String::from_utf8_lossy(&output.stdout).into_owned();
+            let unstaged_output = executor
+                .execute_working_tree_diff(repository, WorkingTreeDiffQuery::unstaged(entry))?;
             Ok(WorkingTreeFileDiff {
                 path: entry.path.clone(),
                 old_path: entry.original_path.clone(),
                 binary: is_binary_patch(&patch),
                 patch,
+                unstaged_patch: String::from_utf8_lossy(&unstaged_output.stdout).into_owned(),
                 truncated: false,
             })
         }
@@ -299,6 +318,7 @@ fn untracked_file_diff(
         path: entry.path.clone(),
         old_path: None,
         patch,
+        unstaged_patch: String::new(),
         binary,
         truncated: false,
     })

@@ -1,0 +1,239 @@
+.working-tree-file-row {
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 3px;
+}
+
+.working-tree-file-checkbox {
+  position: static;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  opacity: 1;
+  pointer-events: auto;
+  accent-color: var(--ac);
+  cursor: pointer;
+}
+
+.working-tree-file-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: .35;
+}
+
+.working-tree-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.discard-row-action {
+  border-color: color-mix(in srgb, var(--red) 28%, var(--bd));
+  color: var(--red);
+}
+
+.working-tree-file-group > header button {
+  margin-left: 0;
+}
+
+.working-tree-file-group > header button:first-of-type {
+  margin-left: auto;
+}
+
+.working-tree-file-group > header button.danger,
+.discard-hunk.danger {
+  border-color: color-mix(in srgb, var(--red) 32%, var(--bd));
+  color: var(--red);
+  background: var(--red-d);
+}
+
+.discard-hunk-actions {
+  display: flex;
+  min-width: 0;
+  gap: 3px;
+  padding: 2px 5px;
+}
+
+.discard-hunk {
+  flex: none;
+  height: 24px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-sm);
+  padding: 0 7px;
+  font: 600 var(--fs-xs)/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.discard-hunk:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.diff-file-heading,
+.diff-toolbar .diff-file-path {
+  min-width: 0;
+}
+
+.diff-file-path {
+  display: flex;
+  align-items: baseline;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.diff-file-path .file-directory {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tx3);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-path .file-separator,
+.diff-file-path .file-name {
+  flex: none;
+}
+
+.diff-file-path .file-name {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--tx);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-row.hunk-header {
+  grid-template-columns: 3.4rem 3.4rem minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.diff-row.hunk-header > code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stash-creation-dialog {
+  width: min(420px, 94vw);
+}
+
+.stash-creation-dialog form {
+  display: grid;
+  gap: 8px;
+}
+
+.stash-creation-dialog form > label:not(.stash-untracked-option) {
+  color: var(--tx3);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.stash-creation-dialog form > input {
+  height: 30px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 0 8px;
+  color: var(--tx);
+  background: var(--bg0);
+  font-size: 11px;
+}
+
+.stash-untracked-option {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  color: var(--tx2);
+  font-size: 11px;
+}
+
+.stash-untracked-option span {
+  display: grid;
+  gap: 2px;
+}
+
+.stash-untracked-option small {
+  color: var(--tx3);
+  font-size: 9.5px;
+  font-weight: 400;
+}
+
+.workspace .stash-row {
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: center;
+  overflow: visible;
+}
+
+.workspace .stash-action-menu {
+  position: relative;
+  border: 0;
+}
+
+.workspace .navigation .stash-action-menu > summary {
+  position: static;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  min-height: 22px;
+  border-radius: 4px;
+  padding: 0;
+  color: var(--tx3);
+  background: transparent;
+  font-size: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+  list-style: none;
+}
+
+.workspace .stash-action-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.workspace .stash-action-menu[open] > summary,
+.workspace .stash-action-menu > summary:hover,
+.workspace .stash-action-menu > summary:focus-visible {
+  color: var(--tx);
+  background: var(--bg3);
+}
+
+.workspace .stash-action-menu > div {
+  position: absolute;
+  z-index: 20;
+  top: 24px;
+  right: 0;
+  display: grid;
+  min-width: 140px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 4px;
+  background: var(--bg1);
+  box-shadow: 0 10px 25px #0009;
+}
+
+.workspace .stash-action-menu button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 7px;
+  color: var(--tx2);
+  background: transparent;
+  font-size: 10.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace .stash-action-menu button:hover:not(:disabled),
+.workspace .stash-action-menu button:focus-visible {
+  outline: 0;
+  color: var(--tx);
+  background: var(--bg3);
+}
+
+.workspace .stash-action-menu button.danger {
+  color: var(--red);
+}

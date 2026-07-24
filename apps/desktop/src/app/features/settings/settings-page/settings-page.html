@@ -30,7 +30,7 @@
   <section class="settings-section" aria-labelledby="ai-support-heading">
     <h2 id="ai-support-heading">AI Support</h2>
     <div class="settings-card ai-support-card">
-      <p class="ai-privacy-copy">AI commit-message generation runs through the enabled CLI installed on this computer. The staged diff and this prompt are passed only to the selected provider.</p>
+      <p class="ai-privacy-copy">AI commit messages and task reviews run through an enabled CLI installed on this computer. Git context and the selected prompt are passed only to that provider. The CLI runs without tools in an isolated temporary directory.</p>
 
       <label class="ai-prompt-field" for="ai-commit-prompt">
         <span><strong>Commit prompt template</strong><small>Used for every generated message. Keep it concise; generated messages are always inserted for review before committing.</small></span>
@@ -39,6 +39,15 @@
       <div class="ai-prompt-actions">
         <small>{{ aiSupport.promptTemplate().length }} / 4096 characters</small>
         <button type="button" class="compact-button" (click)="aiSupport.resetPromptTemplate()">Reset prompt</button>
+      </div>
+
+      <label class="ai-prompt-field" for="ai-review-prompt">
+        <span><strong>Task review prompt template</strong><small>Used when reviewing the current branch diff, your commits and uncommitted files against a selected target branch.</small></span>
+        <textarea id="ai-review-prompt" rows="6" maxlength="16384" [value]="aiSupport.reviewPromptTemplate()" (input)="aiSupport.updateReviewPromptTemplate($any($event.target).value)"></textarea>
+      </label>
+      <div class="ai-prompt-actions">
+        <small>{{ aiSupport.reviewPromptTemplate().length }} / 16384 characters</small>
+        <button type="button" class="compact-button" (click)="aiSupport.resetReviewPromptTemplate()">Reset review prompt</button>
       </div>
 
       <div class="ai-provider-list" aria-label="Available AI command line tools">

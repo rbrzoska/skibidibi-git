@@ -1,0 +1,117 @@
+<main class="pull-request-dashboard">
+  @let state = dashboard.state();
+  <header class="dashboard-header">
+    <div>
+      <p>GitHub inbox</p>
+      <h1>Pull Requests</h1>
+      <small>Review requests and your open PRs from remembered main repositories.</small>
+    </div>
+    <div class="dashboard-actions">
+      <div class="scope-toggles" role="group" aria-label="Pull request scopes">
+        <button type="button" [class.active]="dashboard.showReviewRequested()" [attr.aria-pressed]="dashboard.showReviewRequested()" (click)="toggleReviewRequested()">Review requested</button>
+        <button type="button" [class.active]="dashboard.showAuthored()" [attr.aria-pressed]="dashboard.showAuthored()" (click)="toggleAuthored()">My PRs</button>
+      </div>
+      <button class="refresh" type="button" [disabled]="state.kind === 'loading'" (click)="refresh()"><span aria-hidden="true">↻</span>{{ state.kind === 'loading' ? 'Loading…' : 'Refresh' }}</button>
+    </div>
+  </header>
+
+  <section class="dashboard-body">
+    <section class="pull-request-list" aria-label="Pull request inbox">
+      <header class="list-heading">
+        <strong>{{ dashboard.visiblePullRequests().length }} pull requests</strong>
+        @if (state.kind === 'ready') { <small>{{ state.repositoryCount }} repositories checked</small> }
+      </header>
+      @if (state.kind === 'idle' || state.kind === 'loading') {
+        <div class="state-card" role="status"><span class="spinner" aria-hidden="true"></span><strong>Loading pull requests…</strong><p>GitHub CLI requests are read-only.</p></div>
+      } @else if (state.kind === 'error') {
+        <div class="state-card error" role="alert"><span aria-hidden="true">!</span><strong>Pull requests unavailable</strong><p>{{ state.message }}</p><button type="button" (click)="refresh()">Try again</button></div>
+      } @else {
+        @if (state.failures.length > 0) {
+          <details class="partial-warning">
+            <summary>{{ state.failures.length }} repositories could not be checked</summary>
+            <ul>
+              @for (failure of state.failures; track failure.repositoryFullName) { <li><strong>{{ failure.repositoryFullName }}</strong><span>{{ failure.message }}</span></li> }
+            </ul>
+          </details>
+        }
+        @if (dashboard.visiblePullRequests().length === 0) {
+          <div class="state-card"><span aria-hidden="true">⑂</span><strong>No matching pull requests</strong><p>Change the filters or refresh the GitHub CLI session in Settings.</p></div>
+        } @else {
+          <ul class="pr-list">
+            @for (pullRequest of dashboard.visiblePullRequests(); track pullRequest.repositoryFullName + '#' + pullRequest.number) {
+              <li>
+                <button type="button" class="pr-card" [class.selected]="dashboard.selected()?.repositoryFullName === pullRequest.repositoryFullName && dashboard.selected()?.number === pullRequest.number" (click)="select(pullRequest)">
+                  <span class="pr-main">
+                    <span class="pr-repository">{{ pullRequest.repositoryFullName }}</span>
+                    <strong><span>#{{ pullRequest.number }}</span> {{ pullRequest.title }}</strong>
+                    <small>{{ pullRequest.authorLogin }} · {{ pullRequest.headRefName }} → {{ pullRequest.baseRefName }}</small>
+                  </span>
+                  <span class="pr-metrics">
+                    <small title="Conversation comments"><span aria-hidden="true">◌</span>{{ pullRequest.commentCount }}</small>
+                    <small class="approved" title="Approvals"><span aria-hidden="true">✓</span>{{ pullRequest.approvalCount }}</small>
+                    @if (pullRequest.draft) { <small class="draft">Draft</small> } @else { <small class="open">Open</small> }
+                    @if (pullRequest.reviewRequestedFromViewer) { <small class="review">Review</small> }
+                    @if (pullRequest.authoredByViewer) { <small class="mine">Mine</small> }
+                  </span>
+                  <time [attr.datetime]="pullRequest.updatedAt">{{ formatUpdatedAt(pullRequest.updatedAt) }}</time>
+                </button>
+                <a class="open-browser" [href]="pullRequest.url" target="_blank" rel="noreferrer" [attr.aria-label]="'Open pull request #' + pullRequest.number + ' in browser'" title="Open in browser">↗</a>
+              </li>
+            }
+          </ul>
+        }
+      }
+    </section>
+
+    <aside class="pull-request-detail" aria-label="Selected pull request details">
+      @if (dashboard.selected() === null) {
+        <div class="detail-placeholder"><span aria-hidden="true">⑂</span><strong>Select a pull request</strong><p>Its description, comments and review threads will be loaded from GitHub.</p></div>
+      } @else {
+        @let selected = dashboard.selected()!;
+        @let approval = detailStore.approvalState();
+        <header class="detail-toolbar">
+          <div class="detail-tabs" role="tablist" aria-label="Pull request detail view">
+            <button type="button" role="tab" [class.active]="detailTab() === 'description'" [attr.aria-selected]="detailTab() === 'description'" (click)="showDescription()">Description</button>
+            <button type="button" role="tab" [class.active]="detailTab() === 'files'" [attr.aria-selected]="detailTab() === 'files'" (click)="showFiles()">Files</button>
+          </div>
+          <button class="approve" type="button" [disabled]="selected.authoredByViewer || selected.draft || selected.state !== 'open' || approval.kind === 'approving' || approval.kind === 'approved'" (click)="approve()">
+            <span aria-hidden="true">✓</span>
+            {{ approval.kind === 'approving' ? 'Approving…' : approval.kind === 'approved' ? 'Approved' : 'Approve' }}
+          </button>
+        </header>
+        @if (approval.kind === 'error') { <p class="approval-error" role="alert">{{ approval.message }}</p> }
+        <div class="detail-content">
+          @if (detailTab() === 'description') {
+            <app-github-pull-request-inspector />
+          } @else {
+            @let filesState = detailStore.filesState();
+            @if (filesState.kind === 'idle' || filesState.kind === 'loading') {
+              <div class="state-card" role="status"><span class="spinner" aria-hidden="true"></span><strong>Loading changed files…</strong></div>
+            } @else if (filesState.kind === 'error') {
+              <div class="state-card error" role="alert"><span aria-hidden="true">!</span><strong>Files unavailable</strong><p>{{ filesState.message }}</p><button type="button" (click)="showFiles()">Try again</button></div>
+            } @else {
+              @if (filesState.truncated) { <p class="files-warning">Showing the first 250 changed files.</p> }
+              <section class="changed-files" aria-label="Changed files">
+                @for (file of filesState.files; track file.filename) {
+                  <details class="changed-file" open>
+                    <summary>
+                      <span class="file-status" [attr.data-status]="file.status">{{ file.status.charAt(0).toUpperCase() }}</span>
+                      <strong>{{ file.filename }}</strong>
+                      <span class="file-stats"><b>+{{ file.additions }}</b><i>−{{ file.deletions }}</i></span>
+                    </summary>
+                    @if (file.previousFilename) { <p class="previous-path">Renamed from {{ file.previousFilename }}</p> }
+                    @if (file.patch) {
+                      <pre class="patch" aria-label="Diff for {{ file.filename }}">@for (line of patchLines(file.patch); track $index) {<code [attr.data-kind]="line.kind">{{ line.text }}</code>}</pre>
+                    } @else {
+                      <p class="binary-file">Diff preview is unavailable for this file. It may be binary or too large for GitHub's patch response.</p>
+                    }
+                  </details>
+                }
+              </section>
+            }
+          }
+        </div>
+      }
+    </aside>
+  </section>
+</main>

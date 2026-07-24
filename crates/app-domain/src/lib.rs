@@ -3,8 +3,10 @@ mod branch_actions;
 mod branch_creation;
 mod branch_operations;
 mod clone;
+mod commit_operations;
 mod conflict_resolution;
 mod file_diff;
+mod file_history;
 mod github;
 mod history;
 mod maintenance;
@@ -19,8 +21,9 @@ mod submodule;
 mod working_tree;
 
 pub use ai::{
-    AiCliStatus, AiCliStatuses, AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult,
-    AiProvider,
+    AiCliStatus, AiCliStatuses, AiCodeReviewDocument, AiCodeReviewList, AiCodeReviewSummary,
+    AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult, AiGenerateTaskReviewRequest,
+    AiProvider, AiTaskReviewPreflightRequest, AiTaskReviewPreflightResult,
 };
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use branch_creation::{BranchCreationSource, CreateBranchRequest, CreateBranchResult};
@@ -29,22 +32,27 @@ pub use branch_operations::{
     PullInactiveBranchResult, WorktreeDirtyState,
 };
 pub use clone::{CloneRepositoryRequest, CloneRepositoryResult};
+pub use commit_operations::{
+    CommitOperationRequest, CommitOperationResult, CommitOperationState, ResetCommitRequest,
+    ResetMode,
+};
 pub use conflict_resolution::{
     ConflictFileDetail, ConflictFileDetailRequest, ConflictFileSummary, ConflictListResult,
     ConflictResolution, ConflictStageIdentity, ConflictVersion, ResolveConflictRequest,
     ResolveConflictResult,
 };
 pub use file_diff::{FileDiff, FileDiffRequest};
+pub use file_history::{FileBlame, FileBlameLine, FileBlameState, FileHistoryPage};
 pub use github::{
     GitHubAccountState, GitHubAccountSummary, GitHubApiResult, GitHubAuthKind,
     GitHubDeviceFlowPoll, GitHubDeviceFlowStart, GitHubDeviceFlowState, GitHubPage,
     GitHubPatValidation, GitHubRateLimit, GitHubRepository, GitHubUser, IssueComment,
-    PullRequestDetail, PullRequestMergeability, PullRequestState, PullRequestSummary,
-    ReviewComment, ReviewCommentSide, ReviewThread,
+    PullRequestDetail, PullRequestFile, PullRequestMergeability, PullRequestState,
+    PullRequestSummary, ReviewComment, ReviewCommentSide, ReviewThread,
 };
 pub use history::{
     ChangedFileStatus, ChangedFileSummary, CommitAuthor, CommitDetails, CommitHistoryPage,
-    CommitListItem,
+    CommitListItem, CommitRelation, RefComparison, RefComparisonFileDiff,
 };
 pub use maintenance::{
     DeleteBranchRequest, DeleteBranchResult, FetchRepositoryResult, RemoveWorktreeRequest,
@@ -52,8 +60,9 @@ pub use maintenance::{
 };
 pub use mutations::{
     AmendCommitRequest, AmendCommitResult, AmendCommitState, ApplyIndexChangeRequest,
-    ApplyIndexChangeResult, ChangeSelection, CreateCommitRequest, CreateCommitResult, IndexAction,
-    WorkingTreeEntrySelector,
+    ApplyIndexChangeResult, ChangeSelection, CreateCommitRequest, CreateCommitResult,
+    DiscardWorkingTreeChangesRequest, DiscardWorkingTreeChangesResult,
+    DiscardWorkingTreeHunkRequest, IndexAction, WorkingTreeEntrySelector,
 };
 pub use navigation::{
     RepositoryBranch, RepositoryBranchKind, RepositoryNavigation, RepositoryStash,

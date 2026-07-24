@@ -6,12 +6,18 @@ import { GitHubPullRequestInspector } from './github-pull-request-inspector';
 
 describe('GitHubPullRequestInspector', () => {
   it('renders conversation comments and review-thread state', async () => {
-    const comment = { id: 'comment-1', authorLogin: 'grace', body: '**Please** adjust this.', createdAt: '2026-07-15T12:00:00Z', updatedAt: '2026-07-15T12:00:00Z', url: null, path: null, line: null, side: null };
+    const comment = {
+      id: 'comment-1', authorLogin: 'grace', body: '**Please** adjust this.',
+      createdAt: '2026-07-15T12:00:00Z', updatedAt: '2026-07-15T12:00:00Z',
+      url: null, path: 'src/app.ts', line: 12, side: 'right' as const,
+      diffHunk: '@@ -10,3 +10,4 @@ function example() {\n context\n-deleted value\n+added value\n tail',
+    };
     const detail = {
       number: 4, title: 'Review me', url: 'https://github.com/o/r/pull/4', state: 'open' as const, draft: false,
       authorLogin: 'ada', headRefName: 'feature', baseRefName: 'main', updatedAt: '2026-07-15T12:00:00Z',
       authoredByViewer: false, reviewRequestedFromViewer: true, unresolvedThreadCount: 1,
       commentCount: 3,
+      approvalCount: 1,
       body: '## Description', additions: 4, deletions: 2, changedFiles: 3, mergeability: 'mergeable' as const,
       conversationTruncated: false, reviewThreadsTruncated: false, comments: [comment],
       reviewThreads: [{ id: 'thread-1', path: 'src/app.ts', line: 12, resolved: false, outdated: true, comments: [comment] }],
@@ -46,6 +52,10 @@ describe('GitHubPullRequestInspector', () => {
     expect(fixture.nativeElement.querySelector('.mergeability')?.getAttribute('data-mergeability')).toBe('mergeable');
     expect(fixture.nativeElement.querySelector('.avatar')?.textContent.trim()).toBe('G');
     expect(fixture.nativeElement.querySelector('.thread-state')?.classList.contains('outdated')).toBe(true);
+    expect(fixture.nativeElement.querySelector('.review-code > header strong')?.textContent).toContain('src/app.ts');
+    expect(fixture.nativeElement.querySelector('.review-diff-row[data-kind="deletion"]')?.textContent).toContain('deleted value');
+    expect(fixture.nativeElement.querySelector('.review-diff-row[data-kind="addition"]')?.textContent).toContain('added value');
+    expect(fixture.nativeElement.querySelectorAll('.review-diff-row[data-kind="context"]')).toHaveLength(2);
     expect(fixture.nativeElement.querySelector('#github-pr-conversation-heading')?.textContent).toContain('1');
     expect(fixture.nativeElement.querySelector('#github-review-threads-heading')?.textContent).toContain('1');
     const open = fixture.nativeElement.querySelector('.open-pr') as HTMLAnchorElement;

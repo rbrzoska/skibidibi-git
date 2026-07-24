@@ -7,6 +7,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
   viewChild,
 } from '@angular/core';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
@@ -15,6 +16,7 @@ import {
   DESKTOP_IPC,
   type CommitChangedFile,
   type BranchCreationSource,
+  type BranchWorkspaceOpenTarget,
   type ChangeSelection,
   type ConflictFileDetailResponse,
   type ConflictFileSummary,
@@ -25,8 +27,11 @@ import {
   type PullRepositoryResponse,
   type PullStrategy,
   type PushAnalysisResponse,
+  type ResetMode,
+  type RepositoryCommitOperationResponse,
   type RepositoryCommitDetailResponse,
   type RepositoryFileDiffResponse,
+  type RepositoryHistoryResponse,
   type RepositoryCommitSummary,
   type RepositoryBranch,
   type RepositoryNavigationResponse,
@@ -45,12 +50,14 @@ import {
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
 import { AiSupportStore } from '../../core/ai-support/ai-support.store';
+import { UiFeedback } from '../../core/ui-feedback/ui-feedback';
 import {
   GitHubAccountStore,
   GitHubRepositoryPullRequestStore,
   type GitHubAccount,
 } from '../../core/github';
 import { AppIcon } from '../../shared/app-icon/app-icon';
+import { SkibiBot } from '../../shared/skibi-bot/skibi-bot';
 import { GitHubPullRequestInspector } from '../github/pull-request-inspector/github-pull-request-inspector';
 import { GitHubPullRequestList } from '../github/pull-request-list/github-pull-request-list';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
@@ -72,6 +79,7 @@ import {
   planWorkingTreeMutation,
   reconcileWorkingTreeSelection,
   workingTreeActionCapabilities,
+  workingTreeEntrySelector,
   workingTreeFileKey,
 } from './working-tree-actions';
 import {
@@ -98,7 +106,14 @@ type FileDiffDisplayMode = 'contextual' | 'full';
 type HistorySelection = 'none' | 'working-tree' | 'commit' | 'stash' | 'pull-request';
 type WorkingTreeMutation =
   | { readonly action: IndexAction; readonly scope: 'selected' | 'all' }
-  | { readonly action: 'commit' | 'amend'; readonly scope: null };
+  | { readonly action: 'discard'; readonly scope: 'selected' }
+  | { readonly action: 'discardHunk' | 'commit' | 'amend'; readonly scope: null };
+interface DiscardableDiffHunk {
+  readonly key: string;
+  readonly displayHunkKey: string;
+  readonly label: string;
+  readonly patch: string;
+}
 type BranchCreationTarget =
   | { readonly kind: 'current'; readonly label: string }
   | { readonly kind: 'commit'; readonly oid: string; readonly label: string };
@@ -147,7 +162,9 @@ type FileDiffState =
   | { readonly kind: 'loading'; readonly path: string; readonly oldPath: string | null }
   | {
       readonly kind: 'ready';
-      readonly response: Pick<RepositoryFileDiffResponse, 'path' | 'patch' | 'binary' | 'truncated'>;
+      readonly response: Pick<RepositoryFileDiffResponse, 'path' | 'patch' | 'binary' | 'truncated'> & {
+        readonly unstagedPatch?: string;
+      };
     }
   | { readonly kind: 'error'; readonly path: string; readonly oldPath: string | null; readonly message: string };
 interface BranchContextMenu {
@@ -155,6 +172,12 @@ interface BranchContextMenu {
   readonly x: number;
   readonly y: number;
   readonly returnFocus: HTMLElement;
+}
+interface BranchPreview {
+  /** Immutable ref/OID pair captured when the user starts a read-only preview. */
+  readonly branch: RepositoryBranch;
+  /** The release branch when marked, otherwise main/master (or the preview itself). */
+  readonly target: RepositoryBranch;
 }
 interface WorktreeContextMenu {
   readonly worktree: RepositoryWorktree;
@@ -172,7 +195,17 @@ interface MergeConfirmation {
 interface SwitchConfirmation {
   readonly branch: RepositoryBranch;
   readonly dirty: boolean;
+  readonly targetWorktree: RepositoryWorktree | null;
   readonly returnFocus: HTMLElement;
+}
+interface DestructiveActionConfirmation {
+  readonly title: string;
+  readonly description: string;
+  readonly confirmLabel: string;
+  readonly destructive: boolean;
+  readonly returnFocus: HTMLElement | null;
+  readonly confirm: () => Promise<void>;
+  readonly cancel: (() => void) | null;
 }
 interface RemoteBranchGroup {
   readonly remote: string;
@@ -253,10 +286,10 @@ export function selectPreferredGitHubAccountId(
 
 @Component({
   selector: 'app-workspace-history',
-  imports: [AppIcon, GitHubPullRequestInspector, GitHubPullRequestList, RouterLink],
+  imports: [AppIcon, GitHubPullRequestInspector, GitHubPullRequestList, RouterLink, SkibiBot],
   providers: [GitHubRepositoryPullRequestStore, RepositoryStatusStore],
   templateUrl: './workspace-history.html',
-  styleUrl: './workspace-history.css',
+  styleUrls: ['./workspace-history.css', './workspace-history-discard.css'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class WorkspaceHistory implements OnDestroy {
@@ -265,6 +298,7 @@ export class WorkspaceHistory implements OnDestroy {
   private readonly catalog = inject(RepositoryCatalog);
   private readonly ipc = inject(DESKTOP_IPC);
   private readonly aiSupport = inject(AiSupportStore);
+  private readonly feedback = inject(UiFeedback);
   protected readonly githubAccounts = inject(GitHubAccountStore);
   protected readonly filePathParts = splitFilePath;
   private readonly branchExpansionState = new BranchExpansionState();
@@ -309,6 +343,7 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly historyPhase = signal<HistoryPhase>('idle');
   protected readonly historyError = signal('');
   protected readonly commits = signal<readonly RepositoryCommitSummary[]>([]);
+  protected readonly branchPreview = signal<BranchPreview | null>(null);
   protected readonly nextCursor = signal<string | null>(null);
   protected readonly isLoadingMore = signal(false);
   protected readonly selectedOid = signal<string | null>(null);
@@ -328,6 +363,7 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly inspectorMaximized = signal(false);
   protected readonly switchingBranch = signal<string | null>(null);
   protected readonly openingWorktree = signal<string | null>(null);
+  protected readonly openingBranchWorkspace = signal<string | null>(null);
   protected readonly openingSubmodule = signal<string | null>(null);
   protected readonly refreshingWorkspace = signal(false);
   protected readonly navigationActionError = signal('');
@@ -351,11 +387,13 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly deletingBranch = signal<string | null>(null);
   protected readonly removingWorktree = signal<string | null>(null);
   protected readonly deletionConfirmation = signal<DeletionConfirmation | null>(null);
+  protected readonly destructiveActionConfirmation = signal<DestructiveActionConfirmation | null>(null);
   protected readonly worktreeRemovalMode = signal<WorktreeRemovalMode>('safe');
   protected readonly forceRemovalAcknowledged = signal(false);
   protected readonly worktreeRemovalStashMessage = signal<string | null>(null);
   protected readonly worktreeRemovalDialogError = signal('');
   private readonly deletionDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceDeletionDialog');
+  private readonly destructiveActionDialogElement = viewChild<ElementRef<HTMLDialogElement>>('destructiveActionDialog');
   private readonly mergeDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceMergeDialog');
   private readonly switchDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceSwitchDialog');
   private readonly branchCreationDialogElement = viewChild<ElementRef<HTMLDialogElement>>('referenceBranchCreationDialog');
@@ -378,6 +416,15 @@ export class WorkspaceHistory implements OnDestroy {
         dialog.setAttribute('open', '');
       }
     });
+  });
+  private readonly openDestructiveActionDialog = effect(() => {
+    if (this.destructiveActionConfirmation() === null) {
+      return;
+    }
+    this.showDialogAfterRender(
+      this.destructiveActionDialogElement()?.nativeElement,
+      () => this.destructiveActionConfirmation() !== null,
+    );
   });
   private readonly openMergeDialog = effect(() => {
     if (this.mergeConfirmation() === null) {
@@ -416,6 +463,17 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly stashMessage = signal('');
   protected readonly stashIncludeUntracked = signal(true);
   protected readonly stashMutation = signal<string | null>(null);
+  protected readonly stashCreationOpen = signal(false);
+  private readonly stashCreationDialogElement = viewChild<ElementRef<HTMLDialogElement>>('stashCreationDialog');
+  private readonly openStashCreationDialog = effect(() => {
+    if (!this.stashCreationOpen()) {
+      return;
+    }
+    this.showDialogAfterRender(
+      this.stashCreationDialogElement()?.nativeElement,
+      () => this.stashCreationOpen(),
+    );
+  });
   protected readonly pullStrategy = signal<PullStrategy>('ffIfPossible');
   protected readonly networkMutation = signal<'pull' | 'push' | 'setUpstream' | null>(null);
   protected readonly networkNotice = signal('');
@@ -439,18 +497,23 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly generatingCommitMessageWith = signal<string | null>(null);
   protected readonly commitMessageGenerationError = signal('');
   protected readonly workingTreeMutation = signal<WorkingTreeMutation | null>(null);
+  protected readonly commitOperation = signal<'cherryPick' | 'revert' | 'reset' | null>(null);
+  protected readonly resetMode = signal<ResetMode>('mixed');
   protected readonly workingTreeMutationError = signal('');
   protected readonly workspaceActionBusy = computed(
     () =>
       this.workingTreeMutation() !== null ||
+      this.commitOperation() !== null ||
       this.switchingBranch() !== null ||
       this.openingWorktree() !== null ||
+      this.openingBranchWorkspace() !== null ||
       this.openingSubmodule() !== null ||
       this.refreshingWorkspace() ||
       this.fetchingRepository() ||
       this.deletingBranch() !== null ||
       this.removingWorktree() !== null ||
       this.deletionConfirmation() !== null ||
+      this.destructiveActionConfirmation() !== null ||
       this.mergeConfirmation() !== null ||
       this.switchConfirmation() !== null ||
       this.creatingBranch() ||
@@ -460,6 +523,52 @@ export class WorkspaceHistory implements OnDestroy {
       this.branchContextMutation() !== null ||
       this.generatingCommitMessageWith() !== null,
   );
+  private readonly workspaceOperationLoading = computed(
+    () =>
+      this.navigationState().kind === 'loading' ||
+      this.historyPhase() === 'loading' ||
+      this.workingTreeMutation() !== null ||
+      this.commitOperation() !== null ||
+      this.switchingBranch() !== null ||
+      this.openingWorktree() !== null ||
+      this.openingBranchWorkspace() !== null ||
+      this.openingSubmodule() !== null ||
+      this.refreshingWorkspace() ||
+      this.fetchingRepository() ||
+      this.deletingBranch() !== null ||
+      this.removingWorktree() !== null ||
+      this.creatingBranch() ||
+      this.stashMutation() !== null ||
+      this.networkMutation() !== null ||
+      this.conflictMutation() ||
+      this.branchContextMutation() !== null ||
+      this.generatingCommitMessageWith() !== null,
+  );
+  private readonly syncGlobalFeedback = effect(() => {
+    const navigationError = this.navigationActionError();
+    const navigationNotice = this.navigationActionNotice();
+    const remoteError = this.networkError();
+    const remoteNotice = this.networkNotice();
+    const backgroundError = this.liveChanges() ? this.statusStore.backgroundError() : '';
+    untracked(() => {
+      this.feedback.sync('workspace-navigation-error', 'error', 'Git needs attention', navigationError, () => this.dismissNavigationActionError());
+      this.feedback.sync('workspace-navigation-notice', 'success', 'Done', navigationNotice, () => this.dismissNavigationActionNotice());
+      this.feedback.sync('workspace-network-error', 'error', 'Remote operation failed', remoteError, () => this.dismissNetworkError());
+      this.feedback.sync('workspace-network-notice', 'success', 'Remote updated', remoteNotice, () => this.dismissNetworkNotice());
+      this.feedback.sync('workspace-background-error', 'warning', 'Live refresh paused', backgroundError, () => this.dismissBackgroundRefreshError());
+    });
+  });
+  private readonly syncGlobalLoader = effect(() => {
+    const active = this.workspaceOperationLoading();
+    const label = this.generatingCommitMessageWith() !== null
+      ? 'Skibi-Bot is writing…'
+      : this.networkMutation() !== null || this.fetchingRepository()
+        ? 'Talking to the remote…'
+        : this.workingTreeMutation() !== null || this.commitOperation() !== null
+          ? 'Updating the repository…'
+          : 'Reading repository…';
+    untracked(() => this.feedback.setLoading(`workspace:${this.repositoryId}`, active, label));
+  });
   protected readonly pushDisabledReason = computed(() => {
     const state = this.pushAnalysisState();
     if (state.kind !== 'ready') {
@@ -498,6 +607,47 @@ export class WorkspaceHistory implements OnDestroy {
   protected readonly visibleFileDiffRows = computed(
     () => this.displayedFileDiffRows().slice(0, MAX_RENDERED_DIFF_ROWS),
   );
+  protected readonly discardableDiffHunks = computed<readonly DiscardableDiffHunk[]>(() => {
+    const state = this.fileDiffState();
+    if (state.kind !== 'ready' || this.historySelection() !== 'working-tree' || !state.response.unstagedPatch) {
+      return [];
+    }
+    const displayedHunks = parseUnifiedDiff(state.response.patch).files.flatMap((file) => file.hunks);
+    const model = parseUnifiedDiff(state.response.unstagedPatch);
+    return model.files.flatMap((file) => {
+      const firstHunkIndex = file.rows.findIndex((row) => row.kind === 'hunk-header');
+      if (firstHunkIndex < 0 || file.binary) {
+        return [];
+      }
+      const header = file.rows.slice(0, firstHunkIndex).map((row) => row.raw);
+      return file.hunks.map((hunk, index) => {
+        const displayHunk = displayedHunks.reduce<(typeof displayedHunks)[number] | null>((closest, candidate) => {
+          if (closest === null) return candidate;
+          return Math.abs(candidate.newStart - hunk.newStart) < Math.abs(closest.newStart - hunk.newStart)
+            ? candidate
+            : closest;
+        }, null);
+        if (displayHunk === null) return null;
+        const additions = hunk.rows.filter((row) => row.kind === 'addition').length;
+        const deletions = hunk.rows.filter((row) => row.kind === 'deletion').length;
+        return {
+          key: hunk.key,
+          displayHunkKey: displayHunk.key,
+          label: `Discard chunk ${index + 1} (+${additions} −${deletions})`,
+          patch: [...header, ...hunk.rows.map((row) => row.raw)].join('\n') + '\n',
+        };
+      }).filter((hunk): hunk is DiscardableDiffHunk => hunk !== null);
+    });
+  });
+  protected readonly discardableDiffHunksByDisplayHunk = computed<ReadonlyMap<string, readonly DiscardableDiffHunk[]>>(() => {
+    const grouped = new Map<string, DiscardableDiffHunk[]>();
+    for (const hunk of this.discardableDiffHunks()) {
+      const items = grouped.get(hunk.displayHunkKey) ?? [];
+      items.push(hunk);
+      grouped.set(hunk.displayHunkKey, items);
+    }
+    return grouped;
+  });
   protected readonly isFileDiffVisuallyTruncated = computed(
     () => this.displayedFileDiffRows().length > MAX_RENDERED_DIFF_ROWS,
   );
@@ -518,6 +668,43 @@ export class WorkspaceHistory implements OnDestroy {
       ?? this.localBranches().find((branch) => branch.name === 'master')
       ?? null,
   );
+  /**
+   * The toolbar intentionally opens comparison with a deterministic base. The
+   * full comparison view may offer broader ref selection, but entering it
+   * without two exact, distinct refs would produce an ambiguous empty state.
+   */
+  protected readonly compareRefs = computed<Readonly<{ source: string; target: string }> | null>(() => {
+    if (this.navigationState().kind !== 'ready') {
+      return null;
+    }
+    const source = this.currentLocalBranch();
+    if (source === null) {
+      return null;
+    }
+    const release = this.releaseBranch();
+    const primary = this.primaryBranch();
+    const remotePrimary = this.remoteBranches().find((branch) => {
+      const name = branch.name.split('/').at(-1);
+      return name === 'main' || name === 'master';
+    }) ?? null;
+    const target = [release, primary, remotePrimary].find(
+      (candidate): candidate is RepositoryBranch => candidate !== null && candidate.fullName !== source.fullName,
+    ) ?? null;
+    if (target === null) {
+      return null;
+    }
+    return { source: source.fullName, target: target.fullName };
+  });
+  protected readonly compareDisabledReason = computed(() => {
+    if (this.navigationState().kind !== 'ready') {
+      return 'Load repository references before comparing branches.';
+    }
+    if (this.currentLocalBranch() === null) {
+      return 'Compare is available only when a local branch is active.';
+    }
+    return 'Mark a different release branch, or add a local main/master branch, to compare.';
+  });
+  protected readonly isPreviewingBranch = computed(() => this.branchPreview() !== null);
   protected readonly otherLocalBranches = computed(() =>
     this.localBranches().filter((branch) => !branch.current),
   );
@@ -539,6 +726,141 @@ export class WorkspaceHistory implements OnDestroy {
       (left, right) => Number(this.isCurrentWorktree(right)) - Number(this.isCurrentWorktree(left)),
     );
   });
+
+  /**
+   * Select a ref to compare a preview with. A user-marked release branch wins;
+   * main/master is the safe fallback. When previewing either of those refs we
+   * use the other one, and finally the preview itself for a valid zero-diff
+   * snapshot in unusual repositories with only one local branch.
+   */
+  private previewTargetFor(branch: RepositoryBranch): RepositoryBranch {
+    const release = this.releaseBranch();
+    if (release !== null && release.fullName !== branch.fullName) {
+      return release;
+    }
+    const primary = this.primaryBranch();
+    if (primary !== null && primary.fullName !== branch.fullName) {
+      return primary;
+    }
+    const fallback = this.localBranches().find((candidate) => candidate.fullName !== branch.fullName);
+    return fallback ?? branch;
+  }
+
+  protected previewBranch(branch: RepositoryBranch): void {
+    if (branch.kind !== 'local' || this.workspaceActionBusy()) {
+      return;
+    }
+    if (branch.current) {
+      this.returnToActiveHistory();
+      return;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.branchPreview.set({ branch, target: this.previewTargetFor(branch) });
+    this.closeBranchContextMenu();
+    void this.reloadHistory();
+  }
+
+  protected openComparison(): void {
+    const refs = this.compareRefs();
+    if (refs === null) {
+      return;
+    }
+    void this.router.navigate(['/workspace', this.repositoryId, 'compare'], {
+      queryParams: refs,
+    });
+  }
+
+  protected returnToActiveHistory(): void {
+    if (this.branchPreview() === null) {
+      return;
+    }
+    this.branchPreview.set(null);
+    void this.reloadHistory();
+  }
+
+  protected isPreviewedBranch(branch: RepositoryBranch): boolean {
+    const preview = this.branchPreview();
+    return preview !== null && preview.branch.fullName === branch.fullName && preview.branch.oid === branch.oid;
+  }
+
+  protected checkoutBranchFromContextMenu(): void {
+    const menu = this.branchContextMenu();
+    if (menu === null || menu.branch.current || this.workspaceActionBusy()) {
+      return;
+    }
+    this.closeBranchContextMenu();
+    this.switchBranch(menu.branch, menu.returnFocus);
+  }
+
+  protected openBranchWorkspaceFromContextMenu(target: BranchWorkspaceOpenTarget): void {
+    const menu = this.branchContextMenu();
+    if (menu === null || this.workspaceActionBusy()) {
+      return;
+    }
+    this.closeBranchContextMenu();
+    void this.openBranchWorkspace(menu.branch, target);
+  }
+
+  protected openWorktreeInApplication(target: BranchWorkspaceOpenTarget): void {
+    const menu = this.worktreeContextMenu();
+    if (menu === null || this.workspaceActionBusy()) {
+      return;
+    }
+    const branchFullName = this.worktreeBranchFullName(menu.worktree);
+    const branch = branchFullName === null
+      ? null
+      : this.localBranches().find((candidate) => candidate.fullName === branchFullName) ?? null;
+    if (branch === null) {
+      this.navigationActionError.set('A detached worktree cannot be opened as a branch workspace.');
+      return;
+    }
+    this.closeWorktreeContextMenu();
+    void this.openBranchWorkspace(branch, target);
+  }
+
+  private async openBranchWorkspace(
+    branch: RepositoryBranch,
+    target: BranchWorkspaceOpenTarget,
+  ): Promise<void> {
+    if (branch.kind !== 'local' || this.openingBranchWorkspace() !== null) {
+      return;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.openingBranchWorkspace.set(branch.fullName);
+    try {
+      const result = await this.ipc.invoke('open_branch_workspace', {
+        request: {
+          repositoryId: this.repositoryId,
+          branchFullName: branch.fullName,
+          expectedOid: branch.oid,
+          target,
+        },
+      });
+      if (!this.destroyed) {
+        const destination = target === 'system'
+          ? 'Finder / Explorer'
+          : target === 'vsCode'
+            ? 'VS Code'
+            : 'Cursor';
+        this.navigationActionNotice.set(
+          `${result.worktreeCreated ? 'Created a managed worktree and opened' : 'Opened'} “${branch.name}” in ${destination}.`,
+        );
+        await this.loadNavigation();
+      }
+    } catch (error) {
+      if (!this.destroyed) {
+        this.navigationActionError.set(
+          this.errorMessage(error, `Could not open “${branch.name}” in the selected application.`),
+        );
+      }
+    } finally {
+      if (!this.destroyed) {
+        this.openingBranchWorkspace.set(null);
+      }
+    }
+  }
   protected readonly visibleWorktrees = computed(() =>
     this.currentOnly()
       ? this.orderedWorktrees().filter((worktree) => this.isCurrentWorktree(worktree))
@@ -607,6 +929,12 @@ export class WorkspaceHistory implements OnDestroy {
       (file) => file.unstaged || file.primaryStatus === 'conflicted',
     ),
   );
+  protected readonly selectedDiscardableWorkingTreeFiles = computed(() => {
+    const selected = this.reconciledWorkingTreeSelection();
+    return this.workingTreeSummary().files.filter(
+      (file) => file.unstaged && file.primaryStatus !== 'conflicted' && selected.has(this.workingTreeFileIdentity(file)),
+    );
+  });
   protected readonly commitDisabled = computed(
     () =>
       this.workspaceActionBusy() ||
@@ -686,6 +1014,7 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.submodulesRequestGeneration;
     this.clearAutoFetchTimer();
     this.clearLiveChangesTimer();
+    this.feedback.setLoading(`workspace:${this.repositoryId}`, false);
     this.stopSidebarResize();
     this.stopInspectorResize();
     globalThis.removeEventListener('resize', this.clampPanelsToViewport);
@@ -747,38 +1076,39 @@ export class WorkspaceHistory implements OnDestroy {
     if (status.kind !== 'ready' || status.status.branch.oid === null || this.workspaceActionBusy()) {
       return;
     }
+    await this.performPull(status.status, false);
+  }
+
+  private async performPull(status: RepositoryStatusResponse, useAutoStash: boolean): Promise<void> {
     this.networkMutation.set('pull');
     this.networkNotice.set('');
     this.networkError.set('');
     try {
       let result: PullRepositoryResponse;
       try {
-        result = await this.invokePull(status.status, null);
+        result = await this.invokePull(status, useAutoStash ? {
+          message: buildWipStashMessage(status.branch.head ?? 'detached HEAD'),
+        } : null);
       } catch (error) {
         const message = this.errorMessage(error, 'Pull failed.');
         if (
-          status.status.entries.length === 0 ||
+          useAutoStash ||
+          status.entries.length === 0 ||
           !this.pullFailureNeedsCleanTree(message) ||
-          !globalThis.confirm('Pull requires a clean working tree. Stash local changes automatically and retry?')
+          !this.requestPullAutoStashConfirmation(message)
         ) {
           throw error;
         }
-        result = await this.invokePull(status.status, {
-          message: buildWipStashMessage(status.status.branch.head ?? 'detached HEAD'),
-        });
+        return;
       }
       if (
         result.state === 'failed' &&
-        status.status.entries.length > 0 &&
+        !useAutoStash &&
+        status.entries.length > 0 &&
         this.pullFailureNeedsCleanTree(result.errorMessage)
       ) {
-        if (!globalThis.confirm('Pull requires a clean working tree. Stash local changes automatically and retry?')) {
-          this.networkError.set(result.errorMessage ?? 'Pull failed.');
-          return;
-        }
-        result = await this.invokePull(status.status, {
-          message: buildWipStashMessage(status.status.branch.head ?? 'detached HEAD'),
-        });
+        this.requestPullAutoStashConfirmation(result.errorMessage ?? 'Pull failed.');
+        return;
       }
       const autoStash = this.autoStashSummary(result.autoStash);
       if (result.state === 'succeeded') {
@@ -799,7 +1129,27 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
-  protected async pushRepository(): Promise<void> {
+  private requestPullAutoStashConfirmation(fallbackError: string): boolean {
+    this.requestDestructiveAction(
+      'Stash changes and pull?',
+      'Pull requires a clean working tree. Stash local changes automatically and retry?',
+      'Stash and pull',
+      async () => {
+        const current = this.statusStore.state();
+        if (current.kind !== 'ready' || current.status.branch.oid === null) {
+          return;
+        }
+        await this.performPull(current.status, true);
+      },
+      {
+        destructive: false,
+        onCancel: () => this.networkError.set(fallbackError),
+      },
+    );
+    return true;
+  }
+
+  protected async pushRepository(upstreamConfirmed = false): Promise<void> {
     const status = this.statusStore.state();
     const analysis = this.pushAnalysisState();
     if (
@@ -820,8 +1170,15 @@ export class WorkspaceHistory implements OnDestroy {
     }
     if (
       target.kind === 'setUpstream' &&
-      !globalThis.confirm(`Push “${analysis.analysis.branch}” to origin/${analysis.analysis.branch} and set it as upstream?`)
+      !upstreamConfirmed
     ) {
+      this.requestDestructiveAction(
+        'Set upstream and push?',
+        `Push “${analysis.analysis.branch}” to origin/${analysis.analysis.branch} and set it as upstream?`,
+        'Set upstream and push',
+        () => this.pushRepository(true),
+        { destructive: false },
+      );
       return;
     }
     this.networkMutation.set('push');
@@ -859,12 +1216,19 @@ export class WorkspaceHistory implements OnDestroy {
     return separator > 0 && branch.name.slice(separator + 1) === status.status.branch.head;
   }
 
-  protected async setNaturalUpstream(branch: RepositoryBranch): Promise<void> {
+  protected async setNaturalUpstream(branch: RepositoryBranch, confirmed = false): Promise<void> {
     const status = this.statusStore.state();
     if (status.kind !== 'ready' || !this.canSetNaturalUpstream(branch) || this.workspaceActionBusy()) {
       return;
     }
-    if (!globalThis.confirm(`Set ${branch.name} as the upstream for ${status.status.branch.head}?`)) {
+    if (!confirmed) {
+      this.requestDestructiveAction(
+        'Set upstream?',
+        `Set ${branch.name} as the upstream for ${status.status.branch.head}?`,
+        'Set upstream',
+        () => this.setNaturalUpstream(branch, true),
+        { destructive: false },
+      );
       return;
     }
     this.networkMutation.set('setUpstream');
@@ -930,10 +1294,8 @@ export class WorkspaceHistory implements OnDestroy {
   }
 
   private async refreshAfterNetworkMutation(): Promise<void> {
+    await this.refreshHistoryContext();
     await Promise.all([
-      this.statusStore.refresh(),
-      this.reloadHistory(),
-      this.loadNavigation(),
       this.loadPushAnalysis(),
       this.loadConflicts(),
     ]);
@@ -1011,7 +1373,10 @@ export class WorkspaceHistory implements OnDestroy {
     this.conflictResult.set(content);
   }
 
-  protected async resolveConflict(resolution: ConflictResolution): Promise<void> {
+  protected async resolveConflict(
+    resolution: ConflictResolution,
+    confirmed = false,
+  ): Promise<void> {
     const status = this.statusStore.state();
     const selected = this.selectedConflict();
     const detail = this.conflictDetailState();
@@ -1028,10 +1393,14 @@ export class WorkspaceHistory implements OnDestroy {
     if (
       resolution.kind === 'content' &&
       this.conflictResultNeedsConfirmation(detail.detail) &&
-      !globalThis.confirm(
-        'The resolved content is unchanged or still contains conflict markers. Stage it as resolved anyway?',
-      )
+      !confirmed
     ) {
+      this.requestDestructiveAction(
+        'Stage unresolved content?',
+        'The resolved content is unchanged or still contains conflict markers. Stage it as resolved anyway?',
+        'Stage as resolved',
+        () => this.resolveConflict(resolution, true),
+      );
       return;
     }
     this.conflictMutation.set(true);
@@ -1094,10 +1463,8 @@ export class WorkspaceHistory implements OnDestroy {
   }
 
   private async refreshAfterConflictMutation(): Promise<void> {
+    await this.refreshHistoryContext();
     await Promise.all([
-      this.statusStore.refresh(),
-      this.reloadHistory(),
-      this.loadNavigation(),
       this.loadPushAnalysis(),
       this.loadConflicts(),
     ]);
@@ -1132,10 +1499,8 @@ export class WorkspaceHistory implements OnDestroy {
     this.navigationActionError.set('');
     this.refreshingWorkspace.set(true);
     try {
+      await this.refreshHistoryContext();
       await Promise.all([
-        this.statusStore.refresh(),
-        this.reloadHistory(),
-        this.loadNavigation(),
         this.loadPushAnalysis(),
         this.loadConflicts(),
         this.loadSubmodules(),
@@ -1284,6 +1649,24 @@ export class WorkspaceHistory implements OnDestroy {
     this.stashMessage.set(message);
   }
 
+  protected openStashCreation(): void {
+    const state = this.statusStore.state();
+    if (state.kind !== 'ready' || this.workspaceActionBusy()) {
+      return;
+    }
+    this.stashMessage.set(buildWipStashMessage(state.status.branch.head ?? 'detached HEAD'));
+    this.stashIncludeUntracked.set(true);
+    this.stashCreationOpen.set(true);
+  }
+
+  protected closeStashCreation(): void {
+    if (this.stashMutation() !== null) {
+      return;
+    }
+    this.stashCreationOpen.set(false);
+    this.closeDialog(this.stashCreationDialogElement()?.nativeElement);
+  }
+
   protected setStashIncludeUntracked(include: boolean): void {
     this.stashIncludeUntracked.set(include);
   }
@@ -1321,10 +1704,14 @@ export class WorkspaceHistory implements OnDestroy {
         result.state === 'noChanges' && result.status !== null && result.errorMessage === null;
       if (verifiedCreated) {
         this.stashMessage.set('');
+        this.stashCreationOpen.set(false);
+        this.closeDialog(this.stashCreationDialogElement()?.nativeElement);
         this.navigationActionNotice.set(
           `Created ${result.stash.selector}.`,
         );
       } else if (verifiedNoChanges) {
+        this.stashCreationOpen.set(false);
+        this.closeDialog(this.stashCreationDialogElement()?.nativeElement);
         this.navigationActionNotice.set('There were no changes to stash.');
       } else {
         const recovery = result.mutationMayHaveOccurred
@@ -1362,7 +1749,16 @@ export class WorkspaceHistory implements OnDestroy {
     if (this.workspaceActionBusy()) {
       return;
     }
-    if (!globalThis.confirm(`Drop ${stash.selector} “${stash.message}”? This cannot be undone.`)) {
+    this.requestDestructiveAction(
+      'Drop stash?',
+      `Drop ${stash.selector} “${stash.message}”? This cannot be undone.`,
+      'Drop stash',
+      () => this.dropStashConfirmed(stash),
+    );
+  }
+
+  private async dropStashConfirmed(stash: RepositoryStash): Promise<void> {
+    if (this.workspaceActionBusy()) {
       return;
     }
     this.navigationActionError.set('');
@@ -1503,6 +1899,14 @@ export class WorkspaceHistory implements OnDestroy {
     const next = this.isReleaseBranch(branch) ? null : branch.fullName;
     writeReleaseBranch(this.releaseBranchStorage, this.repositoryId, next);
     this.releaseBranchFullName.set(next);
+    const preview = this.branchPreview();
+    if (preview !== null) {
+      this.branchPreview.set({
+        branch: preview.branch,
+        target: this.previewTargetFor(preview.branch),
+      });
+      void this.reloadHistory();
+    }
     this.navigationActionError.set('');
     this.navigationActionNotice.set(
       next === null
@@ -1681,7 +2085,7 @@ export class WorkspaceHistory implements OnDestroy {
         return false;
       }
       this.recordBranchSwitchOutcome(result);
-      await this.refreshAfterBranchSwitch();
+      await this.refreshAfterBranchSwitch(result.operationSucceeded);
       return result.operationSucceeded;
     } catch (error) {
       if (!this.destroyed) {
@@ -1689,7 +2093,7 @@ export class WorkspaceHistory implements OnDestroy {
           ? 'The target branch could not be activated after auto-stashing.'
           : 'The target branch could not be activated. Enable auto-stash if uncommitted changes block the switch.';
         this.navigationActionError.set(this.errorMessage(error, fallback));
-        await this.refreshAfterBranchSwitch();
+        await this.refreshAfterBranchSwitch(false);
       }
       return false;
     } finally {
@@ -1766,10 +2170,14 @@ export class WorkspaceHistory implements OnDestroy {
       return false;
     }
     const state = this.statusStore.state();
-    this.switchAutoStash.set(state.kind === 'ready' && state.status.entries.length > 0);
+    const targetWorktree = this.worktreeForBranch(branch.fullName);
+    this.switchAutoStash.set(
+      targetWorktree === null && state.kind === 'ready' && state.status.entries.length > 0,
+    );
     this.switchConfirmation.set({
       branch,
-      dirty: state.kind === 'ready' && state.status.entries.length > 0,
+      dirty: targetWorktree === null && state.kind === 'ready' && state.status.entries.length > 0,
+      targetWorktree,
       returnFocus,
     });
     this.focusAfterRender('cancel-branch-switch');
@@ -1795,6 +2203,11 @@ export class WorkspaceHistory implements OnDestroy {
       return;
     }
     const branch = confirmation.branch;
+    if (confirmation.targetWorktree !== null) {
+      this.switchConfirmation.set(null);
+      await this.openWorktree(confirmation.targetWorktree);
+      return;
+    }
     const autoStash = confirmation.dirty && this.switchAutoStash();
     this.switchConfirmation.set(null);
 
@@ -1820,7 +2233,7 @@ export class WorkspaceHistory implements OnDestroy {
         return;
       }
       this.recordBranchSwitchOutcome(result);
-      await this.refreshAfterBranchSwitch();
+      await this.refreshAfterBranchSwitch(result.operationSucceeded);
     } catch (error) {
       const message = this.errorMessage(error, 'The branch could not be switched.');
       if (!this.destroyed) {
@@ -1881,8 +2294,8 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
-  private async refreshAfterBranchSwitch(): Promise<void> {
-    await Promise.all([this.statusStore.refresh(), this.reloadHistory(), this.loadNavigation()]);
+  private async refreshAfterBranchSwitch(clearPreview: boolean): Promise<void> {
+    await this.refreshHistoryContext(clearPreview);
   }
 
   protected requestBranchDeletion(branch: RepositoryBranch, trigger: HTMLElement): void {
@@ -1938,6 +2351,44 @@ export class WorkspaceHistory implements OnDestroy {
     const confirmation = this.deletionConfirmation();
     this.deletionConfirmation.set(null);
     this.restoreFocusAfterRender(confirmation?.returnFocus ?? null);
+  }
+
+  private requestDestructiveAction(
+    title: string,
+    description: string,
+    confirmLabel: string,
+    confirm: () => Promise<void>,
+    options: { readonly destructive?: boolean; readonly onCancel?: () => void } = {},
+  ): void {
+    const activeElement = globalThis.document?.activeElement;
+    this.destructiveActionConfirmation.set({
+      title,
+      description,
+      confirmLabel,
+      destructive: options.destructive ?? true,
+      returnFocus: activeElement instanceof HTMLElement ? activeElement : null,
+      confirm,
+      cancel: options.onCancel ?? null,
+    });
+  }
+
+  protected cancelDestructiveAction(): void {
+    const confirmation = this.destructiveActionConfirmation();
+    if (confirmation === null) {
+      return;
+    }
+    this.destructiveActionConfirmation.set(null);
+    confirmation.cancel?.();
+    this.restoreFocusAfterRender(confirmation.returnFocus);
+  }
+
+  protected async confirmDestructiveAction(): Promise<void> {
+    const confirmation = this.destructiveActionConfirmation();
+    if (confirmation === null) {
+      return;
+    }
+    this.destructiveActionConfirmation.set(null);
+    await confirmation.confirm();
   }
 
   protected async confirmReferenceDeletion(): Promise<void> {
@@ -2094,6 +2545,26 @@ export class WorkspaceHistory implements OnDestroy {
         this.openingWorktree.set(null);
       }
     }
+  }
+
+  protected dismissNavigationActionError(): void {
+    this.navigationActionError.set('');
+  }
+
+  protected dismissNavigationActionNotice(): void {
+    this.navigationActionNotice.set('');
+  }
+
+  protected dismissNetworkError(): void {
+    this.networkError.set('');
+  }
+
+  protected dismissNetworkNotice(): void {
+    this.networkNotice.set('');
+  }
+
+  protected dismissBackgroundRefreshError(): void {
+    this.statusStore.backgroundError.set('');
   }
 
   protected submoduleDisabledReason(submodule: RepositorySubmodule): string | null {
@@ -2327,6 +2798,40 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  /**
+   * History requests carry navigation OIDs as optimistic preconditions. Keep
+   * the snapshot deterministic after any operation that can move HEAD or a
+   * ref: status first, navigation second, then history.
+   */
+  private async refreshHistoryContext(
+    clearPreview = false,
+    refreshStatus = true,
+  ): Promise<void> {
+    if (clearPreview) {
+      this.branchPreview.set(null);
+    }
+    if (refreshStatus) {
+      await this.statusStore.refresh();
+    }
+    await this.loadNavigation();
+    this.reconcileBranchPreview();
+    await this.reloadHistory();
+  }
+
+  private reconcileBranchPreview(): void {
+    const preview = this.branchPreview();
+    const navigation = this.navigationState();
+    if (preview === null || navigation.kind !== 'ready') {
+      return;
+    }
+    const current = navigation.navigation.branches.find(
+      (branch) => branch.kind === 'local' && branch.fullName === preview.branch.fullName,
+    );
+    if (current === undefined || current.current || current.oid !== preview.branch.oid) {
+      this.branchPreview.set(null);
+    }
+  }
+
   protected async loadSubmodules(): Promise<void> {
     const generation = ++this.submodulesRequestGeneration;
     this.submoduleState.set({ kind: 'loading' });
@@ -2368,18 +2873,17 @@ export class WorkspaceHistory implements OnDestroy {
     this.historyPhase.set('loading');
 
     try {
-      const response = await this.ipc.invoke('repository_history', {
-        repositoryId: this.repositoryId,
-        cursor: null,
-        limit: HISTORY_PAGE_SIZE,
-      });
+      const response = await this.requestHistoryPage(null);
       if (generation !== this.historyRequestGeneration) {
         return;
       }
       this.commits.set(response.commits);
       this.nextCursor.set(response.nextCursor);
       this.historyPhase.set('ready');
-      if (selectionBeforeReload === 'none' || selectionBeforeReload === 'working-tree') {
+      if (
+        this.branchPreview() === null &&
+        (selectionBeforeReload === 'none' || selectionBeforeReload === 'working-tree')
+      ) {
         this.selectWorkingTreeWhenChanged();
       }
     } catch {
@@ -2400,11 +2904,7 @@ export class WorkspaceHistory implements OnDestroy {
     this.isLoadingMore.set(true);
     this.historyError.set('');
     try {
-      const response = await this.ipc.invoke('repository_history', {
-        repositoryId: this.repositoryId,
-        cursor,
-        limit: HISTORY_PAGE_SIZE,
-      });
+      const response = await this.requestHistoryPage(cursor);
       if (generation !== this.historyRequestGeneration) {
         return;
       }
@@ -2419,6 +2919,41 @@ export class WorkspaceHistory implements OnDestroy {
         this.isLoadingMore.set(false);
       }
     }
+  }
+
+  private requestHistoryPage(cursor: string | null): Promise<RepositoryHistoryResponse> {
+    const preview = this.branchPreview();
+    const activeBranch = this.currentLocalBranch();
+    const release = this.releaseBranch();
+    const primary = this.primaryBranch();
+    const activeTarget = activeBranch === null
+      ? null
+      : release !== null && activeBranch.fullName !== release.fullName
+        ? release
+        : primary !== null && activeBranch.fullName !== primary.fullName
+          ? primary
+          : null;
+    const historyContext = preview ?? (
+      activeBranch !== null && activeTarget !== null
+        ? { branch: activeBranch, target: activeTarget }
+        : null
+    );
+    if (historyContext === null) {
+      return this.ipc.invoke('repository_history', {
+        repositoryId: this.repositoryId,
+        cursor,
+        limit: HISTORY_PAGE_SIZE,
+      });
+    }
+    return this.ipc.invoke('repository_branch_history', {
+      repositoryId: this.repositoryId,
+      branchFullName: historyContext.branch.fullName,
+      expectedBranchOid: historyContext.branch.oid,
+      targetFullName: historyContext.target.fullName,
+      expectedTargetOid: historyContext.target.oid,
+      cursor,
+      limit: HISTORY_PAGE_SIZE,
+    });
   }
 
   protected async selectCommit(commit: RepositoryCommitSummary): Promise<void> {
@@ -2563,6 +3098,10 @@ export class WorkspaceHistory implements OnDestroy {
     });
   }
 
+  protected clearWorkingTreeSelection(): void {
+    this.selectedWorkingTreeFiles.set(new Set());
+  }
+
   protected updateCommitMessage(message: string): void {
     this.commitMessage.set(message);
   }
@@ -2704,6 +3243,159 @@ export class WorkspaceHistory implements OnDestroy {
     );
   }
 
+  protected async discardSelectedWorkingTreeFiles(): Promise<void> {
+    await this.discardWorkingTreeFiles(this.selectedDiscardableWorkingTreeFiles());
+  }
+
+  protected async discardWorkingTreeFile(file: WorkingTreeFile): Promise<void> {
+    await this.discardWorkingTreeFiles([file]);
+  }
+
+  private async discardWorkingTreeFiles(files: readonly WorkingTreeFile[]): Promise<void> {
+    const state = this.statusStore.state();
+    const candidates = files.filter((file) => file.unstaged && file.primaryStatus !== 'conflicted');
+    if (state.kind !== 'ready' || this.workspaceActionBusy() || candidates.length === 0) {
+      return;
+    }
+    const untracked = candidates.filter((file) => file.entryKind === 'untracked');
+    const preview = candidates.slice(0, 5).map((file) => `• ${file.path}`).join('\n');
+    const remainder = candidates.length > 5 ? `\n…and ${candidates.length - 5} more.` : '';
+    const deletionWarning = untracked.length > 0
+      ? `\n\nWARNING: ${untracked.length} new untracked ${untracked.length === 1 ? 'file' : 'files'} will be permanently deleted, not restored.`
+      : '';
+    this.requestDestructiveAction(
+      `Discard ${candidates.length} ${candidates.length === 1 ? 'file' : 'files'}?`,
+      `Discard local changes in ${candidates.length} ${candidates.length === 1 ? 'file' : 'files'}?\n\n${preview}${remainder}${deletionWarning}\n\nThis cannot be undone.`,
+      untracked.length > 0 ? 'Delete and discard' : 'Discard changes',
+      () => this.discardWorkingTreeFilesConfirmed(candidates),
+    );
+  }
+
+  private async discardWorkingTreeFilesConfirmed(files: readonly WorkingTreeFile[]): Promise<void> {
+    const state = this.statusStore.state();
+    const selected = new Set(files.map((file) => this.workingTreeFileIdentity(file)));
+    const candidates = this.workingTreeSummary().files.filter(
+      (file) => selected.has(this.workingTreeFileIdentity(file)) && file.unstaged && file.primaryStatus !== 'conflicted',
+    );
+    if (state.kind !== 'ready' || this.workspaceActionBusy() || candidates.length === 0) {
+      return;
+    }
+
+    this.workingTreeMutationError.set('');
+    const generation = ++this.mutationRequestGeneration;
+    this.workingTreeMutation.set({ action: 'discard', scope: 'selected' });
+    try {
+      const result = await this.ipc.invoke('repository_discard_worktree_changes', {
+        repositoryId: this.repositoryId,
+        operation: {
+          entries: candidates.map(workingTreeEntrySelector),
+          expectedHead: state.status.branch.oid,
+          expectedHeadName: state.status.branch.head,
+          expectedDetached: state.status.branch.detached,
+          expectedUnborn: state.status.branch.unborn,
+          expectedIndexFingerprint: state.status.indexFingerprint,
+          expectedWorktreeFingerprint: state.status.worktreeFingerprint,
+        },
+      });
+      if (!this.isCurrentMutation(generation)) {
+        return;
+      }
+      this.statusStore.acceptMutationResult(result.status);
+      this.selectedWorkingTreeFiles.set(new Set());
+      this.invalidateWorkingTreeDiff();
+    } catch (error) {
+      if (this.isCurrentMutation(generation)) {
+        this.workingTreeMutationError.set(
+          this.errorMessage(error, 'The selected local changes could not be discarded.'),
+        );
+        await this.statusStore.refresh();
+      }
+    } finally {
+      if (this.isCurrentMutation(generation)) {
+        this.workingTreeMutation.set(null);
+      }
+    }
+  }
+
+  protected async discardWorkingTreeHunk(hunk: DiscardableDiffHunk): Promise<void> {
+    const state = this.statusStore.state();
+    const path = this.selectedFilePath();
+    const entryKind = this.selectedWorkingTreeEntryKind();
+    const selected = this.workingTreeSummary().files.find(
+      (file) => file.path === path && file.entryKind === entryKind,
+    );
+    if (
+      state.kind !== 'ready' || selected === undefined || !selected.unstaged ||
+      selected.entryKind === 'untracked' || this.workspaceActionBusy()
+    ) {
+      return;
+    }
+    const selectedIdentity = this.workingTreeFileIdentity(selected);
+    this.requestDestructiveAction(
+      'Discard change block?',
+      `Discard this change block from ${selected.path}?\n\nThis cannot be undone.`,
+      'Discard chunk',
+      () => this.discardWorkingTreeHunkConfirmed(hunk, selectedIdentity),
+    );
+  }
+
+  private async discardWorkingTreeHunkConfirmed(
+    hunk: DiscardableDiffHunk,
+    selectedIdentity: string,
+  ): Promise<void> {
+    const state = this.statusStore.state();
+    const selected = this.workingTreeSummary().files.find(
+      (file) => this.workingTreeFileIdentity(file) === selectedIdentity,
+    );
+    if (
+      state.kind !== 'ready' || selected === undefined || !selected.unstaged ||
+      selected.entryKind === 'untracked' || this.workspaceActionBusy()
+    ) {
+      return;
+    }
+    this.workingTreeMutationError.set('');
+    const generation = ++this.mutationRequestGeneration;
+    this.workingTreeMutation.set({ action: 'discardHunk', scope: null });
+    try {
+      const result = await this.ipc.invoke('repository_discard_worktree_hunk', {
+        repositoryId: this.repositoryId,
+        operation: {
+          entry: workingTreeEntrySelector(selected),
+          patch: hunk.patch,
+          expectedHead: state.status.branch.oid,
+          expectedHeadName: state.status.branch.head,
+          expectedDetached: state.status.branch.detached,
+          expectedUnborn: state.status.branch.unborn,
+          expectedIndexFingerprint: state.status.indexFingerprint,
+          expectedWorktreeFingerprint: state.status.worktreeFingerprint,
+        },
+      });
+      if (!this.isCurrentMutation(generation)) {
+        return;
+      }
+      this.statusStore.acceptMutationResult(result.status);
+      const remaining = this.workingTreeSummary().files.find(
+        (file) => file.path === selected.path && file.entryKind === selected.entryKind && file.unstaged,
+      );
+      if (remaining === undefined) {
+        this.closeFileDiff();
+      } else {
+        await this.loadWorkingTreeFileDiff(remaining.path, remaining.oldPath, remaining.entryKind);
+      }
+    } catch (error) {
+      if (this.isCurrentMutation(generation)) {
+        this.workingTreeMutationError.set(
+          this.errorMessage(error, 'The selected change block could not be discarded.'),
+        );
+        await this.statusStore.refresh();
+      }
+    } finally {
+      if (this.isCurrentMutation(generation)) {
+        this.workingTreeMutation.set(null);
+      }
+    }
+  }
+
   private async applyIndexChangeWithSelection(
     action: IndexAction,
     all: boolean,
@@ -2775,6 +3467,152 @@ export class WorkspaceHistory implements OnDestroy {
     }
   }
 
+  protected setResetMode(mode: ResetMode): void {
+    this.resetMode.set(mode);
+  }
+
+  protected requestCherryPick(detail: RepositoryCommitDetailResponse): void {
+    if (detail.parents.length > 1 || this.workspaceActionBusy()) {
+      return;
+    }
+    this.requestDestructiveAction(
+      'Cherry-pick this commit?',
+      `Apply ${this.shortOid(detail.oid)} to the current local branch. The index and working tree must be clean.`,
+      'Cherry-pick',
+      () => this.runCommitOperation('cherryPick', detail.oid),
+      { destructive: false },
+    );
+  }
+
+  protected requestRevert(detail: RepositoryCommitDetailResponse): void {
+    if (detail.parents.length > 1 || this.workspaceActionBusy()) {
+      return;
+    }
+    this.requestDestructiveAction(
+      'Revert this commit?',
+      `Create a new commit that reverses ${this.shortOid(detail.oid)} on the current local branch. The index and working tree must be clean.`,
+      'Revert commit',
+      () => this.runCommitOperation('revert', detail.oid),
+      { destructive: false },
+    );
+  }
+
+  protected requestReset(detail: RepositoryCommitDetailResponse): void {
+    if (this.workspaceActionBusy()) {
+      return;
+    }
+    const mode = this.resetMode();
+    const descriptions: Readonly<Record<ResetMode, string>> = {
+      soft: `Move the current branch to ${this.shortOid(detail.oid)} and keep the index and working tree unchanged.`,
+      mixed: `Move the current branch to ${this.shortOid(detail.oid)}, unstage tracked changes, and keep working-tree files.`,
+      hard: `Move the current branch to ${this.shortOid(detail.oid)} and permanently discard tracked staged and unstaged changes. Untracked files are preserved.`,
+    };
+    this.requestDestructiveAction(
+      `Reset ${mode} to this commit?`,
+      descriptions[mode],
+      `Reset ${mode}`,
+      () => this.runCommitOperation('reset', detail.oid, mode),
+      { destructive: mode === 'hard' },
+    );
+  }
+
+  private async runCommitOperation(
+    action: 'cherryPick' | 'revert' | 'reset',
+    targetOid: string,
+    resetMode: ResetMode = 'mixed',
+  ): Promise<void> {
+    const state = this.statusStore.state();
+    if (state.kind !== 'ready' || this.commitOperation() !== null) {
+      return;
+    }
+    this.navigationActionError.set('');
+    this.navigationActionNotice.set('');
+    this.commitOperation.set(action);
+    try {
+      const result = action === 'cherryPick'
+        ? await this.ipc.invoke('repository_cherry_pick_commit', {
+            repositoryId: this.repositoryId,
+            operation: {
+              targetOid,
+              precondition: this.repositoryStatePrecondition(state.status),
+            },
+          })
+        : action === 'revert'
+          ? await this.ipc.invoke('repository_revert_commit', {
+              repositoryId: this.repositoryId,
+              operation: {
+                targetOid,
+                precondition: this.repositoryStatePrecondition(state.status),
+              },
+            })
+          : await this.ipc.invoke('repository_reset_commit', {
+              repositoryId: this.repositoryId,
+              operation: {
+                targetOid,
+                mode: resetMode,
+                confirmHardReset: resetMode === 'hard',
+                precondition: this.repositoryStatePrecondition(state.status),
+              },
+            });
+      await this.handleCommitOperationResult(action, result);
+    } catch (error) {
+      this.navigationActionError.set(
+        this.errorMessage(
+          error,
+          action === 'cherryPick'
+            ? 'The commit could not be cherry-picked.'
+            : action === 'revert'
+              ? 'The commit could not be reverted.'
+              : 'The branch could not be reset.',
+        ),
+      );
+      await this.refreshHistoryContext(false);
+    } finally {
+      this.commitOperation.set(null);
+    }
+  }
+
+  private async handleCommitOperationResult(
+    action: 'cherryPick' | 'revert' | 'reset',
+    result: RepositoryCommitOperationResponse,
+  ): Promise<void> {
+    if (result.status !== null) {
+      this.statusStore.acceptMutationResult(result.status);
+    }
+    this.clearWorkingTreeMutationView();
+
+    if (result.state === 'succeeded') {
+      await this.refreshHistoryContext(false, result.status === null);
+      this.navigationActionNotice.set(
+        action === 'cherryPick'
+          ? `Cherry-picked ${this.shortOid(result.targetOid)}.`
+          : action === 'revert'
+            ? `Reverted ${this.shortOid(result.targetOid)} in a new commit.`
+            : `Reset the current branch to ${this.shortOid(result.targetOid)}.`,
+      );
+      return;
+    }
+
+    if (result.state === 'conflicted') {
+      await Promise.all([
+        this.loadNavigation(),
+        this.reloadHistory(),
+        this.loadConflicts(),
+      ]);
+      this.selectWorkingTree();
+      this.navigationActionError.set(
+        `${action === 'cherryPick' ? 'Cherry-pick' : 'Revert'} stopped on conflicts. ${result.errorMessage ?? 'Resolve the conflicted files before continuing.'}`,
+      );
+      return;
+    }
+
+    await this.refreshHistoryContext(false);
+    this.selectWorkingTreeWhenChanged();
+    this.navigationActionError.set(
+      `The ${action === 'cherryPick' ? 'cherry-pick' : action} outcome could not be verified. ${result.errorMessage ?? 'Inspect the refreshed branch and working tree before retrying.'}`,
+    );
+  }
+
   protected async createCommit(): Promise<void> {
     const state = this.statusStore.state();
     const message = this.commitMessage();
@@ -2805,7 +3643,7 @@ export class WorkspaceHistory implements OnDestroy {
       this.commitMessage.set('');
       this.selectedWorkingTreeFiles.set(new Set());
       this.invalidateWorkingTreeDiff();
-      await Promise.all([this.reloadHistory(), this.loadNavigation()]);
+      await this.refreshHistoryContext(false, false);
     } catch (error) {
       if (this.isCurrentMutation(generation)) {
         this.workingTreeMutationError.set(
@@ -2832,11 +3670,29 @@ export class WorkspaceHistory implements OnDestroy {
     }
 
     const rewritesUpstreamCommit = this.amendRewritesUpstream();
+    if (rewritesUpstreamCommit) {
+      this.requestDestructiveAction(
+        'Amend published commit?',
+        'HEAD is already part of the upstream history. Amending it rewrites published history and the next push may require force.',
+        'Amend commit',
+        () => this.amendCommitConfirmed(message, true),
+      );
+      return;
+    }
+
+    await this.amendCommitConfirmed(message, false);
+  }
+
+  private async amendCommitConfirmed(
+    message: string | null,
+    confirmUpstreamRewrite: boolean,
+  ): Promise<void> {
+    const state = this.statusStore.state();
     if (
-      rewritesUpstreamCommit &&
-      !globalThis.confirm(
-        'HEAD is already part of the upstream history. Amending it rewrites published history and the next push may require force. Continue?',
-      )
+      state.kind !== 'ready' ||
+      !this.amendMode() ||
+      this.amendUnavailable() ||
+      (message !== null && message.trim().length === 0)
     ) {
       return;
     }
@@ -2849,7 +3705,7 @@ export class WorkspaceHistory implements OnDestroy {
         repositoryId: this.repositoryId,
         operation: {
           message,
-          confirmUpstreamRewrite: rewritesUpstreamCommit,
+          confirmUpstreamRewrite,
           expectedHead: state.status.branch.oid,
           expectedHeadName: state.status.branch.head,
           expectedDetached: state.status.branch.detached,
@@ -2867,18 +3723,14 @@ export class WorkspaceHistory implements OnDestroy {
         this.commitMessage.set('');
         this.selectedWorkingTreeFiles.set(new Set());
         this.invalidateWorkingTreeDiff();
-        await Promise.all([this.reloadHistory(), this.loadNavigation()]);
+        await this.refreshHistoryContext(false, false);
         this.restoreFocusAfterRender(this.amendReturnFocus);
         this.amendReturnFocus = null;
       } else {
         this.workingTreeMutationError.set(
           `The amend outcome is unknown. ${result.errorMessage ?? 'Inspect HEAD and the working tree before deciding whether to retry.'}`,
         );
-        await Promise.all([
-          this.statusStore.refresh(),
-          this.reloadHistory(),
-          this.loadNavigation(),
-        ]);
+        await this.refreshHistoryContext();
         this.selectWorkingTree();
         this.focusAfterRender('commit-message');
       }
@@ -3517,6 +4369,20 @@ export class WorkspaceHistory implements OnDestroy {
       : `refs/heads/${worktree.branch}`;
   }
 
+  private worktreeForBranch(branchFullName: string): RepositoryWorktree | null {
+    const navigation = this.navigationState();
+    if (navigation.kind !== 'ready') {
+      return null;
+    }
+    return navigation.navigation.worktrees.find(
+      (worktree) =>
+        !this.isCurrentWorktree(worktree) &&
+        !worktree.bare &&
+        !worktree.prunable &&
+        this.worktreeBranchFullName(worktree) === branchFullName,
+    ) ?? null;
+  }
+
   private configureAutoFetchTimer(): void {
     this.clearAutoFetchTimer();
     if (!this.autoFetch() || this.destroyed) {
@@ -3654,10 +4520,11 @@ export class WorkspaceHistory implements OnDestroy {
     // Submodules are independent repositories.  Their inspection must not
     // delay opening the parent workspace or its history.
     void this.loadSubmodules();
+    const statusRefresh = this.statusStore.refresh();
+    await this.loadNavigation();
     await Promise.all([
-      this.statusStore.refresh(),
+      statusRefresh,
       this.reloadHistory(),
-      this.loadNavigation(),
       this.loadPushAnalysis(),
       this.loadConflicts(),
     ]);

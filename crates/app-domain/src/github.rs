@@ -113,6 +113,7 @@ pub struct PullRequestSummary {
     pub html_url: String,
     pub updated_at: String,
     pub comment_count: u64,
+    pub approval_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +125,18 @@ pub struct PullRequestDetail {
     pub deletions: u64,
     pub changed_files: u64,
     pub mergeability: PullRequestMergeability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestFile {
+    pub filename: String,
+    pub previous_filename: Option<String>,
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changes: u64,
+    pub patch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +166,7 @@ pub struct ReviewComment {
     pub path: Option<String>,
     pub line: Option<u64>,
     pub side: Option<ReviewCommentSide>,
+    pub diff_hunk: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub html_url: Option<String>,

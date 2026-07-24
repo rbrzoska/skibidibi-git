@@ -29,6 +29,7 @@ query ReviewThreads(
               body
               path
               line
+              diffHunk
               createdAt
               updatedAt
               url

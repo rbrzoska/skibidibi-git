@@ -1,7 +1,11 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 
-import { GitHubRepositoryPullRequestStore } from '../../../core/github';
+import {
+  GitHubRepositoryPullRequestStore,
+  type GitHubPullRequestComment,
+} from '../../../core/github';
 import { SafeMarkdown } from './safe-markdown/safe-markdown';
+import { parseReviewDiffHunk } from './review-diff-hunk';
 
 @Component({
   selector: 'app-github-pull-request-inspector',
@@ -16,4 +20,10 @@ export class GitHubPullRequestInspector {
   protected retry(number: number): void {
     void this.store.select(number);
   }
+
+  protected threadDiffHunk(comments: readonly GitHubPullRequestComment[]): string | null {
+    return comments.find((comment) => comment.diffHunk?.trim())?.diffHunk ?? null;
+  }
+
+  protected readonly reviewDiffRows = parseReviewDiffHunk;
 }

@@ -1,0 +1,19 @@
+<svg width="1024" height="1024" viewBox="0 30 320 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'Segoe UI',system-ui,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5b93ff"/><stop offset="1" stop-color="#3f6fd6"/></linearGradient>
+    <linearGradient id="gl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgba(255,255,255,.22)"/><stop offset="1" stop-color="rgba(255,255,255,0)"/></linearGradient>
+    <radialGradient id="ant" cx=".5" cy=".3" r=".8"><stop offset="0" stop-color="#7fd98f"/><stop offset="1" stop-color="#4bb85f"/></radialGradient>
+  </defs>
+  <rect x="10" y="30" width="300" height="300" rx="70" fill="url(#bg)"/>
+  <rect x="10" y="30" width="300" height="150" rx="70" fill="url(#gl)"/>
+  <text x="160" y="96" text-anchor="middle" font-size="40" font-weight="800" letter-spacing="-1" fill="#fff">Skibidibi</text>
+  <rect x="118" y="112" width="8" height="26" rx="4" fill="#bcd3ff"/>
+  <circle cx="122" cy="126" r="10" fill="url(#ant)"/><circle cx="119" cy="123" r="3" fill="#c8f4d0"/>
+  <rect x="96" y="136" width="128" height="110" rx="32" fill="#fff"/>
+  <circle cx="120" cy="214" r="9" fill="#ffd9a1" opacity=".55"/><circle cx="200" cy="214" r="9" fill="#ffd9a1" opacity=".55"/>
+  <circle cx="136" cy="188" r="18" fill="#fff"/><circle cx="184" cy="188" r="18" fill="#fff"/>
+  <circle cx="136" cy="188" r="7.5" fill="#3f6fd6"/><circle cx="133" cy="185" r="2.6" fill="#fff"/>
+  <circle cx="184" cy="188" r="7.5" fill="#3f6fd6"/><circle cx="181" cy="185" r="2.6" fill="#fff"/>
+  <path d="M134 222 Q160 238 186 222" stroke="#e3b341" stroke-width="6.4" stroke-linecap="round" fill="none"/>
+  <g transform="translate(160,286)"><rect x="-52" y="-26" width="104" height="52" rx="26" fill="#e3b341"/><text x="0" y="10" text-anchor="middle" font-size="34" font-weight="800" letter-spacing="1" fill="#3a2c05">git</text></g>
+</svg>

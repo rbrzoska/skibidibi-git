@@ -2,17 +2,23 @@ mod ai_context;
 mod branch_actions;
 mod branch_creation;
 mod branch_operations;
+mod branch_preview;
 mod clone;
+mod commit_operations;
 mod conflict_resolution;
 mod file_diff;
+mod file_history;
 mod history;
 mod maintenance;
+mod managed_worktree;
 mod mutations;
 mod navigation;
 mod network_operations;
+mod ref_comparison;
 mod stash_actions;
 mod stash_inspection;
 mod submodules;
+mod task_review_context;
 mod working_tree_diff;
 
 pub use ai_context::{
@@ -22,23 +28,40 @@ pub use ai_context::{
 pub use branch_actions::{BranchActionGitExecutor, BranchSwitchError};
 pub use branch_creation::{BranchCreationError, BranchCreationGitExecutor};
 pub use branch_operations::{BranchOperationError, BranchOperationGitExecutor};
+pub use branch_preview::{BranchPreviewError, BranchPreviewGitExecutor, BranchPreviewQuery};
 pub use clone::{CloneGitExecutor, CloneRepositoryError};
+pub use commit_operations::{CommitOperationError, CommitOperationGitExecutor};
 pub use conflict_resolution::{ConflictResolutionError, ConflictResolutionGitExecutor};
 pub use file_diff::{FileDiffGitExecutor, FileDiffQuery, FileDiffRuntimeError, file_diff};
+pub use file_history::{
+    FILE_HISTORY_PAGE_SIZE, FileHistoryGitExecutor, FileHistoryQuery, FileHistoryRuntimeError,
+    file_blame, file_history,
+};
 pub use history::{
     DEFAULT_HISTORY_PAGE_SIZE, HistoryGitExecutor, HistoryQuery, HistoryRuntimeError,
     MAX_HISTORY_PAGE_SIZE, commit_details, history_page,
 };
 pub use maintenance::{MaintenanceError, MaintenanceGitExecutor};
-pub use mutations::{MutationGitExecutor, MutationRuntimeError};
+pub use managed_worktree::{
+    ManagedWorktreeError, ManagedWorktreeGitExecutor, PreparedBranchWorktree,
+};
+pub use mutations::{DiscardGitExecutor, MutationGitExecutor, MutationRuntimeError};
 pub use navigation::{NavigationGitExecutor, NavigationQuery, NavigationRuntimeError};
 pub use network_operations::{NetworkGitExecutor, NetworkOperationError, UpstreamBinding};
+pub use ref_comparison::{
+    RefComparisonError, RefComparisonGitExecutor, RefComparisonQuery, compare_ref_file_diff,
+    compare_refs,
+};
 pub use stash_actions::{StashActionError, StashActionGitExecutor};
 pub use stash_inspection::{
     StashInspectionError, StashInspectionGitExecutor, StashInspectionQuery, stash_details,
     stash_file_diff,
 };
 pub use submodules::{SubmoduleGitExecutor, SubmoduleQuery, SubmodulesRuntimeError, submodules};
+pub use task_review_context::{
+    TaskReviewCommit, TaskReviewContext, TaskReviewContextError, TaskReviewGitExecutor,
+    task_review_context, task_review_context_default,
+};
 pub use working_tree_diff::{
     WorkingTreeDiffGitExecutor, WorkingTreeDiffQuery, WorkingTreeDiffRuntimeError,
     working_tree_file_diff,

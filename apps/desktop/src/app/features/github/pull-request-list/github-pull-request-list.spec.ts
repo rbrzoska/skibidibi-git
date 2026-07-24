@@ -11,6 +11,7 @@ describe('GitHubPullRequestList', () => {
       draft: false, authorLogin: 'ada', headRefName: 'feature', baseRefName: 'main', updatedAt: '2026-07-15T12:00:00Z',
       authoredByViewer: true, reviewRequestedFromViewer: true, unresolvedThreadCount: 2,
       commentCount: 5,
+      approvalCount: 2,
     };
     const bridge: GitHubBridge = {
       githubListAccounts: vi.fn(), githubStartDeviceFlow: vi.fn(), githubPollDeviceFlow: vi.fn(),
@@ -49,7 +50,7 @@ describe('GitHubPullRequestList', () => {
     expect(open.rel).toBe('noreferrer');
     expect(fixture.nativeElement.querySelector('.github-pull-requests')?.textContent).not.toContain('Pull Requests');
     expect(fixture.nativeElement.querySelector('.pr-count')?.textContent.trim()).toBe('1');
-    expect(fixture.nativeElement.querySelector('[aria-pressed="true"]')?.textContent).toContain('Assigned to me');
+    expect(fixture.nativeElement.querySelector('[aria-pressed="true"]')?.textContent).toContain('Review requested');
     expect(bridge.githubListPullRequests).toHaveBeenCalledWith({
       accountId: 'account-1', repositoryId: 'repo-1', scope: 'assignedToViewer', cursor: null, pageSize: 30,
     });

@@ -128,12 +128,26 @@ export interface RepositoryHistoryRequest {
   readonly limit: number;
 }
 
+/**
+ * A read-only history snapshot for a local ref. `expected*Oid` values make the
+ * preview explicit: the native layer must not silently follow a moved ref.
+ */
+export interface RepositoryBranchHistoryRequest extends RepositoryHistoryRequest {
+  readonly branchFullName: string;
+  readonly expectedBranchOid: string;
+  readonly targetFullName: string;
+  readonly expectedTargetOid: string;
+}
+
+export type CommitRelation = 'task' | 'merge' | 'base';
+
 export interface RepositoryCommitSummary {
   readonly oid: string;
   readonly parents: readonly string[];
   readonly author: CommitAuthor;
   readonly summary: string;
   readonly refs: readonly string[];
+  readonly relation?: CommitRelation;
 }
 
 export interface CommitAuthor {
@@ -239,8 +253,39 @@ export interface WorkingTreeFileDiffRequest {
 export interface WorkingTreeFileDiffResponse {
   readonly path: string;
   readonly patch: string;
+  readonly unstagedPatch: string;
   readonly binary: boolean;
   readonly truncated: boolean;
+}
+
+export interface DiscardWorkingTreePrecondition {
+  readonly expectedHead: string | null;
+  readonly expectedHeadName: string | null;
+  readonly expectedDetached: boolean;
+  readonly expectedUnborn: boolean;
+  readonly expectedIndexFingerprint: string;
+  readonly expectedWorktreeFingerprint: string;
+}
+
+export interface DiscardWorkingTreeChangesRequest {
+  readonly repositoryId: string;
+  readonly operation: DiscardWorkingTreePrecondition & {
+    readonly entries: readonly WorkingTreeEntrySelector[];
+  };
+}
+
+export interface DiscardWorkingTreeHunkRequest {
+  readonly repositoryId: string;
+  readonly operation: DiscardWorkingTreePrecondition & {
+    readonly entry: WorkingTreeEntrySelector;
+    readonly patch: string;
+  };
+}
+
+export interface DiscardWorkingTreeChangesResponse {
+  readonly discardedEntries: number;
+  readonly deletedUntrackedFiles: number;
+  readonly status: RepositoryStatusResponse;
 }
 
 export interface RepositoryNavigationRequest {
@@ -299,6 +344,37 @@ export interface RepositoryStatePrecondition {
   readonly expectedUnborn: boolean;
   readonly expectedIndexFingerprint: string;
   readonly expectedWorktreeFingerprint: string;
+}
+
+export type CommitOperationState = 'succeeded' | 'conflicted' | 'outcomeUnknown';
+export type ResetMode = 'soft' | 'mixed' | 'hard';
+
+export interface RepositoryCommitOperationRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly targetOid: string;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface RepositoryResetCommitRequest {
+  readonly repositoryId: string;
+  readonly operation: {
+    readonly targetOid: string;
+    readonly mode: ResetMode;
+    readonly confirmHardReset: boolean;
+    readonly precondition: RepositoryStatePrecondition;
+  };
+}
+
+export interface RepositoryCommitOperationResponse {
+  readonly state: CommitOperationState;
+  readonly targetOid: string;
+  readonly headBefore: string;
+  readonly headAfter: string | null;
+  readonly status: RepositoryStatusResponse | null;
+  readonly errorMessage: string | null;
+  readonly mutationMayHaveOccurred: boolean;
 }
 
 export interface StashIdentity {
@@ -639,6 +715,21 @@ export interface RepositoryWorktree {
   readonly prunableReason: string | null;
 }
 
+export type BranchWorkspaceOpenTarget = 'vsCode' | 'cursor' | 'system';
+
+export interface OpenBranchWorkspaceRequest {
+  readonly repositoryId: string;
+  readonly branchFullName: string;
+  readonly expectedOid: string;
+  readonly target: BranchWorkspaceOpenTarget;
+}
+
+export interface OpenBranchWorkspaceResponse {
+  readonly path: string;
+  readonly worktreeCreated: boolean;
+  readonly target: BranchWorkspaceOpenTarget;
+}
+
 export interface RepositoryStash {
   readonly oid: string;
   readonly selector: string;
@@ -651,6 +742,93 @@ export interface RepositoryNavigationResponse {
   readonly branches: readonly RepositoryBranch[];
   readonly worktrees: readonly RepositoryWorktree[];
   readonly stashes: readonly RepositoryStash[];
+}
+
+/**
+ * A bounded, immutable comparison of the changes that `source` would bring
+ * into `target`. The OIDs deliberately travel with the ref names: a native
+ * implementation must reject a comparison if either ref moved meanwhile.
+ */
+export interface RepositoryCompareRefsRequest {
+  readonly repositoryId: string;
+  readonly sourceFullName: string;
+  readonly expectedSourceOid: string;
+  readonly targetFullName: string;
+  readonly expectedTargetOid: string;
+}
+
+export interface RepositoryCompareRefsResponse {
+  readonly sourceFullName: string;
+  readonly sourceOid: string;
+  readonly targetFullName: string;
+  readonly targetOid: string;
+  readonly mergeBaseOid: string;
+  /** Commits reachable from source and not target. */
+  readonly ahead: number;
+  /** Commits reachable from target and not source. */
+  readonly behind: number;
+  readonly commits: readonly RepositoryCommitSummary[];
+  readonly commitsTruncated: boolean;
+  readonly files: readonly CommitChangedFile[];
+  readonly filesTruncated: boolean;
+}
+
+export interface RepositoryCompareRefFileDiffRequest extends RepositoryCompareRefsRequest {
+  readonly path: string;
+  readonly oldPath: string | null;
+}
+
+export interface RepositoryCompareRefFileDiffResponse {
+  readonly sourceFullName: string;
+  readonly sourceOid: string;
+  readonly targetFullName: string;
+  readonly targetOid: string;
+  readonly path: string;
+  readonly oldPath: string | null;
+  readonly patch: string;
+  readonly binary: boolean;
+  readonly truncated: boolean;
+}
+
+/** Immutable file-history snapshot rooted at an exact commit OID. */
+export interface RepositoryFileHistoryRequest {
+  readonly repositoryId: string;
+  readonly startOid: string;
+  readonly path: string;
+  readonly cursor: string | null;
+}
+
+export interface RepositoryFileHistoryResponse {
+  readonly startOid: string;
+  readonly path: string;
+  readonly commits: readonly RepositoryCommitSummary[];
+  readonly nextCursor: string | null;
+}
+
+export interface RepositoryFileBlameRequest {
+  readonly repositoryId: string;
+  readonly oid: string;
+  readonly path: string;
+}
+
+export interface RepositoryFileBlameLine {
+  readonly lineNumber: number;
+  readonly oid: string;
+  readonly originalLineNumber: number;
+  readonly finalLineNumber: number;
+  readonly authorName: string;
+  readonly authorEmail: string;
+  readonly authoredAt: string;
+  readonly summary: string;
+  readonly content: string;
+}
+
+export interface RepositoryFileBlameResponse {
+  readonly oid: string;
+  readonly path: string;
+  readonly state: 'available' | 'binary' | 'oversized';
+  readonly lines: readonly RepositoryFileBlameLine[];
+  readonly truncated: boolean;
 }
 
 export interface SelectRepositoryDirectoryRequest {
@@ -792,6 +970,57 @@ export interface GenerateAiCommitMessageResponse {
   readonly worktreeFingerprint: string;
 }
 
+export interface AiTaskReviewPreflightRequest {
+  readonly repositoryId: string;
+  readonly targetFullName: string;
+  readonly targetOid: string;
+  readonly expectedHead: string;
+  readonly indexFingerprint: string;
+  readonly worktreeFingerprint: string;
+}
+
+export interface AiTaskReviewPreflightResponse {
+  readonly branch: string;
+  readonly head: string;
+  readonly targetFullName: string;
+  readonly targetOid: string;
+  readonly mergeBase: string;
+  readonly targetMerged: boolean;
+  readonly uncommittedFiles: number;
+  readonly changedFiles: number;
+  readonly myCommits: number;
+  readonly indexFingerprint: string;
+  readonly worktreeFingerprint: string;
+}
+
+export interface GenerateAiTaskReviewRequest extends AiTaskReviewPreflightRequest {
+  readonly provider: AiCliProvider;
+  readonly promptTemplate: string;
+}
+
+export interface AiCodeReviewSummary {
+  readonly id: string;
+  readonly repositoryId: string;
+  readonly repositoryName: string;
+  readonly branch: string;
+  readonly targetBranch: string;
+  readonly provider: AiCliProvider;
+  readonly createdAtMs: number;
+  readonly changedFiles: number;
+  readonly myCommits: number;
+  readonly uncommittedFiles: number;
+  readonly markdownFile: string;
+}
+
+export interface AiCodeReviewDocument {
+  readonly summary: AiCodeReviewSummary;
+  readonly markdown: string;
+}
+
+export interface AiCodeReviewListResponse {
+  readonly reviews: readonly AiCodeReviewSummary[];
+}
+
 export interface DiagnosticsSettingsResponse {
   readonly dataDirectory: string;
   readonly maxLogKilobytes: number;
@@ -872,6 +1101,7 @@ export interface GitHubPullRequestSummaryResponse {
   readonly updatedAt: string;
   readonly authoredByViewer: boolean;
   readonly commentCount: number;
+  readonly approvalCount: number;
   readonly reviewRequestedFromViewer: boolean | null;
   readonly unresolvedThreadCount: number | null;
 }
@@ -886,6 +1116,7 @@ export interface GitHubPullRequestCommentResponse {
   readonly path: string | null;
   readonly line: number | null;
   readonly side: 'left' | 'right' | null;
+  readonly diffHunk: string | null;
 }
 
 export interface GitHubReviewThreadResponse {
@@ -909,6 +1140,16 @@ export interface GitHubPullRequestDetailResponse extends GitHubPullRequestSummar
   readonly reviewThreadsTruncated: boolean;
 }
 
+export interface GitHubPullRequestFileResponse {
+  readonly filename: string;
+  readonly previousFilename: string | null;
+  readonly status: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly changes: number;
+  readonly patch: string | null;
+}
+
 export interface DesktopIpcContract {
   readonly set_application_zoom: {
     readonly request: { readonly scale: number };
@@ -921,6 +1162,22 @@ export interface DesktopIpcContract {
   readonly ai_generate_commit_message: {
     readonly request: GenerateAiCommitMessageRequest;
     readonly response: GenerateAiCommitMessageResponse;
+  };
+  readonly ai_task_review_preflight: {
+    readonly request: AiTaskReviewPreflightRequest;
+    readonly response: AiTaskReviewPreflightResponse;
+  };
+  readonly ai_generate_task_review: {
+    readonly request: GenerateAiTaskReviewRequest;
+    readonly response: AiCodeReviewDocument;
+  };
+  readonly code_review_list: {
+    readonly request: Record<string, never>;
+    readonly response: AiCodeReviewListResponse;
+  };
+  readonly code_review_read: {
+    readonly request: { readonly id: string };
+    readonly response: AiCodeReviewDocument;
   };
   readonly diagnostics_settings: {
     readonly request: Record<string, never>;
@@ -950,6 +1207,14 @@ export interface DesktopIpcContract {
     readonly request: RepositoryHistoryRequest;
     readonly response: RepositoryHistoryResponse;
   };
+  readonly open_branch_workspace: {
+    readonly request: { readonly request: OpenBranchWorkspaceRequest };
+    readonly response: OpenBranchWorkspaceResponse;
+  };
+  readonly repository_branch_history: {
+    readonly request: RepositoryBranchHistoryRequest;
+    readonly response: RepositoryHistoryResponse;
+  };
   readonly repository_commit_detail: {
     readonly request: RepositoryCommitDetailRequest;
     readonly response: RepositoryCommitDetailResponse;
@@ -974,6 +1239,14 @@ export interface DesktopIpcContract {
     readonly request: ApplyIndexChangeRequest;
     readonly response: ApplyIndexChangeResponse;
   };
+  readonly repository_discard_worktree_changes: {
+    readonly request: DiscardWorkingTreeChangesRequest;
+    readonly response: DiscardWorkingTreeChangesResponse;
+  };
+  readonly repository_discard_worktree_hunk: {
+    readonly request: DiscardWorkingTreeHunkRequest;
+    readonly response: DiscardWorkingTreeChangesResponse;
+  };
   readonly repository_create_commit: {
     readonly request: CreateCommitRequest;
     readonly response: CreateCommitResponse;
@@ -982,9 +1255,37 @@ export interface DesktopIpcContract {
     readonly request: AmendCommitRequest;
     readonly response: AmendCommitResponse;
   };
+  readonly repository_cherry_pick_commit: {
+    readonly request: RepositoryCommitOperationRequest;
+    readonly response: RepositoryCommitOperationResponse;
+  };
+  readonly repository_revert_commit: {
+    readonly request: RepositoryCommitOperationRequest;
+    readonly response: RepositoryCommitOperationResponse;
+  };
+  readonly repository_reset_commit: {
+    readonly request: RepositoryResetCommitRequest;
+    readonly response: RepositoryCommitOperationResponse;
+  };
   readonly repository_navigation: {
     readonly request: RepositoryNavigationRequest;
     readonly response: RepositoryNavigationResponse;
+  };
+  readonly repository_compare_refs: {
+    readonly request: RepositoryCompareRefsRequest;
+    readonly response: RepositoryCompareRefsResponse;
+  };
+  readonly repository_compare_ref_file_diff: {
+    readonly request: RepositoryCompareRefFileDiffRequest;
+    readonly response: RepositoryCompareRefFileDiffResponse;
+  };
+  readonly repository_file_history: {
+    readonly request: RepositoryFileHistoryRequest;
+    readonly response: RepositoryFileHistoryResponse;
+  };
+  readonly repository_file_blame: {
+    readonly request: RepositoryFileBlameRequest;
+    readonly response: RepositoryFileBlameResponse;
   };
   readonly switch_repository_branch: {
     readonly request: SwitchRepositoryBranchRequest;
@@ -1163,6 +1464,25 @@ export interface DesktopIpcContract {
     };
     readonly response: GitHubPullRequestDetailResponse;
   };
+  readonly github_pull_request_files: {
+    readonly request: {
+      readonly accountId: string;
+      readonly repositoryId: string;
+      readonly number: number;
+    };
+    readonly response: {
+      readonly files: readonly GitHubPullRequestFileResponse[];
+      readonly truncated: boolean;
+    };
+  };
+  readonly github_approve_pull_request: {
+    readonly request: {
+      readonly accountId: string;
+      readonly repositoryId: string;
+      readonly number: number;
+    };
+    readonly response: { readonly approved: boolean };
+  };
 }
 
 type DesktopCommand = keyof DesktopIpcContract;
@@ -1227,10 +1547,19 @@ export class DesktopIpc implements DesktopIpcClient {
       return Promise.resolve(response as DesktopIpcContract[C]['response']);
     }
 
-    if (command === 'ai_generate_commit_message') {
+    if (
+      command === 'ai_generate_commit_message' ||
+      command === 'ai_task_review_preflight' ||
+      command === 'ai_generate_task_review' ||
+      command === 'code_review_read'
+    ) {
       return Promise.reject(
-        new Error('AI commit-message generation is unavailable outside the desktop application.'),
+        new Error('AI support is unavailable outside the desktop application.'),
       );
+    }
+
+    if (command === 'code_review_list') {
+      return Promise.resolve({ reviews: [] } as DesktopIpcContract[C]['response']);
     }
 
     if (command === 'diagnostics_settings') {
@@ -1294,9 +1623,15 @@ export class DesktopIpc implements DesktopIpcClient {
       return Promise.resolve(response as DesktopIpcContract[C]['response']);
     }
 
-    if (command === 'repository_history') {
+    if (command === 'repository_history' || command === 'repository_branch_history') {
       const response: RepositoryHistoryResponse = { commits: [], nextCursor: null };
       return Promise.resolve(response as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'open_branch_workspace') {
+      return Promise.reject(
+        new Error('Opening external applications is unavailable outside the desktop application.'),
+      );
     }
 
     if (command === 'repository_commit_detail') {
@@ -1308,6 +1643,22 @@ export class DesktopIpc implements DesktopIpcClient {
     if (command === 'repository_file_diff') {
       return Promise.reject(
         new Error('File diffs are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'repository_file_history' || command === 'repository_file_blame') {
+      return Promise.reject(
+        new Error('File history is unavailable outside the desktop application.'),
+      );
+    }
+
+    if (
+      command === 'repository_cherry_pick_commit' ||
+      command === 'repository_revert_commit' ||
+      command === 'repository_reset_commit'
+    ) {
+      return Promise.reject(
+        new Error('Commit operations are unavailable outside the desktop application.'),
       );
     }
 
@@ -1353,9 +1704,13 @@ export class DesktopIpc implements DesktopIpcClient {
       );
     }
 
-    if (command === 'repository_apply_index_change') {
+    if (
+      command === 'repository_apply_index_change' ||
+      command === 'repository_discard_worktree_changes' ||
+      command === 'repository_discard_worktree_hunk'
+    ) {
       return Promise.reject(
-        new Error('Staging changes is unavailable outside the desktop application.'),
+        new Error('Working-tree mutations are unavailable outside the desktop application.'),
       );
     }
 
@@ -1378,6 +1733,12 @@ export class DesktopIpc implements DesktopIpcClient {
         stashes: [],
       };
       return Promise.resolve(response as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'repository_compare_refs' || command === 'repository_compare_ref_file_diff') {
+      return Promise.reject(
+        new Error('Reference comparisons are unavailable outside the desktop application.'),
+      );
     }
 
     if (command === 'switch_repository_branch') {
@@ -1472,7 +1833,9 @@ export class DesktopIpc implements DesktopIpcClient {
       command === 'github_disconnect_account' ||
       command === 'github_list_repositories' ||
       command === 'github_list_pull_requests' ||
-      command === 'github_pull_request_detail'
+      command === 'github_pull_request_detail' ||
+      command === 'github_pull_request_files' ||
+      command === 'github_approve_pull_request'
     ) {
       return Promise.reject(
         new Error('GitHub integration is unavailable outside the desktop application.'),

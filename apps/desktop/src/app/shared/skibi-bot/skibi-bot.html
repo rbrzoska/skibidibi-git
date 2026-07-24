@@ -1,0 +1,20 @@
+<svg viewBox="0 0 100 100" aria-hidden="true">
+  <defs>
+    <linearGradient id="skibi-bot-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5b93ff"/><stop offset="1" stop-color="#3f6fd6"/></linearGradient>
+    <radialGradient id="skibi-bot-ant" cx=".5" cy=".3" r=".8"><stop offset="0" stop-color="#7fd98f"/><stop offset="1" stop-color="#4bb85f"/></radialGradient>
+  </defs>
+  <rect x="16" y="24" width="68" height="60" rx="18" fill="url(#skibi-bot-bg)"/>
+  <rect x="46" y="12" width="5" height="14" rx="2.5" fill="#bcd3ff"/>
+  <circle class="antenna" cx="48" cy="10" r="6.5" fill="url(#skibi-bot-ant)"/>
+  <g class="eyes">
+    <circle cx="39" cy="48" r="9" fill="#fff"/><circle cx="61" cy="48" r="9" fill="#fff"/>
+    <circle cx="36.8" cy="48" r="4" fill="#3f6fd6"/><circle cx="35.4" cy="46.6" r="1.4" fill="#fff"/>
+    <circle cx="58.8" cy="48" r="4" fill="#3f6fd6"/><circle cx="57.4" cy="46.6" r="1.4" fill="#fff"/>
+  </g>
+  @switch (mood()) {
+    @case ('happy') { <path d="M37 68 Q50 76 63 68" class="mouth happy"/> }
+    @case ('neutral') { <path d="M38 70 Q50 69 62 70" class="mouth neutral"/> }
+    @case ('sad') { <path d="M37 75 Q50 64 63 75" class="mouth sad"/> }
+    @case ('scared') { <ellipse cx="50" cy="70" rx="7" ry="9" class="mouth scared"/> }
+  }
+</svg>
