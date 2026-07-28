@@ -13,6 +13,17 @@
     <a routerLink="/settings" routerLinkActive="active" ariaCurrentWhenActive="page">Settings</a>
   </nav>
   <div class="app-controls">
+    <button
+      type="button"
+      class="commander-trigger"
+      [class.active]="commander.open()"
+      [disabled]="!commander.available()"
+      [title]="commander.available() ? 'Open Skibi-Bot AI Commander' : 'Install or sign in to Codex, Claude or Cursor CLI'"
+      (click)="commander.toggle()"
+    >
+      <app-skibi-bot aria-hidden="true" />
+      <span>Ask Skibi-Bot</span>
+    </button>
     <div class="font-scale" role="group" aria-label="Interface text size">
       <button type="button" [disabled]="!uiScale.canDecrease()" aria-label="Decrease text size" title="Decrease text size (Ctrl/Cmd −)" (click)="uiScale.decrease()">A−</button>
       <output [attr.aria-label]="'Text size ' + uiScale.percent() + ' percent'">{{ uiScale.percent() }}%</output>
@@ -25,4 +36,6 @@
   </div>
 </header>
 <router-outlet />
+<app-commander-panel />
+<app-application-update-prompt />
 <app-ui-feedback-host />

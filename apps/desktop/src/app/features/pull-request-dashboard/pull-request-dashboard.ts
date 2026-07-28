@@ -5,6 +5,7 @@ import {
   GitHubRepositoryPullRequestStore,
   type DashboardPullRequest,
 } from '../../core/github';
+import { CommanderContextStore } from '../../core/commander/commander-context';
 import { GitHubPullRequestInspector } from '../github/pull-request-inspector/github-pull-request-inspector';
 
 @Component({
@@ -18,6 +19,7 @@ import { GitHubPullRequestInspector } from '../github/pull-request-inspector/git
 export class PullRequestDashboard {
   protected readonly dashboard = inject(GithubPullRequestDashboard);
   protected readonly detailStore = inject(GitHubRepositoryPullRequestStore);
+  private readonly commanderContext = inject(CommanderContextStore);
   protected readonly detailTab = signal<'description' | 'files'>('description');
 
   constructor() {
@@ -26,6 +28,7 @@ export class PullRequestDashboard {
 
   protected refresh(): void {
     this.detailStore.clearSelection();
+    this.commanderContext.select(null);
     void this.dashboard.load();
   }
 
@@ -39,6 +42,9 @@ export class PullRequestDashboard {
 
   protected select(pullRequest: DashboardPullRequest): void {
     this.dashboard.select(pullRequest);
+    this.commanderContext.select(
+      `pull-request:${pullRequest.repositoryFullName}#${pullRequest.number}|title:${pullRequest.title}`,
+    );
     this.detailTab.set('description');
     const account = this.dashboard.account();
     if (account === null) {

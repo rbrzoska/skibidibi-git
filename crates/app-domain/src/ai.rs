@@ -24,6 +24,49 @@ pub struct AiCliStatuses {
     pub statuses: Vec<AiCliStatus>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCommanderContext {
+    pub route: String,
+    pub screen: String,
+    pub repository_id: Option<String>,
+    pub selected_entity: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCommanderChatMessage {
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCommanderTurnRequest {
+    pub provider: AiProvider,
+    pub message: String,
+    pub history: Vec<AiCommanderChatMessage>,
+    pub context: AiCommanderContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum AiCommanderAction {
+    Navigate { route: String },
+    RepositoryStatus,
+    RecentCommits { limit: usize },
+    InspectCommit { oid: String },
+    FileHistory { path: String },
+    CompareRefs { source: String, target: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCommanderTurnResult {
+    pub message: String,
+    pub actions: Vec<AiCommanderAction>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiGenerateCommitMessageRequest {

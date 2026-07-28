@@ -50,6 +50,7 @@ import {
 } from '../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
 import { AiSupportStore } from '../../core/ai-support/ai-support.store';
+import { CommanderContextStore } from '../../core/commander/commander-context';
 import { UiFeedback } from '../../core/ui-feedback/ui-feedback';
 import {
   GitHubAccountStore,
@@ -298,6 +299,7 @@ export class WorkspaceHistory implements OnDestroy {
   private readonly catalog = inject(RepositoryCatalog);
   private readonly ipc = inject(DESKTOP_IPC);
   private readonly aiSupport = inject(AiSupportStore);
+  private readonly commanderContext = inject(CommanderContextStore);
   private readonly feedback = inject(UiFeedback);
   protected readonly githubAccounts = inject(GitHubAccountStore);
   protected readonly filePathParts = splitFilePath;
@@ -757,6 +759,7 @@ export class WorkspaceHistory implements OnDestroy {
     this.navigationActionError.set('');
     this.navigationActionNotice.set('');
     this.branchPreview.set({ branch, target: this.previewTargetFor(branch) });
+    this.commanderContext.select(`branch:${branch.name}|oid:${branch.oid}|mode:preview`);
     this.closeBranchContextMenu();
     void this.reloadHistory();
   }
@@ -776,6 +779,7 @@ export class WorkspaceHistory implements OnDestroy {
       return;
     }
     this.branchPreview.set(null);
+    this.commanderContext.select(null);
     void this.reloadHistory();
   }
 
@@ -2969,6 +2973,7 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.fileDiffRequestGeneration;
     this.historySelection.set('commit');
     this.selectedOid.set(commit.oid);
+    this.commanderContext.select(`commit:${commit.oid}|summary:${commit.summary}`);
     this.selectedFilePath.set(null);
     this.selectedWorkingTreeEntryKind.set(null);
     this.fileDiffState.set({ kind: 'idle' });
@@ -3010,6 +3015,7 @@ export class WorkspaceHistory implements OnDestroy {
     this.historySelection.set('stash');
     this.selectedOid.set(stash.oid);
     this.selectedStash.set(stash);
+    this.commanderContext.select(`stash:${stash.selector}|oid:${stash.oid}|message:${stash.message}`);
     this.detailState.set({ kind: 'idle' });
     this.stashDetailState.set({ kind: 'loading' });
     this.selectedFilePath.set(null);
@@ -3047,6 +3053,7 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.detailRequestGeneration;
     ++this.fileDiffRequestGeneration;
     this.historySelection.set('pull-request');
+    this.commanderContext.select('pull-request:list');
     this.selectedOid.set(null);
     this.detailState.set({ kind: 'idle' });
     this.stashDetailState.set({ kind: 'idle' });
@@ -3061,6 +3068,7 @@ export class WorkspaceHistory implements OnDestroy {
     ++this.detailRequestGeneration;
     ++this.fileDiffRequestGeneration;
     this.historySelection.set('working-tree');
+    this.commanderContext.select('working-tree:current');
     this.selectedOid.set(null);
     this.detailState.set({ kind: 'idle' });
     this.stashDetailState.set({ kind: 'idle' });
@@ -3959,6 +3967,7 @@ export class WorkspaceHistory implements OnDestroy {
 
     const generation = ++this.fileDiffRequestGeneration;
     this.selectedFilePath.set(path);
+    this.commanderContext.select(`working-tree-file:${path}|entry:${entryKind}`);
     this.selectedWorkingTreeEntryKind.set(entryKind);
     this.fileDiffDisplayMode.set('contextual');
     this.fileDiffState.set({ kind: 'loading', path, oldPath });
@@ -4000,6 +4009,7 @@ export class WorkspaceHistory implements OnDestroy {
 
     const generation = ++this.fileDiffRequestGeneration;
     this.selectedFilePath.set(path);
+    this.commanderContext.select(`commit-file:${path}|commit:${oid}`);
     this.selectedWorkingTreeEntryKind.set(null);
     this.fileDiffDisplayMode.set('contextual');
     this.fileDiffState.set({ kind: 'loading', path, oldPath });
@@ -4045,6 +4055,7 @@ export class WorkspaceHistory implements OnDestroy {
 
     const generation = ++this.fileDiffRequestGeneration;
     this.selectedFilePath.set(path);
+    this.commanderContext.select(`stash-file:${path}|stash:${oid}|source:${source}`);
     this.selectedWorkingTreeEntryKind.set(null);
     this.selectedStashFileSource.set(source);
     this.fileDiffDisplayMode.set('contextual');
@@ -4087,6 +4098,17 @@ export class WorkspaceHistory implements OnDestroy {
   protected closeFileDiff(): void {
     ++this.fileDiffRequestGeneration;
     this.selectedFilePath.set(null);
+    const selection = this.historySelection();
+    const oid = this.selectedOid();
+    this.commanderContext.select(
+      selection === 'commit' && oid !== null
+        ? `commit:${oid}`
+        : selection === 'stash' && oid !== null
+          ? `stash:${oid}`
+          : selection === 'working-tree'
+            ? 'working-tree:current'
+            : null,
+    );
     this.fileDiffState.set({ kind: 'idle' });
     this.fileDiffDisplayMode.set('contextual');
     const focusTarget = this.fileDiffReturnFocus;

@@ -25,12 +25,24 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4RjlBNzVEREVCRjkxRTUKUldUbGtiL2VYYWY1YU1SeCthWjNHZURhTTJXNlpEVExaSVpjeEl1bGtSUitiSVNHMWdTakNkUTkK",
+      "endpoints": [
+        "https://github.com/rbrzoska/skibidibi-git/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

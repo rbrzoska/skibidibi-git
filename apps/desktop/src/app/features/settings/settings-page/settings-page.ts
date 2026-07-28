@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal, viewChild
 import { RouterLink } from '@angular/router';
 
 import { AiSupportStore } from '../../../core/ai-support/ai-support.store';
+import { ApplicationUpdate } from '../../../core/application-update/application-update';
 import {
   DESKTOP_IPC,
   type DiagnosticsSettingsResponse,
@@ -36,6 +37,7 @@ type MaintenanceScanState =
 export class SettingsPage {
   protected readonly catalog = inject(RepositoryCatalog);
   protected readonly aiSupport = inject(AiSupportStore);
+  protected readonly applicationUpdate = inject(ApplicationUpdate);
   private readonly maintenanceIpc = inject(DESKTOP_IPC);
   private readonly diagnosticLogDialog = viewChild.required(DiagnosticLogDialog);
   private readonly storage = browserWorkspaceRefreshStorage();

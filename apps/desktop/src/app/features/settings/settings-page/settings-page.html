@@ -9,6 +9,35 @@
     <div class="settings-card"><app-github-account-control /></div>
   </section>
 
+  <section class="settings-section" aria-labelledby="updates-heading">
+    <div class="section-heading">
+      <h2 id="updates-heading">Application updates</h2>
+      <button type="button" class="compact-button" [disabled]="applicationUpdate.state() === 'checking' || applicationUpdate.state() === 'installing'" (click)="applicationUpdate.check()">
+        {{ applicationUpdate.state() === 'checking' ? 'Checking…' : 'Check now' }}
+      </button>
+    </div>
+    <div class="settings-card setting-list">
+      <label class="setting-row">
+        <span><strong>Check automatically</strong><small>Check GitHub Releases when the application starts. Installation and restart always require your confirmation.</small></span>
+        <input type="checkbox" [checked]="applicationUpdate.autoCheck()" (change)="applicationUpdate.setAutoCheck($any($event.target).checked)" />
+      </label>
+      <div class="setting-row update-status-row">
+        <span>
+          <strong>Installed version</strong>
+          <small>
+            {{ applicationUpdate.currentVersion() ?? 'Not checked yet' }}
+            @if (applicationUpdate.lastCheckedAt(); as checkedAt) { · checked {{ checkedAt.toLocaleString() }} }
+          </small>
+        </span>
+        @if (applicationUpdate.availableUpdate(); as update) {
+          <button type="button" class="compact-button" [disabled]="applicationUpdate.state() === 'installing'" (click)="applicationUpdate.install()">Install {{ update.version }}</button>
+        } @else {
+          <span class="update-state">{{ applicationUpdate.state() === 'upToDate' ? 'Up to date' : '' }}</span>
+        }
+      </div>
+    </div>
+  </section>
+
   <section class="settings-section" aria-labelledby="refresh-heading">
     <h2 id="refresh-heading">Defaults</h2>
     <div class="settings-card setting-list">

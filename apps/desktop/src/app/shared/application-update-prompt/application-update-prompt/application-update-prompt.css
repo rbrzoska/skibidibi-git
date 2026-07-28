@@ -1,0 +1,12 @@
+:host { position: fixed; z-index: 80; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px)); pointer-events: none; }
+.update-card { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; border: 1px solid var(--bds, rgba(120,170,255,.45)); border-radius: var(--r-lg, 10px); padding: 12px; color: var(--tx, #e6e8ee); background: color-mix(in srgb, var(--bg2, #1e2128) 96%, transparent); box-shadow: 0 16px 44px rgb(0 0 0 / 40%); pointer-events: auto; }
+.update-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: var(--ac, #5b93ff); background: var(--acd, rgba(53,115,240,.16)); font-size: 22px; }
+.update-copy { min-width: 0; }
+.update-copy strong { font-size: var(--fs-base, 12px); }
+.update-copy > p { margin: 5px 0 0; color: var(--tx2, #9aa2b0); font-size: var(--fs-sm, 11px); line-height: 1.4; }
+details { margin-top: 7px; color: var(--tx3, #697082); font-size: var(--fs-xs, 10.5px); }
+details p { max-height: 100px; overflow: auto; margin: 5px 0; white-space: pre-wrap; }
+.update-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+button { height: 24px; border: 1px solid var(--bd, rgba(255,255,255,.075)); border-radius: var(--r-sm, 5px); padding: 0 9px; color: var(--tx2, #9aa2b0); background: var(--bg3, #252932); font-size: var(--fs-xs, 10.5px); cursor: pointer; }
+button.primary { border-color: var(--ac, #5b93ff); color: #fff; background: var(--ac, #356ff0); }
+button:disabled { cursor: wait; opacity: .55; }

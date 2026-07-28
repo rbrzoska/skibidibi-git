@@ -11,6 +11,7 @@ import {
   type RepositoryStatusResponse,
 } from '../../core/ipc/desktop-ipc';
 import { AiSupportStore, DEFAULT_AI_COMMIT_PROMPT } from '../../core/ai-support/ai-support.store';
+import { CommanderContextStore } from '../../core/commander/commander-context';
 import { RepositoryStatusStore } from '../repository-status/repository-status';
 import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../core/github';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
@@ -700,6 +701,8 @@ describe('WorkspaceHistory', () => {
     (element.querySelector('.commit-row') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
+    expect(TestBed.inject(CommanderContextStore).context().selectedEntity)
+      .toBe(`commit:${'a'.repeat(40)}|summary:Add repository history`);
     const fileHistoryLink = element.querySelector('.file-history-link') as HTMLAnchorElement;
     expect(fileHistoryLink.getAttribute('href')).toContain('/workspace/skibidibi-git/file-history');
     expect(fileHistoryLink.getAttribute('href')).toContain(`oid=${'a'.repeat(40)}`);

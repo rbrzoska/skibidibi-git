@@ -22,8 +22,10 @@ mod working_tree;
 
 pub use ai::{
     AiCliStatus, AiCliStatuses, AiCodeReviewDocument, AiCodeReviewList, AiCodeReviewSummary,
-    AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult, AiGenerateTaskReviewRequest,
-    AiProvider, AiTaskReviewPreflightRequest, AiTaskReviewPreflightResult,
+    AiCommanderAction, AiCommanderChatMessage, AiCommanderContext, AiCommanderTurnRequest,
+    AiCommanderTurnResult, AiGenerateCommitMessageRequest, AiGenerateCommitMessageResult,
+    AiGenerateTaskReviewRequest, AiProvider, AiTaskReviewPreflightRequest,
+    AiTaskReviewPreflightResult,
 };
 pub use branch_actions::{SwitchBranchRequest, SwitchBranchResult};
 pub use branch_creation::{BranchCreationSource, CreateBranchRequest, CreateBranchResult};

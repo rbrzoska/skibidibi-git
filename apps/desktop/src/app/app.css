@@ -8,6 +8,10 @@
 .screen-tabs a:hover, .screen-tabs a:focus-visible { color: var(--tx, #e6e8ee); outline: none; }
 .screen-tabs a.active { color: var(--tx, #e6e8ee); background: var(--bg4, #2e333d); }
 .app-controls { display: flex; align-items: center; gap: 7px; min-width: 0; margin-left: auto; -webkit-app-region: no-drag; }
+.commander-trigger { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; border: 1px solid var(--bd); border-radius: 6px; padding: 0 8px 0 5px; color: var(--tx2); background: var(--bg3); font-size: 10px; font-weight: 650; white-space: nowrap; }
+.commander-trigger app-skibi-bot { width: 20px; height: 20px; }
+.commander-trigger:hover:not(:disabled), .commander-trigger.active { border-color: var(--ac); color: var(--tx); background: var(--acd); }
+.commander-trigger:disabled { opacity: .4; cursor: not-allowed; }
 .font-scale { display: inline-flex; align-items: center; overflow: hidden; border: 1px solid var(--bd, rgba(255,255,255,.075)); border-radius: var(--r-sm, 5px); background: var(--bg2, #1e2128); }
 .font-scale button { display: grid; place-items: center; width: 25px; height: 22px; border: 0; padding: 0; color: var(--tx2, #9aa2b0); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
 .font-scale button:hover:not(:disabled), .font-scale button:focus-visible { color: var(--tx, #e6e8ee); background: var(--bg4, #2e333d); }

@@ -14,12 +14,18 @@ import { filter, map, scan, startWith } from 'rxjs';
 
 import { GitHubAccountStore } from './core/github';
 import { UiScale } from './core/accessibility/ui-scale';
+import { Commander } from './core/commander/commander';
+import { CommanderContextStore } from './core/commander/commander-context';
+import { ApplicationUpdate } from './core/application-update/application-update';
 import { UiFeedback } from './core/ui-feedback/ui-feedback';
+import { CommanderPanel } from './shared/commander-panel/commander-panel';
+import { SkibiBot } from './shared/skibi-bot/skibi-bot';
 import { UiFeedbackHost } from './shared/ui-feedback-host/ui-feedback-host';
+import { ApplicationUpdatePrompt } from './shared/application-update-prompt/application-update-prompt/application-update-prompt';
 
 @Component({
   selector: 'app-root',
-  imports: [RouterLink, RouterLinkActive, RouterOutlet, UiFeedbackHost],
+  imports: [RouterLink, RouterLinkActive, RouterOutlet, ApplicationUpdatePrompt, CommanderPanel, SkibiBot, UiFeedbackHost],
   templateUrl: './app.html',
   styleUrl: './app.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -28,6 +34,9 @@ export class App {
   private readonly router = inject(Router);
   protected readonly accounts = inject(GitHubAccountStore);
   protected readonly uiScale = inject(UiScale);
+  protected readonly commander = inject(Commander);
+  protected readonly applicationUpdate = inject(ApplicationUpdate);
+  private readonly commanderContext = inject(CommanderContextStore);
   private readonly feedback = inject(UiFeedback);
   protected readonly workspaceUrl = toSignal(
     this.router.events.pipe(
@@ -79,11 +88,16 @@ export class App {
           event instanceof NavigationError
         ) {
           this.feedback.setLoading('router', false);
+          if (event instanceof NavigationEnd) {
+            this.commanderContext.updateRoute(event.urlAfterRedirects);
+          }
         }
       });
+    this.commanderContext.updateRoute(this.router.url);
     if (this.accounts.state().kind === 'idle') {
       void this.accounts.load();
     }
+    this.applicationUpdate.initialize();
   }
 
   @HostListener('document:keydown', ['$event'])

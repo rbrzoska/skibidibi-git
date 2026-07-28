@@ -1,0 +1,25 @@
+:host { display: contents; }
+.commander-panel { position: fixed; z-index: 1450; top: var(--topbar-h, 38px); right: 0; bottom: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto; width: min(380px, calc(100vw - 48px)); border-left: 1px solid var(--bd); color: var(--tx); background: var(--bg2); box-shadow: -16px 0 42px rgb(0 0 0 / 38%); animation: panel-in .2s ease-out; }
+header { display: grid; grid-template-columns: 38px minmax(0, 1fr) 28px; align-items: center; gap: 8px; min-height: 52px; border-bottom: 1px solid var(--bd); padding: 7px 10px; }
+header app-skibi-bot { width: 38px; height: 38px; }
+header div { display: grid; gap: 1px; }
+header strong { font-size: 13px; }
+header small, .provider { color: var(--tx3); font-size: 10px; }
+header button { width: 26px; height: 26px; border: 1px solid var(--bd); border-radius: 6px; color: var(--tx2); background: var(--bg3); }
+.provider { display: flex; gap: 5px; min-height: 27px; align-items: center; border-bottom: 1px solid var(--bd2); padding: 4px 10px; }
+.provider span { border-radius: 10px; padding: 2px 7px; background: var(--bg4); }
+.conversation { overflow: auto; display: grid; align-content: start; gap: 10px; padding: 12px; }
+article { display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: end; gap: 6px; }
+article.user { grid-template-columns: minmax(0, 1fr); justify-items: end; }
+article app-skibi-bot { width: 25px; height: 25px; }
+article p { max-width: 90%; margin: 0; border: 1px solid var(--bd); border-radius: 10px 10px 10px 3px; padding: 8px 10px; color: var(--tx2); background: var(--bg3); font-size: 11px; line-height: 1.45; white-space: pre-wrap; }
+article.user p { border-color: var(--bds); border-radius: 10px 10px 3px 10px; color: var(--tx); background: var(--acd); }
+.thinking { opacity: .7; }
+.error { margin: 0 10px 8px; border: 1px solid var(--red); border-radius: 7px; padding: 7px 9px; color: var(--red); font-size: 10px; }
+form { display: grid; gap: 7px; border-top: 1px solid var(--bd); padding: 9px 10px 11px; }
+textarea { box-sizing: border-box; width: 100%; min-height: 66px; max-height: 160px; resize: vertical; border: 1px solid var(--bd); border-radius: 8px; padding: 8px 9px; color: var(--tx); background: var(--bg1); font: inherit; font-size: 11px; line-height: 1.4; }
+textarea:focus { border-color: var(--ac); outline: 0; box-shadow: 0 0 0 2px var(--acd); }
+form button { justify-self: end; min-height: 28px; border: 1px solid var(--ac); border-radius: 6px; padding: 0 11px; color: #fff; background: var(--ac); font-size: 11px; font-weight: 700; }
+button:disabled { cursor: not-allowed; opacity: .45; }
+@keyframes panel-in { from { opacity: 0; transform: translateX(24px); } }
+@media (prefers-reduced-motion: reduce) { .commander-panel { animation: none; } }

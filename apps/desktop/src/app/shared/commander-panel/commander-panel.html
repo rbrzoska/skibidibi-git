@@ -1,0 +1,41 @@
+@if (commander.open()) {
+  <aside class="commander-panel" aria-label="Skibi-Bot AI Commander">
+    <header>
+      <app-skibi-bot />
+      <div><strong>Skibi-Bot</strong><small>AI Commander</small></div>
+      <button type="button" aria-label="Close Skibi-Bot" title="Close" (click)="commander.close()">×</button>
+    </header>
+    <div class="provider">
+      @for (provider of commander.availableProviders(); track provider.provider) {
+        <span>{{ provider.displayName }}</span>
+      }
+    </div>
+    <section class="conversation" aria-live="polite">
+      @for (message of commander.messages(); track message.id) {
+        <article [class.user]="message.role === 'user'">
+          @if (message.role === 'assistant') { <app-skibi-bot /> }
+          <p>{{ message.text }}</p>
+        </article>
+      }
+      @if (commander.loading()) {
+        <article><app-skibi-bot /><p class="thinking">Thinking<span>…</span></p></article>
+      }
+    </section>
+    @if (commander.error()) {
+      <p class="error" role="alert">{{ commander.error() }}</p>
+    }
+    <form (submit)="$event.preventDefault(); submit()">
+      <textarea
+        rows="3"
+        maxlength="8192"
+        placeholder="Ask about this view or tell Skibi-Bot where to go…"
+        [value]="draft()"
+        [disabled]="commander.loading()"
+        (input)="draft.set($any($event.target).value)"
+        (keydown.control.enter)="submit()"
+        (keydown.meta.enter)="submit()"
+      ></textarea>
+      <button type="submit" [disabled]="commander.loading() || draft().trim().length === 0">Ask Skibi-Bot</button>
+    </form>
+  </aside>
+}

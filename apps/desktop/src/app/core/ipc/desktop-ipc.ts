@@ -1,5 +1,16 @@
 import { Injectable, InjectionToken, isDevMode } from '@angular/core';
 
+export interface ApplicationUpdateInfo {
+  readonly version: string;
+  readonly body: string | null;
+  readonly date: string | null;
+}
+
+export interface ApplicationUpdateCheckResponse {
+  readonly currentVersion: string;
+  readonly update: ApplicationUpdateInfo | null;
+}
+
 export interface RepositoryStatusRequest {
   readonly repositoryPath: string;
 }
@@ -955,6 +966,33 @@ export interface AiCliStatusResponse {
   readonly statuses: readonly AiCliStatus[];
 }
 
+export interface AiCommanderContext {
+  readonly route: string;
+  readonly screen: string;
+  readonly repositoryId: string | null;
+  readonly selectedEntity: string | null;
+}
+
+export interface AiCommanderTurnRequest {
+  readonly provider: AiCliProvider;
+  readonly message: string;
+  readonly history: readonly { readonly role: 'user' | 'assistant'; readonly text: string }[];
+  readonly context: AiCommanderContext;
+}
+
+export type AiCommanderAction =
+  | { readonly type: 'navigate'; readonly route: string }
+  | { readonly type: 'repositoryStatus' }
+  | { readonly type: 'recentCommits'; readonly limit: number }
+  | { readonly type: 'inspectCommit'; readonly oid: string }
+  | { readonly type: 'fileHistory'; readonly path: string }
+  | { readonly type: 'compareRefs'; readonly source: string; readonly target: string };
+
+export interface AiCommanderTurnResponse {
+  readonly message: string;
+  readonly actions: readonly AiCommanderAction[];
+}
+
 export interface GenerateAiCommitMessageRequest {
   readonly repositoryId: string;
   readonly provider: AiCliProvider;
@@ -1151,6 +1189,14 @@ export interface GitHubPullRequestFileResponse {
 }
 
 export interface DesktopIpcContract {
+  readonly application_update_check: {
+    readonly request: Record<string, never>;
+    readonly response: ApplicationUpdateCheckResponse;
+  };
+  readonly application_update_install: {
+    readonly request: { readonly expectedVersion: string };
+    readonly response: void;
+  };
   readonly set_application_zoom: {
     readonly request: { readonly scale: number };
     readonly response: ApplicationZoomResponse;
@@ -1158,6 +1204,10 @@ export interface DesktopIpcContract {
   readonly ai_cli_status: {
     readonly request: Record<string, never>;
     readonly response: AiCliStatusResponse;
+  };
+  readonly ai_commander_turn: {
+    readonly request: AiCommanderTurnRequest;
+    readonly response: AiCommanderTurnResponse;
   };
   readonly ai_generate_commit_message: {
     readonly request: GenerateAiCommitMessageRequest;
@@ -1531,6 +1581,19 @@ export class DesktopIpc implements DesktopIpcClient {
     command: C,
     request: DesktopIpcContract[C]['request'],
   ): Promise<DesktopIpcContract[C]['response']> {
+    if (command === 'application_update_check') {
+      return Promise.resolve({
+        currentVersion: '0.1.0-dev',
+        update: null,
+      } as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'application_update_install') {
+      return Promise.reject(
+        new Error('Automatic updates are unavailable outside the desktop application.'),
+      );
+    }
+
     if (command === 'set_application_zoom') {
       const scale = (request as { readonly scale: number }).scale;
       return Promise.resolve({ scale } as DesktopIpcContract[C]['response']);
@@ -1549,6 +1612,7 @@ export class DesktopIpc implements DesktopIpcClient {
 
     if (
       command === 'ai_generate_commit_message' ||
+      command === 'ai_commander_turn' ||
       command === 'ai_task_review_preflight' ||
       command === 'ai_generate_task_review' ||
       command === 'code_review_read'

@@ -10,6 +10,7 @@ import {
   type DashboardPullRequest,
 } from '../../core/github';
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
+import { CommanderContextStore } from '../../core/commander/commander-context';
 
 import { PullRequestDashboard } from './pull-request-dashboard';
 
@@ -61,13 +62,23 @@ describe('PullRequestDashboard', () => {
     const dashboard = TestBed.inject(GithubPullRequestDashboard);
     const store = fixture.debugElement.injector.get(GitHubRepositoryPullRequestStore);
     dashboard.account.set({ id: 'account-1', login: 'octocat', host: 'github.com', avatarUrl: null, state: 'connected', authKind: 'gitHubCli' });
-    dashboard.select(pullRequest);
-    store.configure('repo-1', 'account-1');
-    store.detailState.set({ kind: 'ready', detail: {
-      ...pullRequest, body: 'Description', additions: 2, deletions: 1, changedFiles: 1, mergeability: 'mergeable',
-      comments: [], reviewThreads: [], conversationTruncated: false, reviewThreadsTruncated: false,
-    } });
+    bridge.githubPullRequestDetail.mockResolvedValue({
+      ...pullRequest,
+      body: 'Description',
+      additions: 2,
+      deletions: 1,
+      changedFiles: 1,
+      mergeability: 'mergeable',
+      comments: [],
+      reviewThreads: [],
+      conversationTruncated: false,
+      reviewThreadsTruncated: false,
+    });
+    (component as unknown as { select(value: DashboardPullRequest): void }).select(pullRequest);
+    await fixture.whenStable();
     fixture.detectChanges();
+    expect(TestBed.inject(CommanderContextStore).context().selectedEntity)
+      .toBe('pull-request:acme/widget#42|title:Review this');
 
     (fixture.nativeElement.querySelector('[role="tab"]:nth-child(2)') as HTMLButtonElement).click();
     await fixture.whenStable();

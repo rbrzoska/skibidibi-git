@@ -45,6 +45,7 @@ mod diagnostics;
 mod external_workspace;
 mod github;
 mod maintenance_stats;
+mod updater;
 
 const MIN_APPLICATION_ZOOM: f64 = 1.0;
 const MAX_APPLICATION_ZOOM: f64 = 1.5;
@@ -1817,6 +1818,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
@@ -1832,6 +1834,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ai::ai_cli_status,
+            ai::ai_commander_turn,
             ai::ai_generate_commit_message,
             ai::ai_task_review_preflight,
             ai::ai_generate_task_review,
@@ -1843,6 +1846,8 @@ pub fn run() {
             diagnostics::diagnostics_clear,
             diagnostics::select_diagnostics_directory,
             external_workspace::open_branch_workspace,
+            updater::application_update_check,
+            updater::application_update_install,
             set_application_zoom,
             repository_status,
             repository_history,

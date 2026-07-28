@@ -17,6 +17,8 @@
 .setting-row input:checked { background: var(--ac, #5b93ff); }
 .setting-row input:checked::after { transform: translateX(16px); }
 .setting-row input:focus-visible { outline: 2px solid var(--bds, rgba(120,170,255,.45)); outline-offset: 2px; }
+.update-status-row { cursor: default; }
+.update-state { color: var(--green, #4bb85f); font-size: var(--fs-xs, 10.5px); }
 .ai-support-card { display: grid; }
 .ai-privacy-copy { margin: 0; border-bottom: 1px solid var(--bd2, rgba(255,255,255,.05)); padding: 10px 14px; color: var(--tx3, #697082); font-size: var(--fs-sm, 11px); line-height: 1.4; }
 .ai-prompt-field { display: grid; gap: 7px; padding: 12px 14px 6px; }
