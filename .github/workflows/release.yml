@@ -114,3 +114,32 @@ jobs:
           prerelease: false
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+  finalize-updater:
+    name: Finalize updater manifest
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace GitHub API asset URLs with public download URLs
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-finalize"
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json \
+            --dir "$RUNNER_TEMP/release-finalize"
+          gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets > "$RUNNER_TEMP/release-finalize/assets.json"
+          node tools/rewrite-updater-manifest.mjs \
+            "$RUNNER_TEMP/release-finalize/latest.json" \
+            "$RUNNER_TEMP/release-finalize/assets.json" \
+            "$GITHUB_REPOSITORY" \
+            "$GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/release-finalize/latest.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
