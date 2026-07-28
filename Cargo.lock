@@ -60,7 +60,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app-domain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "app-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "app-domain",
  "rusqlite",
@@ -1439,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "git-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "app-domain",
  "libc",
@@ -3221,7 +3221,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "repo-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "app-domain",
  "git-core",
@@ -3584,7 +3584,7 @@ dependencies = [
 
 [[package]]
 name = "secret-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "keyring",
  "thiserror 2.0.18",
@@ -3893,7 +3893,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skibidibi-git-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "app-domain",
  "app-store",
