@@ -45,7 +45,7 @@ describe('ApplicationUpdate', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it('rechecks the exact selected version before the native installer restarts', async () => {
+  it('installs the exact selected version and waits for an explicit restart', async () => {
     invoke
       .mockResolvedValueOnce({
         currentVersion: '0.1.0',
@@ -59,5 +59,37 @@ describe('ApplicationUpdate', () => {
     expect(invoke).toHaveBeenLastCalledWith('application_update_install', {
       expectedVersion: '0.2.0',
     });
+    expect(service.state()).toBe('restartReady');
+    expect(service.promptVisible()).toBe(true);
+  });
+
+  it('reopens a dismissed update from the persistent trigger', async () => {
+    invoke.mockResolvedValueOnce({
+      currentVersion: '0.1.0',
+      update: { version: '0.2.0', body: null, date: null },
+    });
+    await service.check(false);
+    service.dismissAvailableUpdate();
+
+    service.trigger();
+
+    expect(service.promptVisible()).toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts only after an update has been installed', async () => {
+    invoke
+      .mockResolvedValueOnce({
+        currentVersion: '0.1.0',
+        update: { version: '0.2.0', body: null, date: null },
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+    await service.check(false);
+    await service.install();
+
+    await service.restart();
+
+    expect(invoke).toHaveBeenLastCalledWith('application_update_restart', {});
   });
 });

@@ -52,6 +52,7 @@ describe('App', () => {
     const compiled = fixture.nativeElement as HTMLElement;
     const increase = compiled.querySelector('[aria-label="Increase text size"]') as HTMLButtonElement;
     const controls = compiled.querySelector('.app-controls');
+    expect(controls?.querySelector('.update-trigger')?.textContent).toContain('Up to date');
     expect(controls?.querySelector('.font-scale')).not.toBeNull();
     expect(controls?.querySelector('.account-chip')).not.toBeNull();
 

@@ -101,6 +101,11 @@ pub(crate) async fn application_update_install(
         .map_err(updater_error(
             "the application update could not be downloaded or installed",
         ))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn application_update_restart(app: AppHandle) {
     app.restart();
 }
 

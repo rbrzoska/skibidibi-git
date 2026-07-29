@@ -1,22 +1,33 @@
-@if (updater.state() === 'available' || updater.state() === 'installing') {
+@if (updater.promptVisible()) {
   @if (updater.availableUpdate(); as update) {
     <aside class="update-card" role="dialog" aria-labelledby="application-update-title" aria-describedby="application-update-copy">
       <div class="update-mark" aria-hidden="true">↻</div>
       <div class="update-copy">
-        <strong id="application-update-title">Skibidibi Git {{ update.version }} is ready</strong>
-        <p id="application-update-copy">The signed update will be installed, then the application will restart. Finish active Git operations first.</p>
-        @if (update.body) {
-          <details>
-            <summary>Release notes</summary>
-            <p>{{ update.body }}</p>
-          </details>
+        @if (updater.state() === 'restartReady' || updater.state() === 'restarting') {
+          <strong id="application-update-title">Skibidibi Git {{ update.version }} was installed</strong>
+          <p id="application-update-copy">Restart to finish the update. You can restart later without losing the installed update.</p>
+          <div class="update-actions">
+            <button type="button" class="secondary" [disabled]="updater.state() === 'restarting'" (click)="updater.dismissAvailableUpdate()">Later</button>
+            <button type="button" class="primary" [disabled]="updater.state() === 'restarting'" (click)="updater.restart()">
+              {{ updater.state() === 'restarting' ? 'Restarting…' : 'Restart now' }}
+            </button>
+          </div>
+        } @else {
+          <strong id="application-update-title">Skibidibi Git {{ update.version }} is available</strong>
+          <p id="application-update-copy">Download and install the signed update now. You will choose when to restart the application.</p>
+          @if (update.body) {
+            <details>
+              <summary>Release notes</summary>
+              <p>{{ update.body }}</p>
+            </details>
+          }
+          <div class="update-actions">
+            <button type="button" class="secondary" [disabled]="updater.state() === 'installing'" (click)="updater.dismissAvailableUpdate()">Later</button>
+            <button type="button" class="primary" [disabled]="updater.state() === 'installing'" (click)="updater.install()">
+              {{ updater.state() === 'installing' ? 'Installing…' : 'Install update' }}
+            </button>
+          </div>
         }
-        <div class="update-actions">
-          <button type="button" class="secondary" [disabled]="updater.state() === 'installing'" (click)="updater.dismissAvailableUpdate()">Later</button>
-          <button type="button" class="primary" [disabled]="updater.state() === 'installing'" (click)="updater.install()">
-            {{ updater.state() === 'installing' ? 'Installing…' : 'Update and restart' }}
-          </button>
-        </div>
       </div>
     </aside>
   }

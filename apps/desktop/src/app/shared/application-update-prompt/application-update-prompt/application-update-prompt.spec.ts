@@ -10,6 +10,7 @@ describe('ApplicationUpdatePrompt', () => {
   beforeEach(async () => {
     const updater = {
       state: () => 'available',
+      promptVisible: () => true,
       availableUpdate: () => ({
         version: '0.2.0',
         body: 'Release notes',
@@ -17,6 +18,7 @@ describe('ApplicationUpdatePrompt', () => {
       }),
       dismissAvailableUpdate: () => undefined,
       install: () => Promise.resolve(),
+      restart: () => Promise.resolve(),
     };
     await TestBed.configureTestingModule({
       imports: [ApplicationUpdatePrompt],
@@ -28,9 +30,9 @@ describe('ApplicationUpdatePrompt', () => {
     await fixture.whenStable();
   });
 
-  it('presents an explicit update-and-restart decision', () => {
+  it('presents an explicit update installation decision', () => {
     expect(component).toBeTruthy();
-    expect(fixture.nativeElement.textContent).toContain('Skibidibi Git 0.2.0 is ready');
-    expect(fixture.nativeElement.textContent).toContain('Update and restart');
+    expect(fixture.nativeElement.textContent).toContain('Skibidibi Git 0.2.0 is available');
+    expect(fixture.nativeElement.textContent).toContain('Install update');
   });
 });

@@ -1197,6 +1197,10 @@ export interface DesktopIpcContract {
     readonly request: { readonly expectedVersion: string };
     readonly response: void;
   };
+  readonly application_update_restart: {
+    readonly request: Record<string, never>;
+    readonly response: void;
+  };
   readonly set_application_zoom: {
     readonly request: { readonly scale: number };
     readonly response: ApplicationZoomResponse;
@@ -1591,6 +1595,12 @@ export class DesktopIpc implements DesktopIpcClient {
     if (command === 'application_update_install') {
       return Promise.reject(
         new Error('Automatic updates are unavailable outside the desktop application.'),
+      );
+    }
+
+    if (command === 'application_update_restart') {
+      return Promise.reject(
+        new Error('Application restart is unavailable outside the desktop application.'),
       );
     }
 

@@ -15,6 +15,18 @@
   <div class="app-controls">
     <button
       type="button"
+      class="update-trigger"
+      [class.available]="applicationUpdate.state() === 'available'"
+      [class.restart-ready]="applicationUpdate.state() === 'restartReady'"
+      [disabled]="applicationUpdate.triggerDisabled()"
+      [title]="applicationUpdate.triggerLabel()"
+      (click)="applicationUpdate.trigger()"
+    >
+      <span class="update-trigger-icon" [class.spinning]="applicationUpdate.state() === 'checking' || applicationUpdate.state() === 'installing'" aria-hidden="true">↻</span>
+      <span>{{ applicationUpdate.triggerLabel() }}</span>
+    </button>
+    <button
+      type="button"
       class="commander-trigger"
       [class.active]="commander.open()"
       [disabled]="!commander.available()"

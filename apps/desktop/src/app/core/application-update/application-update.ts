@@ -1,4 +1,4 @@
-import { Service, inject, signal } from '@angular/core';
+import { Service, computed, inject, signal } from '@angular/core';
 
 import {
   DESKTOP_IPC,
@@ -12,6 +12,8 @@ export type ApplicationUpdateState =
   | 'upToDate'
   | 'available'
   | 'installing'
+  | 'restartReady'
+  | 'restarting'
   | 'error';
 
 const AUTO_CHECK_STORAGE_KEY = 'skibidibi-git.application-update.auto-check.v1';
@@ -28,6 +30,23 @@ export class ApplicationUpdate {
   readonly lastCheckedAt = signal<Date | null>(null);
   readonly autoCheck = signal(readAutoCheckPreference());
   readonly error = signal<string | null>(null);
+  readonly promptVisible = signal(false);
+  readonly triggerLabel = computed(() => {
+    switch (this.state()) {
+      case 'checking': return 'Checking…';
+      case 'upToDate': return 'Up to date';
+      case 'available': return `Update ${this.availableUpdate()?.version ?? ''}`.trim();
+      case 'installing': return 'Installing…';
+      case 'restartReady': return 'Restart to update';
+      case 'restarting': return 'Restarting…';
+      default: return 'Check updates';
+    }
+  });
+  readonly triggerDisabled = computed(() => (
+    this.state() === 'checking'
+    || this.state() === 'installing'
+    || this.state() === 'restarting'
+  ));
 
   initialize(): void {
     if (this.initialized) {
@@ -60,6 +79,7 @@ export class ApplicationUpdate {
       this.availableUpdate.set(result.update);
       this.lastCheckedAt.set(new Date());
       this.state.set(result.update === null ? 'upToDate' : 'available');
+      this.promptVisible.set(result.update !== null);
       if (announceResult) {
         this.feedback.show(
           result.update === null ? 'success' : 'info',
@@ -80,9 +100,15 @@ export class ApplicationUpdate {
   }
 
   dismissAvailableUpdate(): void {
-    if (this.state() === 'available') {
-      this.state.set('idle');
+    this.promptVisible.set(false);
+  }
+
+  trigger(): void {
+    if (this.state() === 'available' || this.state() === 'restartReady') {
+      this.promptVisible.set(true);
+      return;
     }
+    void this.check();
   }
 
   async install(): Promise<void> {
@@ -97,12 +123,36 @@ export class ApplicationUpdate {
       await this.ipc.invoke('application_update_install', {
         expectedVersion: update.version,
       });
+      this.state.set('restartReady');
+      this.promptVisible.set(true);
+      this.feedback.show(
+        'success',
+        'Update installed',
+        `Version ${update.version} is ready. Restart Skibidibi Git when convenient.`,
+      );
     } catch (error) {
       const message = messageFrom(error, 'The update could not be installed.');
       this.error.set(message);
       this.state.set('available');
       this.feedback.show('error', 'Update not installed', message);
     } finally {
+      this.feedback.setLoading('application-update', false);
+    }
+  }
+
+  async restart(): Promise<void> {
+    if (this.state() !== 'restartReady') {
+      return;
+    }
+    this.state.set('restarting');
+    this.feedback.setLoading('application-update', true, 'Restarting Skibidibi Git…');
+    try {
+      await this.ipc.invoke('application_update_restart', {});
+    } catch (error) {
+      const message = messageFrom(error, 'The application could not be restarted.');
+      this.error.set(message);
+      this.state.set('restartReady');
+      this.feedback.show('error', 'Restart failed', message);
       this.feedback.setLoading('application-update', false);
     }
   }
