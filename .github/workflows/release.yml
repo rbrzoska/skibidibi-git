@@ -31,6 +31,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           node tools/verify-release-version.mjs
+          node tools/verify-windows-installer-policy.mjs
       - name: Check Angular application
         run: |
           pnpm lint

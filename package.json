@@ -1,6 +1,6 @@
 {
   "name": "skibidibi-git",
-  "version": "0.1.4",
+  "version": "0.1.5",
 
   "private": true,
   "packageManager": "pnpm@11.7.0",
@@ -14,7 +14,8 @@
     "tauri": "tauri",
     "build": "pnpm --filter @skibidibi-git/desktop build",
     "lint": "pnpm --filter @skibidibi-git/desktop lint",
-    "test": "pnpm --filter @skibidibi-git/desktop test"
+    "test": "pnpm --filter @skibidibi-git/desktop test",
+    "verify:windows-installer": "node tools/verify-windows-installer-policy.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"
