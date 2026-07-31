@@ -17,6 +17,7 @@ import { GITHUB_BRIDGE, GitHubAccountStore, type GitHubBridge } from '../../core
 import { RepositoryCatalog } from '../../core/repositories/repository-catalog';
 import { branchExpansionStorageKey } from './branch-expansion-state';
 import { releaseBranchStorageKey } from './release-branch-state';
+import { navigationFavoritesStorageKey } from './navigation-favorites-state';
 import { selectPreferredGitHubAccountId, WorkspaceHistory } from './workspace-history';
 
 const rememberedRepository = {
@@ -179,6 +180,7 @@ describe('WorkspaceHistory', () => {
     globalThis.localStorage.removeItem('skibidibi-git.workspace.auto-fetch.skibidibi-git');
     globalThis.localStorage.removeItem('skibidibi-git.workspace.live-changes.skibidibi-git');
     globalThis.localStorage.removeItem(releaseBranchStorageKey('skibidibi-git'));
+    globalThis.localStorage.removeItem(navigationFavoritesStorageKey('skibidibi-git'));
     globalThis.localStorage.removeItem('skibidibi-git.ai-support.v1');
   });
 
@@ -587,6 +589,42 @@ describe('WorkspaceHistory', () => {
     return Promise.reject(new Error(`Unexpected command: ${command}`));
   }
 
+  function unpublishedHeadIpc(
+    override?: (command: string, request: unknown) => Promise<unknown> | null,
+  ) {
+    const status: RepositoryStatusResponse = {
+      ...repositoryStatus(),
+      branch: {
+        ...repositoryStatus().branch,
+        oid: commits[0].oid,
+        ahead: 1,
+      },
+      entries: [],
+    };
+    return (command: string, request: unknown): Promise<unknown> => {
+      const overridden = override?.(command, request);
+      if (overridden !== null && overridden !== undefined) {
+        return overridden;
+      }
+      return command === 'repository_status'
+        ? Promise.resolve(status)
+        : defaultIpc(command, request);
+    };
+  }
+
+  async function inspectFirstCommit(fixture: ComponentFixture<WorkspaceHistory>): Promise<void> {
+    (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+  }
+
+  function openFirstCommitContextMenu(fixture: ComponentFixture<WorkspaceHistory>): HTMLElement {
+    const row = fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement;
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 120 }));
+    fixture.detectChanges();
+    return fixture.nativeElement.querySelector('#commit-context-menu') as HTMLElement;
+  }
+
   async function defaultIpcWithoutCheckedOutFeature(
     command: string,
     request: unknown,
@@ -715,9 +753,9 @@ describe('WorkspaceHistory', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const cherryPick = fixture.nativeElement.querySelector(
-      'button[title="Apply this commit to the current branch"]',
-    ) as HTMLButtonElement;
+    const menu = openFirstCommitContextMenu(fixture);
+    const cherryPick = [...menu.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('Cherry-pick')) as HTMLButtonElement;
     expect(cherryPick.disabled).toBe(false);
     cherryPick.click();
     fixture.detectChanges();
@@ -752,11 +790,10 @@ describe('WorkspaceHistory', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const mode = fixture.nativeElement.querySelector('#commit-reset-mode') as HTMLSelectElement;
-    mode.value = 'hard';
-    mode.dispatchEvent(new Event('change'));
-    fixture.detectChanges();
-    (fixture.nativeElement.querySelector('.reset-action') as HTMLButtonElement).click();
+    const menu = openFirstCommitContextMenu(fixture);
+    const hardReset = [...menu.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('Hard')) as HTMLButtonElement;
+    hardReset.click();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('.destructive-action-description')?.textContent)
@@ -1422,40 +1459,40 @@ describe('WorkspaceHistory', () => {
     expect(historyRequests.at(-1)?.[1]).toMatchObject({ expectedBranchOid: 'after-commit' });
   });
 
-  it('opens amend mode from the workspace toolbar when the working tree is clean', async () => {
-    const cleanStatus = { ...repositoryStatus(), entries: [] };
-    const ipc = (command: string, request: unknown): Promise<unknown> =>
-      command === 'repository_status'
-        ? Promise.resolve(cleanStatus)
-        : defaultIpc(command, request);
-    const { fixture } = await createFixture(ipc);
-    fixture.detectChanges();
+  it('offers amend in the inspector only for the unpushed HEAD commit', async () => {
+    const { fixture } = await createFixture(unpublishedHeadIpc());
+    await inspectFirstCommit(fixture);
 
-    expect(fixture.nativeElement.querySelector('.working-tree-history-row')).toBeNull();
-    const trigger = fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement;
+    expect(fixture.nativeElement.querySelector('.amend-entry')).toBeNull();
+    const trigger = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-block button')]
+      .find((button) => button.textContent?.trim() === 'Amend') as HTMLButtonElement;
+    expect(trigger).toBeTruthy();
     trigger.click();
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.querySelector('.inspector')?.textContent).toContain('Amend HEAD');
-    expect(fixture.nativeElement.querySelector('.commit-composer')).toBeTruthy();
-    await vi.waitFor(() => expect(globalThis.document.activeElement?.id).toBe('commit-message'));
-    const cancel = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
+    const editor = fixture.nativeElement.querySelector('#inspected-commit-message') as HTMLTextAreaElement;
+    expect(editor.value).toContain('Add repository history');
+    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(editor));
+    const cancel = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-actions button')]
       .find((button) => button.textContent?.includes('Cancel')) as HTMLButtonElement;
     cancel.click();
     fixture.detectChanges();
-    await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(trigger));
+    expect(fixture.nativeElement.querySelector('#inspected-commit-message')).toBeNull();
   });
 
   it('amends HEAD with a new message and every optimistic status fingerprint', async () => {
-    const { fixture, invoke } = await createFixture(defaultIpc);
-    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    const { fixture, invoke } = await createFixture(unpublishedHeadIpc());
+    await inspectFirstCommit(fixture);
+    const trigger = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-block button')]
+      .find((button) => button.textContent?.trim() === 'Amend') as HTMLButtonElement;
+    trigger.click();
     fixture.detectChanges();
-    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    const textarea = fixture.nativeElement.querySelector('#inspected-commit-message') as HTMLTextAreaElement;
     textarea.value = 'Replacement message';
     textarea.dispatchEvent(new Event('input'));
     fixture.detectChanges();
-    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
-      .find((button) => button.textContent?.includes('new message')) as HTMLButtonElement;
+    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-actions button')]
+      .find((button) => button.textContent?.includes('Amend commit')) as HTMLButtonElement;
     amend.click();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -1465,7 +1502,7 @@ describe('WorkspaceHistory', () => {
       operation: {
         message: 'Replacement message',
         confirmUpstreamRewrite: false,
-        expectedHead: 'abc',
+        expectedHead: commits[0].oid,
         expectedHeadName: 'main',
         expectedDetached: false,
         expectedUnborn: false,
@@ -1475,108 +1512,100 @@ describe('WorkspaceHistory', () => {
     });
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_history')).toHaveLength(2);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation')).toHaveLength(2);
-    expect(fixture.nativeElement.querySelector('.commit-composer')).toBeNull();
+    expect(fixture.nativeElement.querySelector('#inspected-commit-message')).toBeNull();
   });
 
-  it('confirms an upstream rewrite, supports no-edit amend, and blocks duplicate submission', async () => {
-    let resolveAmend!: (value: unknown) => void;
-    const pendingAmend = new Promise((resolve) => { resolveAmend = resolve; });
+  it('does not offer amend when HEAD is already published upstream', async () => {
     const publishedStatus = {
       ...repositoryStatus(),
-      branch: { ...repositoryStatus().branch, ahead: 0 },
+      branch: { ...repositoryStatus().branch, oid: commits[0].oid, ahead: 0 },
+      entries: [],
     };
     const ipc = (command: string, request: unknown): Promise<unknown> => {
       if (command === 'repository_status') {
         return Promise.resolve(publishedStatus);
       }
-      if (command === 'repository_amend_commit') {
-        return pendingAmend;
-      }
       return defaultIpc(command, request);
     };
-    const { fixture, invoke } = await createFixture(ipc);
-    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
-    fixture.detectChanges();
-    const keepMessage = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
-      .find((button) => button.textContent?.includes('keep message')) as HTMLButtonElement;
-    keepMessage.click();
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('#destructive-action-title')?.textContent).toContain('published');
-    (fixture.nativeElement.querySelector('#confirm-destructive-action') as HTMLButtonElement).click();
-    fixture.detectChanges();
-    keepMessage.click();
+    const { fixture } = await createFixture(ipc);
+    await inspectFirstCommit(fixture);
+    expect(fixture.nativeElement.querySelector('.commit-message-block')?.textContent).not.toContain('Amend');
+  });
 
-    expect(invoke.mock.calls.filter(([command]) => command === 'repository_amend_commit')).toHaveLength(1);
-    expect(invoke).toHaveBeenCalledWith('repository_amend_commit', expect.objectContaining({
-      operation: expect.objectContaining({ message: null, confirmUpstreamRewrite: true }),
-    }));
+  it('closes the amend editor when another commit is selected', async () => {
+    const { fixture } = await createFixture(unpublishedHeadIpc());
+    await inspectFirstCommit(fixture);
+    const trigger = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-block button')]
+      .find((button) => button.textContent?.trim() === 'Amend') as HTMLButtonElement;
+    trigger.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#inspected-commit-message')).toBeTruthy();
 
-    resolveAmend({
-      previousOid: 'abc',
-      oid: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-      state: 'succeeded',
-      errorMessage: null,
-      status: { ...publishedStatus, branch: { ...publishedStatus.branch, oid: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' }, entries: [] },
-    });
-    await pendingAmend;
+    (fixture.nativeElement.querySelectorAll('.commit-row')[1] as HTMLButtonElement).click();
     await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('#inspected-commit-message')).toBeNull();
   });
 
   it('keeps amend mode and its message after a failed amend and refreshes status', async () => {
-    const ipc = (command: string, request: unknown): Promise<unknown> =>
+    const ipc = unpublishedHeadIpc((command) =>
       command === 'repository_amend_commit'
         ? Promise.reject({ message: 'pre-commit hook rejected amend' })
-        : defaultIpc(command, request);
+        : null);
     const { fixture, invoke } = await createFixture(ipc);
-    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    await inspectFirstCommit(fixture);
+    const trigger = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-block button')]
+      .find((button) => button.textContent?.trim() === 'Amend') as HTMLButtonElement;
+    trigger.click();
     fixture.detectChanges();
-    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    const textarea = fixture.nativeElement.querySelector('#inspected-commit-message') as HTMLTextAreaElement;
     textarea.value = 'Keep amended message';
     textarea.dispatchEvent(new Event('input'));
     fixture.detectChanges();
-    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
-      .find((button) => button.textContent?.includes('new message')) as HTMLButtonElement;
+    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-actions button')]
+      .find((button) => button.textContent?.includes('Amend commit')) as HTMLButtonElement;
     amend.click();
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value).toBe('Keep amended message');
-    expect(fixture.nativeElement.querySelector('.commit-composer')?.textContent).toContain('Amend HEAD');
+    expect((fixture.nativeElement.querySelector('#inspected-commit-message') as HTMLTextAreaElement).value).toBe('Keep amended message');
     expect(fixture.nativeElement.querySelector('[role="alert"]')?.textContent).toContain('pre-commit hook rejected amend');
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
   });
 
   it('preserves amend input and requires inspection when the backend outcome is unknown', async () => {
-    const ipc = (command: string, request: unknown): Promise<unknown> =>
+    const ipc = unpublishedHeadIpc((command) =>
       command === 'repository_amend_commit'
         ? Promise.resolve({
-            previousOid: 'abc',
+            previousOid: commits[0].oid,
             oid: null,
             status: null,
             state: 'outcomeUnknown',
             errorMessage: 'Git exited before the new HEAD could be verified.',
           })
-        : defaultIpc(command, request);
+        : null);
     const { fixture, invoke } = await createFixture(ipc);
-    (fixture.nativeElement.querySelector('.amend-entry') as HTMLButtonElement).click();
+    await inspectFirstCommit(fixture);
+    const trigger = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-block button')]
+      .find((button) => button.textContent?.trim() === 'Amend') as HTMLButtonElement;
+    trigger.click();
     fixture.detectChanges();
-    const textarea = fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement;
+    const textarea = fixture.nativeElement.querySelector('#inspected-commit-message') as HTMLTextAreaElement;
     textarea.value = 'Message that must survive';
     textarea.dispatchEvent(new Event('input'));
     fixture.detectChanges();
-    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-composer-actions button')]
-      .find((button) => button.textContent?.includes('new message')) as HTMLButtonElement;
+    const amend = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.commit-message-actions button')]
+      .find((button) => button.textContent?.includes('Amend commit')) as HTMLButtonElement;
     amend.click();
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect((fixture.nativeElement.querySelector('#commit-message') as HTMLTextAreaElement).value).toBe('Message that must survive');
-    expect(fixture.nativeElement.querySelector('.working-tree-action-error')?.textContent).toContain('outcome is unknown');
-    expect(fixture.nativeElement.querySelector('.working-tree-action-error')?.textContent).toContain('before the new HEAD could be verified');
+    expect((fixture.nativeElement.querySelector('#inspected-commit-message') as HTMLTextAreaElement).value).toBe('Message that must survive');
+    expect(fixture.nativeElement.querySelector('.commit-message-generation-error')?.textContent).toContain('outcome is unknown');
+    expect(fixture.nativeElement.querySelector('.commit-message-generation-error')?.textContent).toContain('before the new HEAD could be verified');
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_amend_commit')).toHaveLength(1);
     expect(invoke.mock.calls.filter(([command]) => command === 'repository_status').length).toBeGreaterThan(1);
-    expect(invoke.mock.calls.filter(([command]) => command === 'repository_history').length).toBeGreaterThan(1);
-    expect(invoke.mock.calls.filter(([command]) => command === 'repository_navigation').length).toBeGreaterThan(1);
   });
 
   it('keeps duplicate paths independently selectable by entry identity', async () => {
@@ -1712,7 +1741,31 @@ describe('WorkspaceHistory', () => {
       'refs/heads/main',
     );
     expect(fixture.nativeElement.querySelector('[title="Release branch"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[title="Release branch"]').textContent.trim()).toBe('◆Release');
     expect(fixture.nativeElement.textContent).toContain('is now the release branch');
+  });
+
+  it('persists branch favorites and shows them in a compact navigation section', async () => {
+    const { fixture } = await createFixture(defaultIpc);
+    (fixture.nativeElement.querySelector('[aria-label="Actions for main"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const addFavorite = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>(
+      '.branch-context-menu button',
+    )].find((button) => button.textContent?.includes('Add to favorites')) as HTMLButtonElement;
+
+    addFavorite.click();
+    fixture.detectChanges();
+
+    const favorites = fixture.nativeElement.querySelector('.favorites-section') as HTMLElement;
+    expect(favorites.textContent).toContain('main');
+    expect(favorites.textContent).toContain('branch');
+    expect(JSON.parse(
+      globalThis.localStorage.getItem(navigationFavoritesStorageKey('skibidibi-git')) ?? '{}',
+    )).toMatchObject({ branches: ['refs/heads/main'] });
+
+    (favorites.querySelector('[aria-label="Remove main from favorites"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.favorites-section')).toBeNull();
   });
 
   it('renders a lazy dirty marker only for the branch attached to a dirty worktree', async () => {
@@ -1728,6 +1781,101 @@ describe('WorkspaceHistory', () => {
     expect(
       (local.querySelector('.pinned-current') as HTMLElement).querySelector('.dirty-token'),
     ).toBeTruthy();
+    expect(local.querySelector('.dirty-token')?.textContent.trim()).toBe('✦U');
+  });
+
+  it('suggests safe cleanup candidates and removes only explicitly selected items', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_navigation') {
+        return Promise.resolve({
+          branches: [
+            { kind: 'local', fullName: 'refs/heads/main', name: 'main', oid: 'base', current: true, upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+            { kind: 'local', fullName: 'refs/heads/gone', name: 'gone', oid: 'gone-oid', current: false, upstream: 'origin/gone', ahead: 0, behind: 0, upstreamGone: true, symbolicTarget: null },
+            { kind: 'local', fullName: 'refs/heads/behind', name: 'behind', oid: 'behind-oid', current: false, upstream: 'origin/behind', ahead: 0, behind: 4, upstreamGone: false, symbolicTarget: null },
+            { kind: 'local', fullName: 'refs/heads/work', name: 'work', oid: 'base', current: false, upstream: null, ahead: 0, behind: 0, upstreamGone: false, symbolicTarget: null },
+          ],
+          worktrees: [
+            { path: '/work/skibidibi-git', head: 'base', branch: 'refs/heads/main', detached: false, bare: false, locked: false, lockReason: null, prunable: false, prunableReason: null },
+            { path: '/work/old-tree', head: 'base', branch: 'refs/heads/work', detached: false, bare: false, locked: false, lockReason: null, prunable: false, prunableReason: null },
+          ],
+          stashes: [],
+        });
+      }
+      if (command === 'repository_worktree_dirty_states') {
+        return Promise.resolve({ states: [] });
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const cleanupTrigger = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('Clean up')) as HTMLButtonElement;
+
+    cleanupTrigger.click();
+    fixture.detectChanges();
+    const dialog = fixture.nativeElement.querySelector('.cleanup-dialog') as HTMLElement;
+    const worktreeGroup = dialog.querySelector('.worktree-cleanup-group') as HTMLElement;
+    const branchGroup = dialog.querySelector('.branch-cleanup-group') as HTMLElement;
+    expect(worktreeGroup.textContent).toContain('WORKTREE');
+    expect(worktreeGroup.textContent).toContain('old-tree');
+    expect(worktreeGroup.textContent).toContain('work');
+    expect(worktreeGroup.textContent).toContain('selected with worktree');
+    expect(branchGroup.textContent).toContain('BRANCH');
+    expect(branchGroup.textContent).toContain('gone');
+    expect(branchGroup.textContent).toContain('behind');
+    expect(branchGroup.textContent).not.toContain('old-tree');
+    const linkedBranchSelection = worktreeGroup.querySelector(
+      '[aria-label="Delete linked branch work together with its worktree"]',
+    ) as HTMLElement;
+    const worktreeSelection = worktreeGroup.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(linkedBranchSelection.getAttribute('aria-checked')).toBe('true');
+    worktreeSelection.click();
+    fixture.detectChanges();
+    expect(linkedBranchSelection.getAttribute('aria-checked')).toBe('false');
+    expect(dialog.textContent).toContain('0 linked branches');
+    worktreeSelection.click();
+    fixture.detectChanges();
+    expect(linkedBranchSelection.getAttribute('aria-checked')).toBe('true');
+    expect(dialog.textContent).toContain('Upstream no longer exists');
+    expect(dialog.textContent).toContain('No local commits; 4 behind upstream');
+    expect(dialog.textContent).toContain('Already at main');
+    expect(dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')).toHaveLength(3);
+    const unselectAll = [...dialog.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('Unselect all')) as HTMLButtonElement;
+    const selectSuggestions = [...dialog.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('Select suggestions')) as HTMLButtonElement;
+    unselectAll.click();
+    fixture.detectChanges();
+    expect(dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')).toHaveLength(0);
+    expect(linkedBranchSelection.getAttribute('aria-checked')).toBe('false');
+    expect(unselectAll.disabled).toBe(true);
+    selectSuggestions.click();
+    fixture.detectChanges();
+    expect(dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')).toHaveLength(3);
+    expect(linkedBranchSelection.getAttribute('aria-checked')).toBe('true');
+
+    const behind = [...dialog.querySelectorAll<HTMLLabelElement>('label')]
+      .find((label) => label.textContent?.includes('behind'))?.querySelector('input') as HTMLInputElement;
+    behind.click();
+    fixture.detectChanges();
+    (dialog.querySelector('.reference-confirmation-actions .danger') as HTMLButtonElement).click();
+    await fixture.whenStable();
+
+    expect(invoke).toHaveBeenCalledWith('delete_repository_branch', {
+      repositoryId: 'skibidibi-git',
+      fullName: 'refs/heads/gone',
+      expectedOid: 'gone-oid',
+    });
+    expect(invoke).not.toHaveBeenCalledWith('delete_repository_branch', expect.objectContaining({
+      fullName: 'refs/heads/behind',
+    }));
+    expect(invoke).toHaveBeenCalledWith('remove_repository_worktree', {
+      repositoryId: 'skibidibi-git',
+      path: '/work/old-tree',
+      expectedHead: 'base',
+      branchFullName: 'refs/heads/work',
+      mode: 'safe',
+      stashMessage: null,
+    });
   });
 
   it('uses an in-app source-to-target confirmation and forwards auto-stash to merge', async () => {
@@ -2251,14 +2399,17 @@ describe('WorkspaceHistory', () => {
     await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(newBranch));
   });
 
-  it('creates a branch from the exact selected commit and returns focus to its inspector action', async () => {
+  it('creates a branch from the exact selected commit context menu and returns focus to its history row', async () => {
     const { fixture, invoke } = await createFixture(defaultIpc);
     (fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const trigger = fixture.nativeElement.querySelector('.create-branch-from-commit') as HTMLButtonElement;
-    trigger.click();
+    const trigger = fixture.nativeElement.querySelector('.commit-row') as HTMLButtonElement;
+    const menu = openFirstCommitContextMenu(fixture);
+    const createBranch = [...menu.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('New branch here')) as HTMLButtonElement;
+    createBranch.click();
     fixture.detectChanges();
     const input = fixture.nativeElement.querySelector('#new-branch-name') as HTMLInputElement;
     await vi.waitFor(() => expect(globalThis.document.activeElement).toBe(input));
@@ -3366,6 +3517,8 @@ describe('WorkspaceHistory', () => {
     expect(localRows[1].textContent).toContain('feature');
     expect(worktreeRows[0].textContent).toContain('main');
     expect(worktreeRows[0].textContent).toContain('current');
+    expect(worktreeRows[0].classList.contains('current-worktree')).toBe(true);
+    expect(worktreeRows[0].getAttribute('aria-current')).toBe('true');
   });
 
   it('opens a file diff and closes it without refetching commit details', async () => {

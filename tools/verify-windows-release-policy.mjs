@@ -1,7 +1,9 @@
 import { readFile } from 'node:fs/promises';
 
 const configPath = new URL('../apps/desktop/src-tauri/tauri.conf.json', import.meta.url);
+const mainPath = new URL('../apps/desktop/src-tauri/src/main.rs', import.meta.url);
 const config = JSON.parse(await readFile(configPath, 'utf8'));
+const mainSource = await readFile(mainPath, 'utf8');
 const windowsBundle = config.bundle?.windows;
 
 if (config.productName !== 'Skibidibi Git') {
@@ -22,4 +24,14 @@ if (windowsBundle?.wix?.enableElevatedUpdateTask !== true) {
   );
 }
 
-console.log('Windows installer policy is valid.');
+if (
+  !mainSource.startsWith(
+    '#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]\n',
+  )
+) {
+  throw new Error(
+    'Production builds must use the Windows GUI subsystem so launching the desktop app does not open a controlling console window.',
+  );
+}
+
+console.log('Windows release policy is valid.');

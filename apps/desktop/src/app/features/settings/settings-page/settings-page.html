@@ -30,11 +30,28 @@
           </small>
         </span>
         @if (applicationUpdate.availableUpdate(); as update) {
-          <button type="button" class="compact-button" [disabled]="applicationUpdate.state() === 'installing'" (click)="applicationUpdate.install()">Install {{ update.version }}</button>
+          <span class="update-row-actions">
+            <button type="button" class="compact-button" (click)="applicationUpdate.showReleaseNotes()">View details</button>
+            <button type="button" class="compact-button primary-compact" [disabled]="applicationUpdate.state() === 'installing'" (click)="applicationUpdate.install()">Install {{ update.version }}</button>
+          </span>
         } @else {
-          <span class="update-state">{{ applicationUpdate.state() === 'upToDate' ? 'Up to date' : '' }}</span>
+          <span class="update-row-actions">
+            <span class="update-state">{{ applicationUpdate.state() === 'upToDate' ? 'Up to date' : '' }}</span>
+            <button type="button" class="compact-button" [disabled]="applicationUpdate.currentVersion() === null" (click)="applicationUpdate.showReleaseNotes()">What’s new</button>
+          </span>
         }
       </div>
+      @if (applicationUpdate.releaseNotesMarkdown()) {
+        <details class="release-history">
+          <summary>
+            <span><strong>Release history</strong><small>Browse changes included in recent Skibidibi Git versions.</small></span>
+            <span aria-hidden="true">⌄</span>
+          </summary>
+          <div class="release-history-content">
+            <app-safe-markdown [source]="applicationUpdate.releaseNotesMarkdown()" />
+          </div>
+        </details>
+      }
     </div>
   </section>
 
@@ -221,6 +238,20 @@
         }
       </ul>
     }
+  </section>
+
+  <section class="settings-section" aria-labelledby="legal-heading">
+    <h2 id="legal-heading">Privacy &amp; support</h2>
+    <div class="settings-card resource-links">
+      <a href="https://github.com/rbrzoska/skibidibi-git/blob/main/PRIVACY.md" target="_blank" rel="noreferrer">
+        <span><strong>Privacy policy</strong><small>What the app processes locally and which optional features contact external services.</small></span>
+        <span aria-hidden="true">↗</span>
+      </a>
+      <a href="https://github.com/rbrzoska/skibidibi-git/issues" target="_blank" rel="noreferrer">
+        <span><strong>Support</strong><small>Report a problem without publishing tokens, private code, or other secrets.</small></span>
+        <span aria-hidden="true">↗</span>
+      </a>
+    </div>
   </section>
 </main>
 

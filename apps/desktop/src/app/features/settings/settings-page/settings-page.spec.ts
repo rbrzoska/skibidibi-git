@@ -160,11 +160,15 @@ describe('SettingsPage', () => {
     expect(text).toContain('256 KiB');
     expect(text).not.toContain('Cloning preferences');
     expect(text).toContain('Storage — repository & worktree size / age');
+    expect(text).toContain('Privacy & support');
+    expect(text).toContain('Privacy policy');
     expect(text).toContain('skibidibi-git');
     expect(text).toContain('Available');
     expect(text).toContain('Repositories');
     expect((fixture.nativeElement as HTMLElement).querySelector<HTMLAnchorElement>('.back-link')?.getAttribute('href'))
       .toBe('/repositories');
+    expect((fixture.nativeElement as HTMLElement).querySelector<HTMLAnchorElement>('.resource-links a')?.href)
+      .toBe('https://github.com/rbrzoska/skibidibi-git/blob/main/PRIVACY.md');
   });
 
   it('persists a selected diagnostic limit and opens the native bounded log viewer', async () => {

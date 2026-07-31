@@ -16,7 +16,10 @@ describe('ApplicationUpdatePrompt', () => {
         body: 'Release notes',
         date: null,
       }),
+      displayVersion: () => '0.2.0',
+      displayReleaseNotes: () => '## 0.2.0\n\n- Release notes',
       dismissAvailableUpdate: () => undefined,
+      check: () => Promise.resolve(),
       install: () => Promise.resolve(),
       restart: () => Promise.resolve(),
     };

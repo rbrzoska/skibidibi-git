@@ -56,6 +56,41 @@
       <button type="button" role="menuitem" [disabled]="workspaceActionBusy() || menu.worktree.detached" [title]="menu.worktree.detached ? 'A detached worktree has no local branch to open.' : 'Reveal this worktree in Finder or Explorer.'" (click)="openWorktreeInApplication('system')">
         <span aria-hidden="true">▣</span>Open in Finder / Explorer
       </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="toggleFavoriteWorktree(menu.worktree)">
+        <span aria-hidden="true">{{ isFavoriteWorktree(menu.worktree) ? '★' : '☆' }}</span>{{ isFavoriteWorktree(menu.worktree) ? 'Remove from favorites' : 'Add to favorites' }}
+      </button>
+    </div>
+  }
+  @if (commitContextMenu(); as menu) {
+    <div
+      id="commit-context-menu"
+      class="branch-context-menu commit-context-menu"
+      role="menu"
+      tabindex="-1"
+      [attr.aria-label]="'Actions for commit ' + shortOid(menu.commit.oid)"
+      [style.left.px]="menu.x"
+      [style.top.px]="menu.y"
+    >
+      <p><code>{{ shortOid(menu.commit.oid) }}</code> {{ menu.commit.summary }}</p>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="createBranchFromCommitContextMenu()">
+        <app-icon name="branch" />New branch here
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy() || menu.commit.parents.length > 1" (click)="requestCherryPickFromContextMenu()">
+        <app-icon name="cherry-pick" />Cherry-pick to active branch
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy() || menu.commit.parents.length > 1" (click)="requestRevertFromContextMenu()">
+        <app-icon name="history" />Revert on active branch
+      </button>
+      <span class="commit-context-section">Reset active branch to this commit</span>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="requestResetFromContextMenu('soft')">
+        <app-icon name="reset" />Soft — keep index and files
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="requestResetFromContextMenu('mixed')">
+        <app-icon name="reset" />Mixed — unstage, keep files
+      </button>
+      <button type="button" role="menuitem" class="danger-menu-item" [disabled]="workspaceActionBusy()" (click)="requestResetFromContextMenu('hard')">
+        <app-icon name="trash" />Hard — discard tracked changes
+      </button>
     </div>
   }
   @if (branchContextMenu(); as menu) {
@@ -90,6 +125,9 @@
       </button>
       <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="toggleReleaseBranch(menu.branch)">
         <span aria-hidden="true">◆</span>{{ isReleaseBranch(menu.branch) ? 'Unmark release' : 'Mark as release' }}
+      </button>
+      <button type="button" role="menuitem" [disabled]="workspaceActionBusy()" (click)="toggleFavoriteBranch(menu.branch)">
+        <span aria-hidden="true">{{ isFavoriteBranch(menu.branch) ? '★' : '☆' }}</span>{{ isFavoriteBranch(menu.branch) ? 'Remove from favorites' : 'Add to favorites' }}
       </button>
       <button
         type="button"
@@ -314,6 +352,126 @@
       </div>
     </dialog>
   }
+  @if (cleanupDialogOpen()) {
+    <dialog
+      #cleanupDialog
+      class="reference-confirmation cleanup-dialog"
+      aria-labelledby="cleanup-dialog-title"
+      aria-describedby="cleanup-dialog-description"
+      (cancel)="$event.preventDefault(); closeCleanup()"
+    >
+      <app-skibi-bot class="dialog-bot" mood="neutral" />
+      <p class="eyebrow"><app-icon name="trash" /> repository cleanup</p>
+      <h2 id="cleanup-dialog-title">Review branches and worktrees</h2>
+      <p id="cleanup-dialog-description" class="reference-confirmation-description">
+        Suggestions use current Git signals, not folder age. Cleanup is safe: dirty worktrees and unmerged branches are refused rather than forced.
+      </p>
+      <div class="cleanup-toolbar">
+        <span>
+          <strong>{{ selectedCleanupCount() }}</strong> selected ·
+          {{ selectedCleanupSummary().worktrees }} worktrees ·
+          {{ selectedCleanupSummary().linkedBranches }} linked branches ·
+          {{ selectedCleanupSummary().standaloneBranches }} standalone branches
+        </span>
+        <span class="cleanup-toolbar-actions">
+          <button type="button" [disabled]="cleanupMutation() || selectedCleanupCount() === 0" (click)="clearCleanupSelection()">Unselect all</button>
+          <button type="button" [disabled]="cleanupMutation()" (click)="selectRecommendedCleanupItems()">Select suggestions</button>
+        </span>
+      </div>
+      <div class="cleanup-groups">
+        <section class="cleanup-group worktree-cleanup-group" aria-labelledby="cleanup-worktrees-title">
+          <header>
+            <span id="cleanup-worktrees-title"><span class="cleanup-type-badge worktree">WORKTREE</span> Worktrees with linked branches</span>
+            <strong>{{ cleanupWorktreeItems().length }}</strong>
+          </header>
+          <ul class="cleanup-list" aria-label="Worktrees available for cleanup">
+            @for (item of cleanupWorktreeItems(); track item.id) {
+              <li [class.recommended]="item.recommendation !== null" [class.protected]="item.disabledReason !== null">
+                <label>
+                  <input
+                    type="checkbox"
+                    [checked]="cleanupSelection().has(item.id)"
+                    [disabled]="cleanupMutation() || item.disabledReason !== null"
+                    (change)="setCleanupItemSelected(item.id, $any($event.target).checked)"
+                  />
+                  <span class="cleanup-kind worktree" aria-hidden="true">⌂</span>
+                  <span class="cleanup-copy">
+                    <strong>{{ item.label }}</strong>
+                    <small [title]="item.worktree.path">{{ item.worktree.path }}</small>
+                    @if (item.branchFullName) {
+                      <span class="cleanup-linked-branch">
+                        <span aria-hidden="true">└─</span>
+                        <span
+                          class="cleanup-linked-selection"
+                          role="checkbox"
+                          [attr.aria-label]="'Delete linked branch ' + worktreeBranchLabel(item.worktree) + ' together with its worktree'"
+                          [attr.aria-checked]="cleanupSelection().has(item.id)"
+                          aria-disabled="true"
+                        >{{ cleanupSelection().has(item.id) ? '✓' : '' }}</span>
+                        <span aria-hidden="true">⑂</span>
+                        {{ worktreeBranchLabel(item.worktree) }}
+                        <em>selected with worktree</em>
+                      </span>
+                    } @else {
+                      <span class="cleanup-linked-branch detached">Detached HEAD · no linked branch</span>
+                    }
+                  </span>
+                  @if (item.recommendation) {
+                    <span class="cleanup-reason">{{ item.recommendation }}</span>
+                  } @else if (item.disabledReason) {
+                    <span class="cleanup-protected">{{ item.disabledReason }}</span>
+                  }
+                </label>
+              </li>
+            } @empty {
+              <li class="cleanup-empty">No linked worktrees.</li>
+            }
+          </ul>
+        </section>
+        <section class="cleanup-group branch-cleanup-group" aria-labelledby="cleanup-branches-title">
+          <header>
+            <span id="cleanup-branches-title"><span class="cleanup-type-badge branch">BRANCH</span> Standalone local branches</span>
+            <strong>{{ cleanupBranchItems().length }}</strong>
+          </header>
+          <ul class="cleanup-list" aria-label="Standalone branches available for cleanup">
+            @for (item of cleanupBranchItems(); track item.id) {
+              <li [class.recommended]="item.recommendation !== null" [class.protected]="item.disabledReason !== null">
+                <label>
+                  <input
+                    type="checkbox"
+                    [checked]="cleanupSelection().has(item.id)"
+                    [disabled]="cleanupMutation() || item.disabledReason !== null"
+                    (change)="setCleanupItemSelected(item.id, $any($event.target).checked)"
+                  />
+                  <span class="cleanup-kind branch" aria-hidden="true">⑂</span>
+                  <span class="cleanup-copy">
+                    <strong>{{ item.label }}</strong>
+                    <small [title]="item.detail">{{ item.detail }}</small>
+                  </span>
+                  @if (item.recommendation) {
+                    <span class="cleanup-reason">{{ item.recommendation }}</span>
+                  } @else if (item.disabledReason) {
+                    <span class="cleanup-protected">{{ item.disabledReason }}</span>
+                  }
+                </label>
+              </li>
+            } @empty {
+              <li class="cleanup-empty">No standalone local branches.</li>
+            }
+          </ul>
+        </section>
+      </div>
+      @if (cleanupError()) {
+        <pre class="cleanup-error" role="alert">{{ cleanupError() }}</pre>
+      }
+      <div class="reference-confirmation-actions">
+        <button type="button" [disabled]="cleanupMutation()" (click)="closeCleanup()"><app-icon name="close" />Cancel</button>
+        <button type="button" class="danger" [disabled]="cleanupMutation() || selectedCleanupCount() === 0" (click)="runCleanup()">
+          <app-icon name="trash" />{{ cleanupMutation() ? 'Cleaning…' : 'Remove selected safely' }}
+        </button>
+      </div>
+    </dialog>
+  }
   @if (stashCreationOpen()) {
     <dialog
       #stashCreationDialog
@@ -353,13 +511,6 @@
     </span>
     <span class="branch-pill">⑂ {{ branchName() }}</span>
     <button type="button" [disabled]="workspaceActionBusy()" (click)="startBranchFromCurrent($any($event.currentTarget))"><app-icon name="branch" />New branch</button>
-    <button
-      type="button"
-      class="amend-entry"
-      [disabled]="amendUnavailable()"
-      title="Replace the current HEAD commit"
-      (click)="startAmend($any($event.currentTarget))"
-    ><app-icon name="amend" />Amend</button>
     <div class="network-actions" aria-label="Remote synchronization">
       <label>
         <span>Pull strategy</span>
@@ -440,6 +591,9 @@
           <input type="checkbox" [checked]="liveChanges()" (change)="setLiveChanges($any($event.target).checked)" />
           <span>Live changes</span>
         </label>
+        <button type="button" class="cleanup-trigger" [disabled]="workspaceActionBusy()" (click)="openCleanup($any($event.currentTarget))">
+          <app-icon name="trash" />Clean up…
+        </button>
       </div>
       @let navigation = navigationState();
       @if (navigation.kind === 'loading') {
@@ -447,6 +601,50 @@
       } @else if (navigation.kind === 'error') {
         <div class="navigation-state error-state"><p>{{ navigation.message }}</p><button type="button" (click)="loadNavigation()">Retry</button></div>
       } @else {
+        @if (!currentOnly() && hasNavigationFavorites()) {
+          <details class="favorites-section" open>
+            <summary><span>Favorites</span><strong>{{ favoriteBranches().length + favoriteWorktrees().length }}</strong></summary>
+            <ul class="favorite-list" aria-label="Favorite branches and worktrees">
+              @for (branch of favoriteBranches(); track 'branch:' + branch.fullName) {
+                <li>
+                  <div class="tree-action-row">
+                    <button
+                      type="button"
+                      class="tree-row favorite-row"
+                      [class.active]="branch.current"
+                      [title]="branch.current ? 'Active branch' : 'Preview favorite branch ' + branch.name"
+                      (click)="branch.current ? returnToActiveHistory() : previewBranch(branch)"
+                    >
+                      <span class="favorite-star" aria-hidden="true">★</span>
+                      <span class="tree-label">{{ branch.name }}</span>
+                      <small>branch</small>
+                    </button>
+                    <button type="button" class="favorite-remove" [attr.aria-label]="'Remove ' + branch.name + ' from favorites'" title="Remove from favorites" (click)="toggleFavoriteBranch(branch)">×</button>
+                  </div>
+                </li>
+              }
+              @for (worktree of favoriteWorktrees(); track 'worktree:' + worktree.path) {
+                <li>
+                  <div class="tree-action-row">
+                    <button
+                      type="button"
+                      class="tree-row favorite-row"
+                      [class.active]="isCurrentWorktree(worktree)"
+                      [disabled]="workspaceActionBusy() || worktreeDisabledReason(worktree) !== null"
+                      [title]="worktree.path"
+                      (click)="openWorktree(worktree)"
+                    >
+                      <span class="favorite-star" aria-hidden="true">★</span>
+                      <span class="tree-label">{{ worktreeDisplayName(worktree) }}</span>
+                      <small>worktree</small>
+                    </button>
+                    <button type="button" class="favorite-remove" [attr.aria-label]="'Remove ' + worktreeDisplayName(worktree) + ' from favorites'" title="Remove from favorites" (click)="toggleFavoriteWorktree(worktree)">×</button>
+                  </div>
+                </li>
+              }
+            </ul>
+          </details>
+        }
         <details open>
           <summary><span>Local branches</span><strong>{{ currentOnly() ? (currentLocalBranch() ? 1 : 0) : localBranches().length }}</strong></summary>
           @if (localBranchTree().length === 0 && currentLocalBranch() === null) {
@@ -460,8 +658,8 @@
                     <span class="branch-icon" aria-hidden="true">⑂</span>
                     <span class="tree-label">{{ currentBranch.name }}</span>
                     <span class="branch-badges">
-                      @if (isReleaseBranch(currentBranch)) { <small class="release-token" title="Release branch"><span aria-hidden="true">◆</span><span class="sr-only">Release branch</span></small> }
-                      @if (branchDirtyChangeCount(currentBranch) > 0) { <small class="dirty-token" [title]="branchDirtyChangeCount(currentBranch) + ' uncommitted changes in its worktree'"><span aria-hidden="true">✦</span><span class="sr-only">Uncommitted changes</span></small> }
+                      @if (isReleaseBranch(currentBranch)) { <small class="release-token" title="Release branch"><span aria-hidden="true">◆</span>Release</small> }
+                      @if (branchDirtyChangeCount(currentBranch) > 0) { <small class="dirty-token" [title]="branchDirtyChangeCount(currentBranch) + ' uncommitted changes in its worktree'"><span aria-hidden="true">✦</span>U</small> }
                       @if (currentBranch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ currentBranch.ahead }}</small> }
                       @if (currentBranch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ currentBranch.behind }}</small> }
                       @if (currentBranch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
@@ -502,8 +700,8 @@
                         <small>switching…</small>
                       } @else {
                         <span class="branch-badges">
-                          @if (isReleaseBranch(node.branch)) { <small class="release-token" title="Release branch"><span aria-hidden="true">◆</span><span class="sr-only">Release branch</span></small> }
-                          @if (branchDirtyChangeCount(node.branch) > 0) { <small class="dirty-token" [title]="branchDirtyChangeCount(node.branch) + ' uncommitted changes in its worktree'"><span aria-hidden="true">✦</span><span class="sr-only">Uncommitted changes</span></small> }
+                          @if (isReleaseBranch(node.branch)) { <small class="release-token" title="Release branch"><span aria-hidden="true">◆</span>Release</small> }
+                          @if (branchDirtyChangeCount(node.branch) > 0) { <small class="dirty-token" [title]="branchDirtyChangeCount(node.branch) + ' uncommitted changes in its worktree'"><span aria-hidden="true">✦</span>U</small> }
                           @if (node.branch.ahead > 0) { <small class="ahead-token" title="Ahead of upstream">↑{{ node.branch.ahead }}</small> }
                           @if (node.branch.behind > 0) { <small class="behind-token" title="Behind upstream">↓{{ node.branch.behind }}</small> }
                           @if (node.branch.upstreamGone) { <small class="upstream-gone" title="Configured upstream no longer exists"><span aria-hidden="true">⚠</span> gone</small> }
@@ -586,7 +784,9 @@
                   <button
                     type="button"
                     class="tree-row worktree-row"
+                    [class.current-worktree]="isCurrentWorktree(worktree)"
                     [disabled]="workspaceActionBusy() || worktreeDisabledReason(worktree) !== null"
+                    [attr.aria-current]="isCurrentWorktree(worktree) ? 'true' : null"
                     [title]="worktreeDisabledReason(worktree) === null ? 'Open worktree: ' + worktree.path : worktreeBranchLabel(worktree) + ' (' + worktreeDisabledReason(worktree) + ')'"
                     (click)="openWorktree(worktree)"
                   >
@@ -881,6 +1081,7 @@
                   [class.selected]="historySelection() === 'commit' && selectedOid() === commit.oid"
                   [attr.aria-current]="historySelection() === 'commit' && selectedOid() === commit.oid ? 'true' : null"
                   (click)="selectCommit(commit)"
+                  (contextmenu)="openCommitContextMenu($event, commit, $any($event.currentTarget))"
                 >
                   <span
                     class="graph"
@@ -888,12 +1089,12 @@
                     [attr.title]="commit.relation === 'task' ? 'Task commit' : commit.relation === 'merge' ? 'Merged or integrated commit' : commit.relation === 'base' ? 'Shared base commit' : null"
                   ><i></i></span>
                   <span class="commit-copy">
+                    <strong>{{ commit.summary || 'Commit without subject' }}</strong>
                     @if (commit.refs.length > 0) {
-                      <span class="references">
+                      <span class="references" [attr.aria-label]="'References: ' + commit.refs.join(', ')" [title]="commit.refs.join(', ')">
                         @for (reference of commit.refs; track reference) { <span>{{ reference }}</span> }
                       </span>
                     }
-                    <strong>{{ commit.summary || 'Commit without subject' }}</strong>
                   </span>
                   <span class="commit-author">{{ commit.author.name }}</span>
                   <time [attr.datetime]="commit.author.authoredAt">{{ formatTimestamp(commit.author.authoredAt) }}</time>
@@ -1114,7 +1315,7 @@
         </div>
         <section class="commit-composer" aria-labelledby="commit-composer-title">
           <div class="commit-composer-heading">
-            <label id="commit-composer-title" for="commit-message">{{ amendMode() ? 'Amend HEAD' : 'Commit message' }}</label>
+            <label id="commit-composer-title" for="commit-message">Commit message</label>
             @if (enabledAiCommitMessageProviders().length > 0) {
               <div class="ai-commit-actions" aria-label="Generate commit message with AI">
                 @for (provider of enabledAiCommitMessageProviders(); track provider) {
@@ -1138,22 +1339,13 @@
               </div>
             }
           </div>
-          <textarea id="commit-message" rows="3" [placeholder]="amendMode() ? 'New commit message (optional when keeping the current message)' : 'Summary of the staged changes'" [value]="commitMessage()" [disabled]="workspaceActionBusy()" (input)="updateCommitMessage($any($event.target).value)"></textarea>
+          <textarea id="commit-message" rows="3" placeholder="Summary of the staged changes" [value]="commitMessage()" [disabled]="workspaceActionBusy()" (input)="updateCommitMessage($any($event.target).value)"></textarea>
           @if (commitMessageGenerationError()) {
             <p class="commit-message-generation-error" role="alert">{{ commitMessageGenerationError() }}</p>
           }
-          @if (amendMode()) {
-            <div class="commit-composer-actions">
-              <button type="button" [disabled]="workspaceActionBusy()" (click)="cancelAmend()">Cancel</button>
-              <button type="button" [disabled]="amendUnavailable()" (click)="amendCommit(null)">{{ mutationInProgress('amend') ? 'Amending…' : 'Amend — keep message' }}</button>
-              <button type="button" class="primary-action" [disabled]="amendWithMessageDisabled()" (click)="amendCommit(commitMessage())">{{ mutationInProgress('amend') ? 'Amending…' : 'Amend with new message' }}</button>
-            </div>
-            @if (amendRewritesUpstream()) { <p class="commit-hint conflicts">This commit appears to be published upstream. Amending it rewrites history.</p> }
-          } @else {
-            <button type="button" class="primary-action" [disabled]="commitDisabled()" (click)="createCommit()">{{ mutationInProgress('commit') ? 'Committing…' : 'Commit staged changes' }}</button>
-            @if (working.counts.conflicted > 0) { <p class="commit-hint conflicts">Resolve all conflicts before committing.</p> }
-            @else if (!workingTreeCapabilities().canCommit) { <p class="commit-hint">Stage at least one change before committing.</p> }
-          }
+          <button type="button" class="primary-action" [disabled]="commitDisabled()" (click)="createCommit()">{{ mutationInProgress('commit') ? 'Committing…' : 'Commit staged changes' }}</button>
+          @if (working.counts.conflicted > 0) { <p class="commit-hint conflicts">Resolve all conflicts before committing.</p> }
+          @else if (!workingTreeCapabilities().canCommit) { <p class="commit-hint">Stage at least one change before committing.</p> }
         </section>
         </div>
       } @else if (historySelection() === 'stash') {
@@ -1231,21 +1423,8 @@
           @let fileSummary = selectedFileSummary();
           <section class="commit-overview" aria-labelledby="inspected-commit-title">
             <div class="commit-overview-title">
-              <h2 id="inspected-commit-title">{{ detail.summary || 'Commit without subject' }}</h2>
-              <div class="commit-overview-actions" aria-label="Commit actions">
-                <button type="button" class="commit-action create-branch-from-commit" [disabled]="workspaceActionBusy()" title="Create a local branch at this commit" (click)="startBranchFromCommit(detail, $any($event.currentTarget))"><app-icon name="branch" />New branch</button>
-                <button type="button" class="commit-action" [disabled]="workspaceActionBusy() || detail.parents.length > 1" [title]="detail.parents.length > 1 ? 'Cherry-picking merge commits is not supported yet.' : 'Apply this commit to the current branch'" (click)="requestCherryPick(detail)"><app-icon name="cherry-pick" />Cherry-pick</button>
-                <button type="button" class="commit-action" [disabled]="workspaceActionBusy() || detail.parents.length > 1" [title]="detail.parents.length > 1 ? 'Reverting merge commits is not supported yet.' : 'Create a commit that reverses this change'" (click)="requestRevert(detail)"><app-icon name="history" />Revert</button>
-                <span class="reset-control">
-                  <label for="commit-reset-mode">Reset</label>
-                  <select id="commit-reset-mode" aria-label="Reset mode" [value]="resetMode()" [disabled]="workspaceActionBusy()" (change)="setResetMode($any($event.target).value)">
-                    <option value="soft">Soft</option>
-                    <option value="mixed">Mixed</option>
-                    <option value="hard">Hard</option>
-                  </select>
-                  <button type="button" class="commit-action reset-action" [disabled]="workspaceActionBusy()" [class.danger]="resetMode() === 'hard'" [title]="'Reset the current branch to this commit (' + resetMode() + ')'" (click)="requestReset(detail)"><app-icon name="reset" /><span class="sr-only">Reset {{ resetMode() }}</span></button>
-                </span>
-              </div>
+              <h2 id="inspected-commit-title" [title]="detail.summary || 'Commit without subject'">{{ detail.summary || 'Commit without subject' }}</h2>
+              <small>Right-click this commit in history for branch, cherry-pick, revert and reset actions.</small>
             </div>
             <dl class="commit-meta">
               <div class="commit-meta-oid">
@@ -1274,12 +1453,40 @@
               }
             </dl>
           </section>
-          @if (detail.fullMessage && detail.fullMessage !== detail.summary) {
-            <section class="commit-message-block" aria-labelledby="commit-message-heading">
+          <section class="commit-message-block" aria-labelledby="commit-message-heading">
+            <div class="commit-message-heading">
               <h3 id="commit-message-heading">Message</h3>
+              @if (canAmendCommit(detail)) {
+                @if (amendMode()) {
+                  <span class="commit-message-actions">
+                    <button type="button" [disabled]="workspaceActionBusy()" (click)="cancelAmend()">Cancel</button>
+                    <button type="button" class="primary-action" [disabled]="amendWithMessageDisabled()" (click)="amendCommit(commitMessage())">
+                      <app-icon name="amend" />{{ mutationInProgress('amend') ? 'Amending…' : 'Amend commit' }}
+                    </button>
+                  </span>
+                } @else {
+                  <button type="button" class="commit-action" [disabled]="workspaceActionBusy()" title="Edit this unpushed HEAD commit message" (click)="startAmend(detail, $any($event.currentTarget))">
+                    <app-icon name="amend" />Amend
+                  </button>
+                }
+              }
+            </div>
+            @if (amendMode()) {
+              <textarea
+                id="inspected-commit-message"
+                rows="5"
+                aria-label="Amended commit message"
+                [value]="commitMessage()"
+                [disabled]="workspaceActionBusy()"
+                (input)="updateCommitMessage($any($event.target).value)"
+              ></textarea>
+              @if (workingTreeMutationError()) {
+                <p class="commit-message-generation-error" role="alert">{{ workingTreeMutationError() }}</p>
+              }
+            } @else {
               <pre class="commit-message">{{ detail.fullMessage }}</pre>
-            </section>
-          }
+            }
+          </section>
           <header class="file-heading">
             <div>
               <span class="file-heading-label">Files</span>

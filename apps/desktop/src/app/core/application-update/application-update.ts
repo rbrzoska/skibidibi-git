@@ -17,6 +17,7 @@ export type ApplicationUpdateState =
   | 'error';
 
 const AUTO_CHECK_STORAGE_KEY = 'skibidibi-git.application-update.auto-check.v1';
+const LAST_SEEN_VERSION_STORAGE_KEY = 'skibidibi-git.application-update.last-seen-version.v1';
 
 @Service()
 export class ApplicationUpdate {
@@ -27,10 +28,24 @@ export class ApplicationUpdate {
   readonly state = signal<ApplicationUpdateState>('idle');
   readonly currentVersion = signal<string | null>(null);
   readonly availableUpdate = signal<ApplicationUpdateInfo | null>(null);
+  readonly releaseNotesMarkdown = signal('');
   readonly lastCheckedAt = signal<Date | null>(null);
   readonly autoCheck = signal(readAutoCheckPreference());
   readonly error = signal<string | null>(null);
   readonly promptVisible = signal(false);
+  readonly displayVersion = computed(() => (
+    this.availableUpdate()?.version ?? this.currentVersion()
+  ));
+  readonly displayReleaseNotes = computed(() => {
+    const availableNotes = this.availableUpdate()?.body?.trim();
+    if (availableNotes) {
+      return availableNotes;
+    }
+    return releaseNotesForVersion(
+      this.releaseNotesMarkdown(),
+      this.displayVersion(),
+    );
+  });
   readonly triggerLabel = computed(() => {
     switch (this.state()) {
       case 'checking': return 'Checking…';
@@ -53,6 +68,7 @@ export class ApplicationUpdate {
       return;
     }
     this.initialized = true;
+    void this.loadReleaseNotes();
     if (this.autoCheck()) {
       void this.check(false);
     }
@@ -79,7 +95,9 @@ export class ApplicationUpdate {
       this.availableUpdate.set(result.update);
       this.lastCheckedAt.set(new Date());
       this.state.set(result.update === null ? 'upToDate' : 'available');
-      this.promptVisible.set(result.update !== null);
+      if (result.update !== null) {
+        this.promptVisible.set(true);
+      }
       if (announceResult) {
         this.feedback.show(
           result.update === null ? 'success' : 'info',
@@ -100,15 +118,26 @@ export class ApplicationUpdate {
   }
 
   dismissAvailableUpdate(): void {
+    if (this.availableUpdate() === null) {
+      this.markInstalledVersionSeen();
+    }
     this.promptVisible.set(false);
   }
 
   trigger(): void {
-    if (this.state() === 'available' || this.state() === 'restartReady') {
+    if (
+      this.state() === 'available'
+      || this.state() === 'restartReady'
+      || this.state() === 'upToDate'
+    ) {
       this.promptVisible.set(true);
       return;
     }
     void this.check();
+  }
+
+  showReleaseNotes(): void {
+    this.promptVisible.set(true);
   }
 
   async install(): Promise<void> {
@@ -156,6 +185,31 @@ export class ApplicationUpdate {
       this.feedback.setLoading('application-update', false);
     }
   }
+
+  private async loadReleaseNotes(): Promise<void> {
+    try {
+      const result = await this.ipc.invoke('application_release_notes', {});
+      this.currentVersion.set(result.currentVersion);
+      this.releaseNotesMarkdown.set(result.markdown);
+      if (readLastSeenVersion() !== result.currentVersion) {
+        this.promptVisible.set(true);
+      }
+    } catch {
+      // Update checks remain available if bundled release notes cannot be loaded.
+    }
+  }
+
+  private markInstalledVersionSeen(): void {
+    const version = this.currentVersion();
+    if (version === null) {
+      return;
+    }
+    try {
+      globalThis.localStorage?.setItem(LAST_SEEN_VERSION_STORAGE_KEY, version);
+    } catch {
+      // The dialog can reappear next session when storage is unavailable.
+    }
+  }
 }
 
 function readAutoCheckPreference(): boolean {
@@ -164,6 +218,31 @@ function readAutoCheckPreference(): boolean {
   } catch {
     return true;
   }
+}
+
+function readLastSeenVersion(): string | null {
+  try {
+    return globalThis.localStorage?.getItem(LAST_SEEN_VERSION_STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function releaseNotesForVersion(markdown: string, version: string | null): string {
+  if (markdown.trim() === '' || version === null) {
+    return '';
+  }
+  const headings = [...markdown.matchAll(/^##\s+v?(\S+)(?:\s|$).*$/gm)];
+  const headingIndex = headings.findIndex((heading) => heading[1] === version);
+  if (headingIndex < 0) {
+    return '';
+  }
+  const start = headings[headingIndex]?.index;
+  if (start === undefined) {
+    return '';
+  }
+  const end = headings[headingIndex + 1]?.index ?? markdown.length;
+  return markdown.slice(start, end).trim();
 }
 
 function messageFrom(error: unknown, fallback: string): string {

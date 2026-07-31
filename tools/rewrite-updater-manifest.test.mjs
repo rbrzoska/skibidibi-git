@@ -11,12 +11,22 @@ test('rewrites GitHub API asset URLs to public release downloads', () => {
         signature: 'signature',
         url: 'https://api.github.com/repos/example/app/releases/assets/42',
       },
+      'linux-x86_64': {
+        signature: 'linux-signature',
+        url: 'https://api.github.com/repos/example/app/releases/assets/43',
+      },
     },
   };
-  const releaseAssets = [{
-    apiUrl: 'https://api.github.com/repos/example/app/releases/assets/42',
-    name: 'Example App.app.tar.gz',
-  }];
+  const releaseAssets = [
+    {
+      apiUrl: 'https://api.github.com/repos/example/app/releases/assets/42',
+      name: 'Example App.app.tar.gz',
+    },
+    {
+      apiUrl: 'https://api.github.com/repos/example/app/releases/assets/43',
+      name: 'Example App.AppImage',
+    },
+  ];
 
   assert.deepEqual(
     rewriteUpdaterManifest(manifest, releaseAssets, 'example/app', 'app-v0.1.3'),
@@ -26,6 +36,10 @@ test('rewrites GitHub API asset URLs to public release downloads', () => {
         'darwin-aarch64': {
           signature: 'signature',
           url: 'https://github.com/example/app/releases/download/app-v0.1.3/Example%20App.app.tar.gz',
+        },
+        'linux-x86_64': {
+          signature: 'linux-signature',
+          url: 'https://github.com/example/app/releases/download/app-v0.1.3/Example%20App.AppImage',
         },
       },
     },

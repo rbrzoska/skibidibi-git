@@ -10,6 +10,7 @@ import {
 } from '../../../core/ipc/desktop-ipc';
 import { RepositoryCatalog } from '../../../core/repositories/repository-catalog';
 import { GitHubAccountControl } from '../../github';
+import { SafeMarkdown } from '../../github/pull-request-inspector/safe-markdown/safe-markdown';
 import { DiagnosticLogDialog } from '../diagnostic-log-dialog/diagnostic-log-dialog';
 import {
   browserWorkspaceRefreshStorage,
@@ -29,7 +30,7 @@ type MaintenanceScanState =
 
 @Component({
   selector: 'app-settings-page',
-  imports: [DiagnosticLogDialog, GitHubAccountControl, RouterLink],
+  imports: [DiagnosticLogDialog, GitHubAccountControl, RouterLink, SafeMarkdown],
   templateUrl: './settings-page.html',
   styleUrl: './settings-page.css',
   changeDetection: ChangeDetectionStrategy.OnPush,

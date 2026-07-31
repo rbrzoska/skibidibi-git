@@ -44,3 +44,9 @@ System Git executable
 ```
 
 Angular owns presentation and client-side state. Rust owns native capabilities, process execution, validation, and structured errors. Git is invoked without a shell and is not bundled. See [ADR 0001](docs/adr/0001-tauri-angular-desktop-architecture.md) and [ADR 0002](docs/adr/0002-system-git-and-typed-ipc.md) for the decisions behind this boundary.
+
+## Privacy and support
+
+- [Privacy policy](PRIVACY.md)
+- [Support and system requirements](SUPPORT.md)
+- [Microsoft Store release guide](docs/microsoft-store.md)

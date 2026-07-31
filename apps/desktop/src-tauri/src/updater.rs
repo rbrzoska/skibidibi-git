@@ -5,6 +5,7 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::CommandError;
 
 const MAX_UPDATE_VERSION_LENGTH: usize = 80;
+const RELEASE_NOTES: &str = include_str!("../../../../RELEASE_NOTES.md");
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +20,13 @@ pub(crate) struct ApplicationUpdateInfo {
 pub(crate) struct ApplicationUpdateCheckResult {
     current_version: String,
     update: Option<ApplicationUpdateInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApplicationReleaseNotes {
+    current_version: String,
+    markdown: &'static str,
 }
 
 fn validate_expected_version(version: &str) -> Result<&str, CommandError> {
@@ -67,6 +75,14 @@ pub(crate) async fn application_update_check(
         current_version,
         update,
     })
+}
+
+#[tauri::command]
+pub(crate) fn application_release_notes(app: AppHandle) -> ApplicationReleaseNotes {
+    ApplicationReleaseNotes {
+        current_version: app.package_info().version.to_string(),
+        markdown: RELEASE_NOTES,
+    }
 }
 
 #[tauri::command]

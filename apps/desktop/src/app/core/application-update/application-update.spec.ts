@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { vi } from 'vitest';
 
 import { DESKTOP_IPC, type DesktopIpcClient } from '../ipc/desktop-ipc';
-import { ApplicationUpdate } from './application-update';
+import { ApplicationUpdate, releaseNotesForVersion } from './application-update';
 
 describe('ApplicationUpdate', () => {
   let service: ApplicationUpdate;
@@ -24,6 +24,9 @@ describe('ApplicationUpdate', () => {
   it('checks once on startup and exposes a signed update for explicit installation', async () => {
     invoke.mockResolvedValueOnce({
       currentVersion: '0.1.0',
+      markdown: '## 0.1.0\n\n- Installed',
+    }).mockResolvedValueOnce({
+      currentVersion: '0.1.0',
       update: { version: '0.2.0', body: 'Faster fetches', date: '2026-07-28T10:00:00Z' },
     });
 
@@ -31,18 +34,33 @@ describe('ApplicationUpdate', () => {
     service.initialize();
     await vi.waitFor(() => expect(service.state()).toBe('available'));
 
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'application_release_notes', {});
+    expect(invoke).toHaveBeenNthCalledWith(2, 'application_update_check', {});
     expect(service.currentVersion()).toBe('0.1.0');
     expect(service.availableUpdate()?.version).toBe('0.2.0');
+    expect(service.displayReleaseNotes()).toBe('Faster fetches');
   });
 
-  it('persists disabling automatic startup checks', () => {
+  it('persists disabling automatic startup checks while loading bundled release notes', async () => {
+    invoke.mockResolvedValueOnce({
+      currentVersion: '0.1.0',
+      markdown: '## 0.1.0\n\n- Installed',
+    });
     service.setAutoCheck(false);
     service.initialize();
+    await vi.waitFor(() => expect(service.currentVersion()).toBe('0.1.0'));
 
     expect(service.autoCheck()).toBe(false);
     expect(globalThis.localStorage.getItem('skibidibi-git.application-update.auto-check.v1')).toBe('false');
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('application_release_notes', {});
+    expect(service.displayReleaseNotes()).toContain('- Installed');
+    expect(service.promptVisible()).toBe(true);
+
+    service.dismissAvailableUpdate();
+
+    expect(globalThis.localStorage.getItem('skibidibi-git.application-update.last-seen-version.v1')).toBe('0.1.0');
   });
 
   it('installs the exact selected version and waits for an explicit restart', async () => {
@@ -91,5 +109,20 @@ describe('ApplicationUpdate', () => {
     await service.restart();
 
     expect(invoke).toHaveBeenLastCalledWith('application_update_restart', {});
+  });
+
+  it('extracts only the selected installed release including prerelease versions', () => {
+    const markdown = [
+      '# Releases',
+      '## 2.0.0-beta.1 — today',
+      '- Preview',
+      '## 1.9.0 — yesterday',
+      '- Stable',
+    ].join('\n');
+
+    expect(releaseNotesForVersion(markdown, '2.0.0-beta.1')).toBe(
+      '## 2.0.0-beta.1 — today\n- Preview',
+    );
+    expect(releaseNotesForVersion(markdown, 'missing')).toBe('');
   });
 });

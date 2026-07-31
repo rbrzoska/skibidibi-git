@@ -11,6 +11,11 @@ export interface ApplicationUpdateCheckResponse {
   readonly update: ApplicationUpdateInfo | null;
 }
 
+export interface ApplicationReleaseNotesResponse {
+  readonly currentVersion: string;
+  readonly markdown: string;
+}
+
 export interface RepositoryStatusRequest {
   readonly repositoryPath: string;
 }
@@ -1193,6 +1198,10 @@ export interface DesktopIpcContract {
     readonly request: Record<string, never>;
     readonly response: ApplicationUpdateCheckResponse;
   };
+  readonly application_release_notes: {
+    readonly request: Record<string, never>;
+    readonly response: ApplicationReleaseNotesResponse;
+  };
   readonly application_update_install: {
     readonly request: { readonly expectedVersion: string };
     readonly response: void;
@@ -1589,6 +1598,13 @@ export class DesktopIpc implements DesktopIpcClient {
       return Promise.resolve({
         currentVersion: '0.1.0-dev',
         update: null,
+      } as DesktopIpcContract[C]['response']);
+    }
+
+    if (command === 'application_release_notes') {
+      return Promise.resolve({
+        currentVersion: '0.1.0-dev',
+        markdown: '## 0.1.0-dev\n\n- Local development build.',
       } as DesktopIpcContract[C]['response']);
     }
 

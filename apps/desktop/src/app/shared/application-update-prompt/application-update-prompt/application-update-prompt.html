@@ -1,31 +1,48 @@
 @if (updater.promptVisible()) {
-  @if (updater.availableUpdate(); as update) {
+  @if (updater.displayVersion(); as version) {
     <aside class="update-card" role="dialog" aria-labelledby="application-update-title" aria-describedby="application-update-copy">
       <div class="update-mark" aria-hidden="true">↻</div>
       <div class="update-copy">
         @if (updater.state() === 'restartReady' || updater.state() === 'restarting') {
-          <strong id="application-update-title">Skibidibi Git {{ update.version }} was installed</strong>
+          <strong id="application-update-title">Skibidibi Git {{ version }} was installed</strong>
           <p id="application-update-copy">Restart to finish the update. You can restart later without losing the installed update.</p>
+        } @else if (updater.availableUpdate() !== null) {
+          <strong id="application-update-title">Skibidibi Git {{ version }} is available</strong>
+          <p id="application-update-copy">Review what changed, then download and install the signed update when convenient.</p>
+        } @else {
+          <strong id="application-update-title">What’s new in Skibidibi Git {{ version }}</strong>
+          <p id="application-update-copy">
+            {{ updater.state() === 'upToDate' ? 'You are using the newest available version.' : 'Here are the latest installed changes.' }}
+          </p>
+        }
+
+        @if (updater.displayReleaseNotes(); as notes) {
+          <section class="release-notes" aria-label="Release notes">
+            <span class="release-notes-label">What’s new</span>
+            <app-safe-markdown [source]="notes" />
+          </section>
+        }
+
+        @if (updater.state() === 'restartReady' || updater.state() === 'restarting') {
           <div class="update-actions">
             <button type="button" class="secondary" [disabled]="updater.state() === 'restarting'" (click)="updater.dismissAvailableUpdate()">Later</button>
             <button type="button" class="primary" [disabled]="updater.state() === 'restarting'" (click)="updater.restart()">
               {{ updater.state() === 'restarting' ? 'Restarting…' : 'Restart now' }}
             </button>
           </div>
-        } @else {
-          <strong id="application-update-title">Skibidibi Git {{ update.version }} is available</strong>
-          <p id="application-update-copy">Download and install the signed update now. You will choose when to restart the application.</p>
-          @if (update.body) {
-            <details>
-              <summary>Release notes</summary>
-              <p>{{ update.body }}</p>
-            </details>
-          }
+        } @else if (updater.availableUpdate() !== null) {
           <div class="update-actions">
             <button type="button" class="secondary" [disabled]="updater.state() === 'installing'" (click)="updater.dismissAvailableUpdate()">Later</button>
             <button type="button" class="primary" [disabled]="updater.state() === 'installing'" (click)="updater.install()">
               {{ updater.state() === 'installing' ? 'Installing…' : 'Install update' }}
             </button>
+          </div>
+        } @else {
+          <div class="update-actions">
+            <button type="button" class="secondary" [disabled]="updater.state() === 'checking'" (click)="updater.check()">
+              {{ updater.state() === 'checking' ? 'Checking…' : 'Check again' }}
+            </button>
+            <button type="button" class="primary" (click)="updater.dismissAvailableUpdate()">Done</button>
           </div>
         }
       </div>

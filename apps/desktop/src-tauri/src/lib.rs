@@ -1848,6 +1848,7 @@ pub fn run() {
             external_workspace::open_branch_workspace,
             updater::application_update_check,
             updater::application_update_install,
+            updater::application_release_notes,
             updater::application_update_restart,
             set_application_zoom,
             repository_status,
