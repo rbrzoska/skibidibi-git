@@ -19,6 +19,12 @@ if (storeWindows?.webviewInstallMode?.type !== 'offlineInstaller' || storeWindow
 if (storeWindows.allowDowngrades !== false) {
   throw new Error('The Microsoft Store installer must reject downgrades.');
 }
+if (storeConfig.bundle?.createUpdaterArtifacts !== false) {
+  throw new Error('Microsoft Store builds must not create standalone updater artifacts.');
+}
+if (storeWindows.wix?.enableElevatedUpdateTask !== false) {
+  throw new Error('Microsoft Store builds must not install the elevated self-update scheduled task.');
+}
 if (!storeConfig.bundle?.publisher || storeConfig.bundle.publisher === config.productName) {
   throw new Error('The Microsoft Store publisher must be explicit and different from the product name.');
 }
@@ -32,4 +38,4 @@ if (/TODO|example\.com|replace me/i.test(`${privacy}\n${support}`)) {
   throw new Error('Privacy and support documents must not contain placeholders.');
 }
 
-console.log('Microsoft Store source policy is valid. A signed Windows CI build is still required before submission.');
+console.log('Microsoft Store source policy is valid. Store MSIX signing is handled by Microsoft after certification.');

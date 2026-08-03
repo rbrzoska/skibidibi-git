@@ -1,33 +1,42 @@
-name: Build signed Microsoft Store installer
+name: Build Microsoft Store MSIX
 
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing draft or published GitHub release tag (for example app-v0.1.6)
+      source_ref:
+        description: Immutable tag or commit SHA to package (use main only for a test build)
         required: true
+        default: main
+        type: string
+      identity_name:
+        description: Package/Identity/Name copied from Partner Center
+        required: true
+        type: string
+      publisher:
+        description: Package/Identity/Publisher copied from Partner Center (CN=...)
+        required: true
+        type: string
+      publisher_display_name:
+        description: Package/Properties/PublisherDisplayName copied from Partner Center
+        required: true
+        default: Rafal Brzoska
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: microsoft-store-${{ inputs.release_tag }}
+  group: microsoft-store-msix-${{ inputs.source_ref }}
   cancel-in-progress: false
 
 jobs:
-  build-store-msi:
-    name: Signed offline MSI (Windows x64)
+  build-store-msix:
+    name: Unsigned Store MSIX (Windows x64)
     runs-on: windows-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ inputs.source_ref }}
       - uses: pnpm/action-setup@v4
         with:
           version: 11.7.0
@@ -38,82 +47,53 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: x86_64-pc-windows-msvc
-      - name: Install dependencies and validate Store source policy
+      - name: Install and validate release source
         shell: pwsh
         run: |
           pnpm install --frozen-lockfile
           pnpm verify:microsoft-store
-          $env:GITHUB_REF_TYPE = "tag"
-          $env:GITHUB_REF_NAME = "${{ inputs.release_tag }}"
-          node tools/verify-release-version.mjs
-      - name: Import Authenticode certificate and create private build config
+          pnpm test:tools
+      - name: Build Tauri executable without an MSI installer
         shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
-            throw "Repository secret WINDOWS_CERTIFICATE is required (base64-encoded PFX)."
-          }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw "Repository secret WINDOWS_CERTIFICATE_PASSWORD is required."
-          }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
-            throw "Repository secret WINDOWS_TIMESTAMP_URL is required and must come from the certificate provider."
-          }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP "skibidibi-git-signing.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          if ($null -eq $certificate -or -not $certificate.HasPrivateKey) {
-            throw "The imported Authenticode certificate does not expose its private key."
-          }
-
-          $env:WINDOWS_CERTIFICATE_THUMBPRINT = $certificate.Thumbprint
-          $configPath = Join-Path $env:RUNNER_TEMP "tauri.microsoftstore.signed.conf.json"
-          node tools/create-microsoft-store-config.mjs --output $configPath
-          "STORE_TAURI_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Remove-Item $pfxPath -Force
-      - name: Build signed standalone MSI
-        shell: pwsh
-        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi --config "$env:STORE_TAURI_CONFIG"
-      - name: Verify signatures and prepare immutable asset
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --no-bundle
+      - name: Package Store MSIX
         id: package
         shell: pwsh
+        env:
+          STORE_IDENTITY_NAME: ${{ inputs.identity_name }}
+          STORE_PUBLISHER: ${{ inputs.publisher }}
+          STORE_PUBLISHER_DISPLAY_NAME: ${{ inputs.publisher_display_name }}
         run: |
-          $app = Get-ChildItem -Path target,apps/desktop/src-tauri/target -Filter "skibidibi-git-desktop.exe" -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match 'x86_64-pc-windows-msvc.+release' } |
-            Select-Object -First 1
-          $msi = Get-ChildItem -Path target,apps/desktop/src-tauri/target -Filter "*.msi" -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match 'x86_64-pc-windows-msvc.+release.+bundle.+msi' } |
-            Select-Object -First 1
-          if ($null -eq $app) { throw "Built application executable was not found." }
-          if ($null -eq $msi) { throw "Built MSI was not found." }
-
-          foreach ($file in @($app, $msi)) {
-            $signature = Get-AuthenticodeSignature $file.FullName
-            if ($signature.Status -ne "Valid") {
-              throw "Invalid Authenticode signature for $($file.Name): $($signature.Status) $($signature.StatusMessage)"
-            }
-          }
-
           $version = node -p "require('./package.json').version"
-          $assetName = "Skibidibi.Git_${version}_x64_en-US_store.msi"
+          $assetName = "Skibidibi.Git_${version}_x64_store.msix"
           $assetPath = Join-Path $env:RUNNER_TEMP $assetName
-          Copy-Item $msi.FullName $assetPath
+          & ./tools/build-microsoft-store-msix.ps1 `
+            -IdentityName $env:STORE_IDENTITY_NAME `
+            -Publisher $env:STORE_PUBLISHER `
+            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME `
+            -OutputPath $assetPath
+          if ($LASTEXITCODE -ne 0) { throw "MSIX packaging failed." }
           "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "asset_path=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-      - name: Refuse to replace a submitted versioned asset
+      - name: Inspect package contents
         shell: pwsh
         run: |
-          gh release view "${{ inputs.release_tag }}" --repo "$env:GITHUB_REPOSITORY" --json assets | Out-Null
-          $existing = gh release view "${{ inputs.release_tag }}" --repo "$env:GITHUB_REPOSITORY" --json assets --jq ".assets[].name"
-          if ($existing -contains "${{ steps.package.outputs.asset_name }}") {
-            throw "The versioned Store asset already exists and will not be replaced. Publish a new application version."
+          $unpackPath = Join-Path $env:RUNNER_TEMP "msix-inspection"
+          $makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter makeappx.exe -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\makeappx\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          & $makeAppx.FullName unpack /o /v /p '${{ steps.package.outputs.asset_path }}' /d $unpackPath
+          if ($LASTEXITCODE -ne 0) { throw "The generated MSIX could not be unpacked." }
+          $required = @("AppxManifest.xml", "SkibidibiGit.exe", "Assets\StoreLogo.png")
+          foreach ($path in $required) {
+            if (-not (Test-Path (Join-Path $unpackPath $path))) {
+              throw "Generated MSIX is missing $path."
+            }
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: microsoft-store-msi-${{ inputs.release_tag }}
+          name: microsoft-store-msix-${{ github.run_id }}
           path: ${{ steps.package.outputs.asset_path }}
           if-no-files-found: error
-      - name: Attach Store MSI to the existing GitHub release
-        shell: pwsh
-        run: gh release upload "${{ inputs.release_tag }}" "${{ steps.package.outputs.asset_path }}" --repo "$env:GITHUB_REPOSITORY"
+          retention-days: 14

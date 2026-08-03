@@ -18,7 +18,8 @@
     "test:tools": "node --test tools/*.test.mjs",
     "verify:release-notes": "node tools/current-release-notes.mjs --check",
     "verify:windows-release": "node tools/verify-windows-release-policy.mjs",
-    "verify:microsoft-store": "node tools/verify-microsoft-store-release.mjs"
+    "verify:microsoft-store": "node tools/verify-microsoft-store-release.mjs",
+    "msix:manifest": "node tools/create-microsoft-store-msix-manifest.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"
