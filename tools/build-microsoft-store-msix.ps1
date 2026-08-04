@@ -7,7 +7,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$stage = Join-Path $env:RUNNER_TEMP "skibidibi-git-msix"
+$temporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+if (-not $temporaryRoot) {
+  throw "Neither RUNNER_TEMP nor TEMP is available."
+}
+$stage = Join-Path $temporaryRoot "skibidibi-git-msix"
 $executableName = "SkibidibiGit.exe"
 
 if (Test-Path $stage) {
