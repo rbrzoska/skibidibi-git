@@ -299,6 +299,7 @@ fn configure_detached_process(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use tempfile::tempdir;
 
     #[test]

@@ -86,7 +86,10 @@ Get-Item $msix
 
 ### 3. Create and trust a free development certificate
 
-The certificate subject must match the `Publisher` value used to create the MSIX exactly.
+The certificate subject must match the `Publisher` value used to create the MSIX exactly. AppX
+deployment validates trust at machine scope, so the disposable public certificate must be added to
+both `LocalMachine\Root` and `LocalMachine\TrustedPeople`. This temporarily trusts the certificate
+for every user of the test machine; use it only for this package and remove it after testing.
 
 ```powershell
 $cert = New-SelfSignedCertificate `
@@ -102,9 +105,16 @@ $cert = New-SelfSignedCertificate `
 
 $cer = Join-Path $PWD "SkibidibiGit-Test.cer"
 Export-Certificate -Cert $cert -FilePath $cer | Out-Null
-Import-Certificate `
-  -FilePath $cer `
-  -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" | Out-Null
+
+certutil.exe -f -addstore Root $cer
+if ($LASTEXITCODE -ne 0) {
+  throw "Adding the test certificate to LocalMachine\Root failed."
+}
+
+certutil.exe -f -addstore TrustedPeople $cer
+if ($LASTEXITCODE -ne 0) {
+  throw "Adding the test certificate to LocalMachine\TrustedPeople failed."
+}
 ```
 
 ### 4. Sign and verify the test package
@@ -173,9 +183,58 @@ Run this only after testing is complete:
 Get-AppxPackage -Name "Rbrzoska.SkibidibiGit.Test" |
   Remove-AppxPackage
 
-Remove-Item "Cert:\CurrentUser\TrustedPeople\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
-Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
+$thumbprint = $cert.Thumbprint
+certutil.exe -f -delstore TrustedPeople $thumbprint
+certutil.exe -f -delstore Root $thumbprint
+certutil.exe -user -f -delstore My $thumbprint
 ```
+
+Verify that the package and all three certificate entries are gone before leaving the elevated
+session. Error `0x800B010A` or a disabled **Install** button means the package signing certificate
+does not have a complete trusted chain at machine scope; do not bypass the signature check.
+
+## Local certification result (2026-08-04)
+
+The complete procedure above was validated on Windows 11 Pro x64 with Windows App Certification
+Kit 10.0.19041.5609. The application was built with Node.js 24.15.0, pnpm 11.7.0, and Rust 1.95.0
+for `x86_64-pc-windows-msvc`.
+
+Final result:
+
+- the release executable was confirmed as x64 and `Windows GUI`, with no console window;
+- the disposable `0.1.6.0` MSIX built, signed, verified, installed, launched, restarted, and
+  uninstalled successfully;
+- repository selection, status, history, fetch, GitHub CLI refresh, Explorer/editor launching, and
+  settings persistence passed the manual smoke test;
+- WACK completed a full, non-partial run with `OVERALL_RESULT="PASS"`: 23 of 24 individual checks
+  passed;
+- the only individual failure was the optional **Blocked executables** check. WACK detected
+  `CreateProcessW` and `ShellExecuteW` because Skibidibi Git intentionally launches the system Git
+  executable, configured editors, Explorer, and optional AI CLIs. This did not change the overall
+  PASS result and should be explained in Partner Center certification notes if requested;
+- the generated test MSIX, public test certificate, WACK report, installed package, and all trusted
+  certificate entries were removed after validation.
+
+Issues found and corrected during the certification run:
+
+- the Windows release validator assumed LF line endings and rejected a valid CRLF `main.rs`;
+- real-Git fixtures inherited the machine-wide `core.autocrlf=true`, causing nondeterministic
+  Windows failures; fixtures that depend on exact content now set local, deterministic behavior;
+- canonical Windows `\\?\` paths were passed directly to `git worktree add`, which Git for Windows
+  rejected; managed worktree paths are now converted to compatible drive or UNC form only at the
+  Git process boundary;
+- two tests assumed Unix-only file names or executable names and now accept the supported Windows
+  forms without weakening their safety assertions;
+- the generated manifest declared `Square310x310Logo` without the required `Wide310x150Logo`;
+  the unused optional tile declaration and payload were removed;
+- trusting the self-signed certificate only in `CurrentUser\TrustedPeople` was insufficient for
+  AppX deployment and `signtool /pa`; the test procedure now uses temporary machine-scope trust and
+  explicitly removes it.
+
+The package used for this local run was test-signed and must never be uploaded to Partner Center.
+For the real Store submission, run **Build Microsoft Store MSIX** from an immutable tag or commit
+SHA with the exact three Product identity values, keep the workflow artifact unsigned, upload the
+`.msix` on the product's **Packages** page, and let Microsoft sign it during certification.
 
 ## Legacy MSI failure 1603
 

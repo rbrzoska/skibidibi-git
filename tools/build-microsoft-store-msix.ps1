@@ -35,7 +35,7 @@ Copy-Item $application (Join-Path $stage $executableName)
 $applicationDirectory = Split-Path -Parent $application
 Get-ChildItem $applicationDirectory -File -Filter "*.dll" |
   ForEach-Object { Copy-Item $_.FullName (Join-Path $stage $_.Name) }
-$icons = @("StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png", "Square310x310Logo.png")
+$icons = @("StoreLogo.png", "Square44x44Logo.png", "Square150x150Logo.png")
 foreach ($icon in $icons) {
   Copy-Item (Join-Path $repoRoot "apps\desktop\src-tauri\icons\$icon") (Join-Path $stage "Assets\$icon")
 }

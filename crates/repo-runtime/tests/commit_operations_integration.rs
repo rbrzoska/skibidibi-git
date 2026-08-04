@@ -40,6 +40,7 @@ fn git_stdout(repository: &Path, arguments: &[&str]) -> String {
 fn init_repository() -> tempfile::TempDir {
     let repository = tempfile::tempdir().expect("temporary repository");
     git(repository.path(), &["init", "-q", "-b", "main"]);
+    git(repository.path(), &["config", "core.autocrlf", "false"]);
     git(
         repository.path(),
         &["config", "user.name", "Commit Operation Test"],

@@ -259,6 +259,7 @@ fn text_conflict() -> tempfile::TempDir {
 
 fn init(repository: &Path) {
     git(repository, &["init", "--initial-branch=main"]);
+    git(repository, &["config", "core.autocrlf", "false"]);
     git(repository, &["config", "user.name", "Conflict Test"]);
     git(
         repository,

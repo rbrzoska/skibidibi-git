@@ -26,6 +26,7 @@ fn repository() -> tempfile::TempDir {
     let directory = tempdir().expect("temporary repository");
     let path = directory.path();
     git(path, &["init", "--initial-branch=main"]);
+    git(path, &["config", "core.autocrlf", "false"]);
     git(path, &["config", "user.name", "Stash Test"]);
     git(path, &["config", "user.email", "stash@example.test"]);
     fs::write(path.join("tracked.txt"), "base\n").expect("write base file");

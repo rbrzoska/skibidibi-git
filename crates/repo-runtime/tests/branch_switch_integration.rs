@@ -31,6 +31,13 @@ fn git_output(repository: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("Git output is UTF-8")
 }
 
+fn init_repository(repository: &Path) {
+    git(repository, &["init", "--initial-branch=main"]);
+    git(repository, &["config", "core.autocrlf", "false"]);
+    git(repository, &["config", "user.name", "Switch Test"]);
+    git(repository, &["config", "user.email", "switch@example.test"]);
+}
+
 fn request(repository: &Path, full_name: &str) -> SwitchBranchRequest {
     SwitchBranchRequest {
         full_name: full_name.to_owned(),
@@ -46,9 +53,7 @@ fn request(repository: &Path, full_name: &str) -> SwitchBranchRequest {
 fn switches_existing_local_branch_and_preserves_conflicting_dirty_changes() {
     let directory = tempdir().expect("temporary repository");
     let repository = directory.path();
-    git(repository, &["init", "--initial-branch=main"]);
-    git(repository, &["config", "user.name", "Switch Test"]);
-    git(repository, &["config", "user.email", "switch@example.test"]);
+    init_repository(repository);
 
     fs::write(repository.join("tracked.txt"), "base\n").expect("write base file");
     git(repository, &["add", "--", "tracked.txt"]);
@@ -87,9 +92,7 @@ fn switches_existing_local_branch_and_preserves_conflicting_dirty_changes() {
 fn explicitly_stashes_tracked_and_untracked_changes_before_switching() {
     let directory = tempdir().expect("temporary repository");
     let repository = directory.path();
-    git(repository, &["init", "--initial-branch=main"]);
-    git(repository, &["config", "user.name", "Switch Test"]);
-    git(repository, &["config", "user.email", "switch@example.test"]);
+    init_repository(repository);
     fs::write(repository.join("tracked.txt"), "base\n").unwrap();
     git(repository, &["add", "--", "tracked.txt"]);
     git(repository, &["commit", "-m", "base"]);
@@ -139,9 +142,7 @@ fn explicitly_stashes_tracked_and_untracked_changes_before_switching() {
 fn auto_stash_restore_conflict_keeps_target_branch_and_stash() {
     let directory = tempdir().expect("temporary repository");
     let repository = directory.path();
-    git(repository, &["init", "--initial-branch=main"]);
-    git(repository, &["config", "user.name", "Switch Test"]);
-    git(repository, &["config", "user.email", "switch@example.test"]);
+    init_repository(repository);
     fs::write(repository.join("tracked.txt"), "base\n").unwrap();
     git(repository, &["add", "--", "tracked.txt"]);
     git(repository, &["commit", "-m", "base"]);
@@ -188,9 +189,7 @@ fn auto_stash_restore_conflict_keeps_target_branch_and_stash() {
 fn failed_safe_switch_restores_changes_on_the_source_and_drops_auto_stash() {
     let directory = tempdir().expect("temporary repository");
     let repository = directory.path();
-    git(repository, &["init", "--initial-branch=main"]);
-    git(repository, &["config", "user.name", "Switch Test"]);
-    git(repository, &["config", "user.email", "switch@example.test"]);
+    init_repository(repository);
     fs::write(repository.join("tracked.txt"), "base\n").unwrap();
     git(repository, &["add", "--", "tracked.txt"]);
     git(repository, &["commit", "-m", "base"]);
@@ -244,9 +243,7 @@ fn failed_safe_switch_restores_changes_on_the_source_and_drops_auto_stash() {
 fn switches_the_exact_full_ref_when_short_names_are_ambiguous() {
     let directory = tempdir().expect("temporary repository");
     let repository = directory.path();
-    git(repository, &["init", "--initial-branch=main"]);
-    git(repository, &["config", "user.name", "Switch Test"]);
-    git(repository, &["config", "user.email", "switch@example.test"]);
+    init_repository(repository);
     fs::write(repository.join("tracked.txt"), "base\n").unwrap();
     git(repository, &["add", "--", "tracked.txt"]);
     git(repository, &["commit", "-m", "base"]);
@@ -272,9 +269,7 @@ fn switches_the_exact_full_ref_when_short_names_are_ambiguous() {
 fn rejects_a_real_branch_when_its_oid_no_longer_matches_the_request() {
     let directory = tempdir().expect("temporary repository");
     let repository = directory.path();
-    git(repository, &["init", "--initial-branch=main"]);
-    git(repository, &["config", "user.name", "Switch Test"]);
-    git(repository, &["config", "user.email", "switch@example.test"]);
+    init_repository(repository);
     fs::write(repository.join("tracked.txt"), "base\n").unwrap();
     git(repository, &["add", "--", "tracked.txt"]);
     git(repository, &["commit", "-m", "base"]);

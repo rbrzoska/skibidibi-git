@@ -31,6 +31,7 @@ fn output_text(repository: &Path, arguments: &[&str]) -> String {
 fn repository() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     git(directory.path(), &["init", "-q", "-b", "main"]);
+    git(directory.path(), &["config", "core.autocrlf", "false"]);
     git(
         directory.path(),
         &["config", "user.name", "Maintenance Test"],

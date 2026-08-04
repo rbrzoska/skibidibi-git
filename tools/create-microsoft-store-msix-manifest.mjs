@@ -88,9 +88,7 @@ export function createMicrosoftStoreManifest({
         Description="A fast local-first desktop Git client."
         BackgroundColor="transparent"
         Square44x44Logo="Assets\\Square44x44Logo.png"
-        Square150x150Logo="Assets\\Square150x150Logo.png">
-        <uap:DefaultTile Square310x310Logo="Assets\\Square310x310Logo.png" />
-      </uap:VisualElements>
+        Square150x150Logo="Assets\\Square150x150Logo.png" />
     </Application>
   </Applications>
   <Capabilities>

@@ -23,6 +23,7 @@ test('creates a full-trust desktop MSIX manifest with Store identity', () => {
   assert.match(manifest, /rescap:Capability Name="runFullTrust"/);
   assert.match(manifest, /Version="0\.1\.6\.0"/);
   assert.match(manifest, /Rafal &amp; Brzoska/);
+  assert.doesNotMatch(manifest, /Square310x310Logo/);
 });
 
 test('rejects guessed or malformed Store identity values', () => {

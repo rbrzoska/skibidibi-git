@@ -43,6 +43,7 @@ impl ManagedWorktreeGitExecutor for GitRunner {
         let branch_name = branch_full_name
             .strip_prefix("refs/heads/")
             .unwrap_or(branch_full_name);
+        let destination = git_compatible_path(destination);
         self.run(
             repository,
             GitInvocation::new(
@@ -52,7 +53,7 @@ impl ManagedWorktreeGitExecutor for GitRunner {
                     OsString::from("add"),
                     OsString::from("--no-guess-remote"),
                     OsString::from("--"),
-                    destination.as_os_str().to_owned(),
+                    destination.into_os_string(),
                     OsString::from(branch_name),
                 ],
             )
@@ -66,6 +67,7 @@ impl ManagedWorktreeGitExecutor for GitRunner {
         repository: &Path,
         destination: &Path,
     ) -> Result<GitOutput, GitRunError> {
+        let destination = git_compatible_path(destination);
         self.run(
             repository,
             GitInvocation::new(
@@ -74,13 +76,49 @@ impl ManagedWorktreeGitExecutor for GitRunner {
                     OsString::from("worktree"),
                     OsString::from("remove"),
                     OsString::from("--"),
-                    destination.as_os_str().to_owned(),
+                    destination.into_os_string(),
                 ],
             )
             .with_output_limits(OUTPUT_LIMIT, OUTPUT_LIMIT)
             .with_timeout(WORKTREE_TIMEOUT),
         )
     }
+}
+
+#[cfg(windows)]
+fn git_compatible_path(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_owned();
+    };
+    match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => {
+            let mut converted = PathBuf::from(format!("{}:\\", char::from(drive)));
+            if matches!(components.clone().next(), Some(Component::RootDir)) {
+                components.next();
+            }
+            converted.extend(components);
+            converted
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            let mut converted = PathBuf::from(r"\\");
+            converted.push(server);
+            converted.push(share);
+            if matches!(components.clone().next(), Some(Component::RootDir)) {
+                components.next();
+            }
+            converted.extend(components);
+            converted
+        }
+        _ => path.to_owned(),
+    }
+}
+
+#[cfg(not(windows))]
+fn git_compatible_path(path: &Path) -> PathBuf {
+    path.to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,5 +628,18 @@ mod tests {
             );
             assert!(runtime.executor.added.lock().unwrap().is_empty());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn converts_verbatim_disk_and_unc_paths_for_git_for_windows() {
+        assert_eq!(
+            git_compatible_path(Path::new(r"\\?\C:\Users\tester\worktree")),
+            PathBuf::from(r"C:\Users\tester\worktree")
+        );
+        assert_eq!(
+            git_compatible_path(Path::new(r"\\?\UNC\server\share\worktree")),
+            PathBuf::from(r"\\server\share\worktree")
+        );
     }
 }

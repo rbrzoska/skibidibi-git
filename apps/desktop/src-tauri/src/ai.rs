@@ -1305,8 +1305,12 @@ mod tests {
     fn cursor_candidates_never_include_the_cursor_ide_shim() {
         let candidates = candidate_paths(AiProvider::Cursor);
         assert!(candidates.iter().all(|path| {
-            path.file_name()
-                .is_some_and(|name| name == "cursor-agent" || name == "agent")
+            path.file_name().is_some_and(|name| {
+                matches!(
+                    name.to_str(),
+                    Some("cursor-agent" | "agent" | "cursor-agent.exe" | "agent.exe")
+                )
+            })
         }));
     }
 

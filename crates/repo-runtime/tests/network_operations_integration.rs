@@ -39,11 +39,23 @@ impl Fixture {
         git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(
             root.path(),
-            &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+            &[
+                "-c",
+                "core.autocrlf=false",
+                "clone",
+                remote.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
         );
         git(
             root.path(),
-            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+            &[
+                "-c",
+                "core.autocrlf=false",
+                "clone",
+                remote.to_str().unwrap(),
+                peer.to_str().unwrap(),
+            ],
         );
         configure(&local);
         configure(&peer);
@@ -369,6 +381,7 @@ fn precondition(status: &app_domain::RepositoryStatus) -> RepositoryStatePrecond
 }
 
 fn configure(repository: &Path) {
+    git(repository, &["config", "core.autocrlf", "false"]);
     git(repository, &["config", "user.name", "Network Test"]);
     git(
         repository,

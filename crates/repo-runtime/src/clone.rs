@@ -345,6 +345,7 @@ mod tests {
         calls: Mutex<Vec<(PathBuf, String, String)>>,
         failure: bool,
         competing_destination: Option<PathBuf>,
+        #[cfg(unix)]
         symlink_output: bool,
     }
 
@@ -576,10 +577,9 @@ mod tests {
             .clone_from_validated_source(&request, source.to_str().unwrap())
             .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(Path::new(&result.repository_path).join("README.md")).unwrap(),
-            "fixture\n"
-        );
+        let readme =
+            fs::read_to_string(Path::new(&result.repository_path).join("README.md")).unwrap();
+        assert!(matches!(readme.as_str(), "fixture\n" | "fixture\r\n"));
         assert!(matches!(
             RepositoryRuntime::default().clone_repository(&request),
             Err(CloneRepositoryError::InvalidSourceUrl)

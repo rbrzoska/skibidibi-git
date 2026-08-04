@@ -28,6 +28,7 @@ fn git(repository: &Path, arguments: &[&str]) {
 fn init_repository(with_commit: bool) -> tempfile::TempDir {
     let repository = tempfile::tempdir().expect("temporary repository");
     git(repository.path(), &["init", "-q", "-b", "main"]);
+    git(repository.path(), &["config", "core.autocrlf", "false"]);
     git(repository.path(), &["config", "user.name", "Mutation Test"]);
     git(
         repository.path(),
@@ -736,7 +737,7 @@ fn rejects_stage_when_the_selected_worktree_file_changed_after_snapshot() {
 fn stages_only_the_selected_literal_unicode_path() {
     let repository = init_repository(true);
     let runtime = RepositoryRuntime::default();
-    let selected_name = "--dosłowny [plik]*.txt";
+    let selected_name = "--dosłowny [plik].txt";
     let other_name = "other.txt";
     fs::write(repository.path().join(selected_name), "selected\n").unwrap();
     fs::write(repository.path().join(other_name), "other\n").unwrap();
