@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
+import { vi } from 'vitest';
 
 import { App } from './app';
 import { DESKTOP_IPC, DesktopIpc } from './core/ipc/desktop-ipc';
@@ -50,6 +51,10 @@ describe('App', () => {
     fixture.detectChanges();
 
     const compiled = fixture.nativeElement as HTMLElement;
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(compiled.querySelector('.update-trigger')?.textContent).toContain('Up to date');
+    });
     const increase = compiled.querySelector('[aria-label="Increase text size"]') as HTMLButtonElement;
     const controls = compiled.querySelector('.app-controls');
     expect(controls?.querySelector('.update-trigger')?.textContent).toContain('Up to date');

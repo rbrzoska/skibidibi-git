@@ -9,6 +9,10 @@ repository.workspace = true
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+default = []
+microsoft-store = []
+
 [build-dependencies]
 tauri-build.workspace = true
 

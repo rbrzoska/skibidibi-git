@@ -1,9 +1,11 @@
 use serde::Serialize;
 use tauri::AppHandle;
+#[cfg(not(feature = "microsoft-store"))]
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::CommandError;
 
+#[cfg(not(feature = "microsoft-store"))]
 const MAX_UPDATE_VERSION_LENGTH: usize = 80;
 const RELEASE_NOTES: &str = include_str!("../../../../RELEASE_NOTES.md");
 
@@ -20,6 +22,7 @@ pub(crate) struct ApplicationUpdateInfo {
 pub(crate) struct ApplicationUpdateCheckResult {
     current_version: String,
     update: Option<ApplicationUpdateInfo>,
+    managed_by_store: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,8 +30,10 @@ pub(crate) struct ApplicationUpdateCheckResult {
 pub(crate) struct ApplicationReleaseNotes {
     current_version: String,
     markdown: &'static str,
+    managed_by_store: bool,
 }
 
+#[cfg(not(feature = "microsoft-store"))]
 fn validate_expected_version(version: &str) -> Result<&str, CommandError> {
     let trimmed = version.trim();
     if trimmed.is_empty()
@@ -44,6 +49,7 @@ fn validate_expected_version(version: &str) -> Result<&str, CommandError> {
     Ok(trimmed)
 }
 
+#[cfg(not(feature = "microsoft-store"))]
 fn updater_error(
     message: &'static str,
 ) -> impl FnOnce(tauri_plugin_updater::Error) -> CommandError {
@@ -53,6 +59,7 @@ fn updater_error(
 }
 
 #[tauri::command]
+#[cfg(not(feature = "microsoft-store"))]
 pub(crate) async fn application_update_check(
     app: AppHandle,
 ) -> Result<ApplicationUpdateCheckResult, CommandError> {
@@ -74,6 +81,19 @@ pub(crate) async fn application_update_check(
     Ok(ApplicationUpdateCheckResult {
         current_version,
         update,
+        managed_by_store: false,
+    })
+}
+
+#[tauri::command]
+#[cfg(feature = "microsoft-store")]
+pub(crate) async fn application_update_check(
+    app: AppHandle,
+) -> Result<ApplicationUpdateCheckResult, CommandError> {
+    Ok(ApplicationUpdateCheckResult {
+        current_version: app.package_info().version.to_string(),
+        update: None,
+        managed_by_store: true,
     })
 }
 
@@ -82,10 +102,12 @@ pub(crate) fn application_release_notes(app: AppHandle) -> ApplicationReleaseNot
     ApplicationReleaseNotes {
         current_version: app.package_info().version.to_string(),
         markdown: RELEASE_NOTES,
+        managed_by_store: cfg!(feature = "microsoft-store"),
     }
 }
 
 #[tauri::command]
+#[cfg(not(feature = "microsoft-store"))]
 pub(crate) async fn application_update_install(
     app: AppHandle,
     expected_version: String,
@@ -121,11 +143,22 @@ pub(crate) async fn application_update_install(
 }
 
 #[tauri::command]
+#[cfg(feature = "microsoft-store")]
+pub(crate) async fn application_update_install(
+    _app: AppHandle,
+    _expected_version: String,
+) -> Result<(), CommandError> {
+    Err(CommandError {
+        message: "application updates are managed by Microsoft Store".to_owned(),
+    })
+}
+
+#[tauri::command]
 pub(crate) fn application_update_restart(app: AppHandle) {
     app.restart();
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "microsoft-store")))]
 mod tests {
     use super::*;
 

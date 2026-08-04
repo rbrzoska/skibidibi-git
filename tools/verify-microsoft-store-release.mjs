@@ -5,11 +5,12 @@ const readJson = async (relativePath) => JSON.parse(
 );
 const readText = (relativePath) => readFile(new URL(relativePath, import.meta.url), 'utf8');
 
-const [config, storeConfig, privacy, support] = await Promise.all([
+const [config, storeConfig, privacy, support, workflow] = await Promise.all([
   readJson('../apps/desktop/src-tauri/tauri.conf.json'),
   readJson('../apps/desktop/src-tauri/tauri.microsoftstore.conf.json'),
   readText('../PRIVACY.md'),
   readText('../SUPPORT.md'),
+  readText('../.github/workflows/microsoft-store.yml'),
 ]);
 
 const storeWindows = storeConfig.bundle?.windows;
@@ -24,6 +25,9 @@ if (storeConfig.bundle?.createUpdaterArtifacts !== false) {
 }
 if (storeWindows.wix?.enableElevatedUpdateTask !== false) {
   throw new Error('Microsoft Store builds must not install the elevated self-update scheduled task.');
+}
+if (!workflow.includes('--features microsoft-store')) {
+  throw new Error('The Microsoft Store MSIX must use the microsoft-store build feature.');
 }
 if (!storeConfig.bundle?.publisher || storeConfig.bundle.publisher === config.productName) {
   throw new Error('The Microsoft Store publisher must be explicit and different from the product name.');

@@ -1,5 +1,13 @@
 # Skibidibi Git — release notes
 
+## 0.1.7 — 2026-08-04
+
+- Added a dedicated unsigned MSIX build for Microsoft Store distribution without requiring a commercial signing certificate.
+- Fixed Windows release validation, Git fixtures, managed worktree paths, and package assets discovered during certification testing.
+- Verified the disposable MSIX installation, launch, restart, uninstall, and manual Git workflow on Windows 11 with an overall WACK PASS result.
+- Separated Microsoft Store updates from the standalone GitHub Releases updater while keeping release notes available in the application.
+- Added a Partner Center resubmission checklist and certification notes for the external Git and editor integrations.
+
 ## 0.1.6 — 2026-07-31
 
 - Added editable amend support for unpushed HEAD commits and compact commit reference labels.

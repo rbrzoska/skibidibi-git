@@ -9,11 +9,13 @@ export interface ApplicationUpdateInfo {
 export interface ApplicationUpdateCheckResponse {
   readonly currentVersion: string;
   readonly update: ApplicationUpdateInfo | null;
+  readonly managedByStore: boolean;
 }
 
 export interface ApplicationReleaseNotesResponse {
   readonly currentVersion: string;
   readonly markdown: string;
+  readonly managedByStore: boolean;
 }
 
 export interface RepositoryStatusRequest {
@@ -1598,6 +1600,7 @@ export class DesktopIpc implements DesktopIpcClient {
       return Promise.resolve({
         currentVersion: '0.1.0-dev',
         update: null,
+        managedByStore: false,
       } as DesktopIpcContract[C]['response']);
     }
 
@@ -1605,6 +1608,7 @@ export class DesktopIpc implements DesktopIpcClient {
       return Promise.resolve({
         currentVersion: '0.1.0-dev',
         markdown: '## 0.1.0-dev\n\n- Local development build.',
+        managedByStore: false,
       } as DesktopIpcContract[C]['response']);
     }
 

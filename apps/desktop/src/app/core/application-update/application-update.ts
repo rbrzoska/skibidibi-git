@@ -29,6 +29,7 @@ export class ApplicationUpdate {
   readonly currentVersion = signal<string | null>(null);
   readonly availableUpdate = signal<ApplicationUpdateInfo | null>(null);
   readonly releaseNotesMarkdown = signal('');
+  readonly managedByStore = signal(false);
   readonly lastCheckedAt = signal<Date | null>(null);
   readonly autoCheck = signal(readAutoCheckPreference());
   readonly error = signal<string | null>(null);
@@ -47,6 +48,9 @@ export class ApplicationUpdate {
     );
   });
   readonly triggerLabel = computed(() => {
+    if (this.managedByStore()) {
+      return 'Microsoft Store';
+    }
     switch (this.state()) {
       case 'checking': return 'Checking…';
       case 'upToDate': return 'Up to date';
@@ -68,10 +72,7 @@ export class ApplicationUpdate {
       return;
     }
     this.initialized = true;
-    void this.loadReleaseNotes();
-    if (this.autoCheck()) {
-      void this.check(false);
-    }
+    void this.initializeUpdateState();
   }
 
   setAutoCheck(enabled: boolean): void {
@@ -93,6 +94,7 @@ export class ApplicationUpdate {
       const result = await this.ipc.invoke('application_update_check', {});
       this.currentVersion.set(result.currentVersion);
       this.availableUpdate.set(result.update);
+      this.managedByStore.set(result.managedByStore);
       this.lastCheckedAt.set(new Date());
       this.state.set(result.update === null ? 'upToDate' : 'available');
       if (result.update !== null) {
@@ -125,6 +127,10 @@ export class ApplicationUpdate {
   }
 
   trigger(): void {
+    if (this.managedByStore()) {
+      this.showReleaseNotes();
+      return;
+    }
     if (
       this.state() === 'available'
       || this.state() === 'restartReady'
@@ -142,7 +148,7 @@ export class ApplicationUpdate {
 
   async install(): Promise<void> {
     const update = this.availableUpdate();
-    if (update === null || this.state() === 'installing') {
+    if (this.managedByStore() || update === null || this.state() === 'installing') {
       return;
     }
     this.state.set('installing');
@@ -186,11 +192,19 @@ export class ApplicationUpdate {
     }
   }
 
+  private async initializeUpdateState(): Promise<void> {
+    await this.loadReleaseNotes();
+    if (this.autoCheck() && !this.managedByStore()) {
+      await this.check(false);
+    }
+  }
+
   private async loadReleaseNotes(): Promise<void> {
     try {
       const result = await this.ipc.invoke('application_release_notes', {});
       this.currentVersion.set(result.currentVersion);
       this.releaseNotesMarkdown.set(result.markdown);
+      this.managedByStore.set(result.managedByStore);
       if (readLastSeenVersion() !== result.currentVersion) {
         this.promptVisible.set(true);
       }

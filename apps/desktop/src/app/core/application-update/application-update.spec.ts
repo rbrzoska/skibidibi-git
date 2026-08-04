@@ -25,9 +25,11 @@ describe('ApplicationUpdate', () => {
     invoke.mockResolvedValueOnce({
       currentVersion: '0.1.0',
       markdown: '## 0.1.0\n\n- Installed',
+      managedByStore: false,
     }).mockResolvedValueOnce({
       currentVersion: '0.1.0',
       update: { version: '0.2.0', body: 'Faster fetches', date: '2026-07-28T10:00:00Z' },
+      managedByStore: false,
     });
 
     service.initialize();
@@ -46,6 +48,7 @@ describe('ApplicationUpdate', () => {
     invoke.mockResolvedValueOnce({
       currentVersion: '0.1.0',
       markdown: '## 0.1.0\n\n- Installed',
+      managedByStore: false,
     });
     service.setAutoCheck(false);
     service.initialize();
@@ -68,6 +71,7 @@ describe('ApplicationUpdate', () => {
       .mockResolvedValueOnce({
         currentVersion: '0.1.0',
         update: { version: '0.2.0', body: null, date: null },
+        managedByStore: false,
       })
       .mockResolvedValueOnce(undefined);
     await service.check(false);
@@ -85,6 +89,7 @@ describe('ApplicationUpdate', () => {
     invoke.mockResolvedValueOnce({
       currentVersion: '0.1.0',
       update: { version: '0.2.0', body: null, date: null },
+      managedByStore: false,
     });
     await service.check(false);
     service.dismissAvailableUpdate();
@@ -100,6 +105,7 @@ describe('ApplicationUpdate', () => {
       .mockResolvedValueOnce({
         currentVersion: '0.1.0',
         update: { version: '0.2.0', body: null, date: null },
+        managedByStore: false,
       })
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
@@ -109,6 +115,24 @@ describe('ApplicationUpdate', () => {
     await service.restart();
 
     expect(invoke).toHaveBeenLastCalledWith('application_update_restart', {});
+  });
+
+  it('delegates updates to Microsoft Store without contacting GitHub Releases', async () => {
+    invoke.mockResolvedValueOnce({
+      currentVersion: '0.1.0',
+      markdown: '## 0.1.0\n\n- Installed from Store',
+      managedByStore: true,
+    });
+
+    service.initialize();
+    await vi.waitFor(() => expect(service.managedByStore()).toBe(true));
+
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('application_release_notes', {});
+    expect(service.triggerLabel()).toBe('Microsoft Store');
+
+    service.trigger();
+    expect(service.promptVisible()).toBe(true);
   });
 
   it('extracts only the selected installed release including prerelease versions', () => {
