@@ -63,7 +63,8 @@ cargo --version
 ```powershell
 pnpm tauri build `
   --target x86_64-pc-windows-msvc `
-  --no-bundle
+  --no-bundle `
+  --features microsoft-store
 ```
 
 If the build cannot find `link.exe`, reopen Visual Studio Installer and add **Desktop development with C++**.
@@ -227,6 +228,9 @@ Issues found and corrected during the certification run:
   forms without weakening their safety assertions;
 - the generated manifest declared `Square310x310Logo` without the required `Wide310x150Logo`;
   the unused optional tile declaration and payload were removed;
+- the Store executable now uses a dedicated `microsoft-store` build feature: GitHub Releases remain
+  the update channel for standalone packages, while Store MSIX updates are delegated exclusively to
+  Microsoft Store and the application only exposes bundled release notes;
 - trusting the self-signed certificate only in `CurrentUser\TrustedPeople` was insufficient for
   AppX deployment and `signtool /pa`; the test procedure now uses temporary machine-scope trust and
   explicitly removes it.
@@ -235,6 +239,36 @@ The package used for this local run was test-signed and must never be uploaded t
 For the real Store submission, run **Build Microsoft Store MSIX** from an immutable tag or commit
 SHA with the exact three Product identity values, keep the workflow artifact unsigned, upload the
 `.msix` on the product's **Packages** page, and let Microsoft sign it during certification.
+
+## Partner Center resubmission checklist
+
+Use the **MSIX or PWA app** product, not the earlier MSI/EXE product that failed with installer exit
+code `1603`. Before submitting:
+
+1. create a new release commit and immutable tag that includes the MSIX and Windows fixes (the
+   `app-v0.1.6` tag predates them, so do not package that tag);
+2. run **Build Microsoft Store MSIX** for that tag with the exact three values from **Product
+   identity**;
+3. download the unsigned `microsoft-store-msix-*` workflow artifact and upload its `.msix` file on
+   Partner Center's **Packages** page;
+4. verify that Partner Center reads the intended x64 architecture, version, publisher, and package
+   identity before saving the submission;
+5. add the following certification notes, adjusting only paths or version numbers if needed.
+
+Suggested certification notes:
+
+> Skibidibi Git is a full-trust desktop Git client. Git for Windows must be installed and available
+> on PATH before repository operations can be tested. GitHub CLI, AI CLIs, VS Code, and Cursor are
+> optional integrations and are not required to launch the app. To test: launch the app, choose a
+> local Git repository, verify status and history, then use Refresh or Fetch. The application
+> intentionally invokes system Git and may optionally launch Explorer, an installed editor, GitHub
+> CLI, or an enabled AI CLI. This explains CreateProcessW/ShellExecuteW findings from the optional
+> WACK Blocked executables check. The packaged MSIX delegates application updates to Microsoft
+> Store; it does not run the standalone GitHub Releases updater.
+
+After the final Store-feature build, repeat at least the signed disposable-package install, launch,
+repository-open, restart, and uninstall smoke test. A complete WACK pass remains recommended for the
+exact binary submitted to Partner Center.
 
 ## Legacy MSI failure 1603
 

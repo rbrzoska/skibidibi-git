@@ -55,7 +55,7 @@ jobs:
           pnpm test:tools
       - name: Build Tauri executable without an MSI installer
         shell: pwsh
-        run: pnpm tauri build --target x86_64-pc-windows-msvc --no-bundle
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --no-bundle --features microsoft-store
       - name: Package Store MSIX
         id: package
         shell: pwsh
