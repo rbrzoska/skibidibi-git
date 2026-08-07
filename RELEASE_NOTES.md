@@ -1,5 +1,11 @@
 # Skibidibi Git — release notes
 
+## 0.1.8 — 2026-08-07
+
+- Fixed push blocking behavior so you can push with local uncommitted changes in the working tree.
+- Kept a dirty-tree safety path by showing explicit branch readiness from local status when push analysis cannot run.
+- Added a regression check for dirty-tree push scenarios.
+
 ## 0.1.7 — 2026-08-04
 
 - Added a dedicated unsigned MSIX build for Microsoft Store distribution without requiring a commercial signing certificate.
