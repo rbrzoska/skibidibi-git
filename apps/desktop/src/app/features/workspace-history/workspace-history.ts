@@ -642,6 +642,35 @@ export class WorkspaceHistory implements OnDestroy {
         return 'Pull and reconcile the diverged branch before pushing.';
     }
   });
+  private pushAnalysisFromStatus(status: RepositoryStatusResponse): PushAnalysisResponse {
+    const upstream = status.branch.upstream;
+    if (upstream === null) {
+      return {
+        branch: status.branch.head,
+        head: status.branch.oid,
+        upstream: null,
+        remote: null,
+        remoteRef: null,
+        ahead: status.branch.ahead,
+        behind: status.branch.behind,
+        readiness: 'noUpstream',
+      };
+    }
+    const separator = upstream.indexOf('/');
+    const readiness = status.branch.ahead === 0 && status.branch.behind === 0
+      ? 'upToDate'
+      : status.branch.behind > 0 ? (status.branch.ahead > 0 ? 'diverged' : 'behind') : 'ready';
+    return {
+      branch: status.branch.head,
+      head: status.branch.oid,
+      upstream,
+      remote: separator > 0 ? upstream.slice(0, separator) : upstream,
+      remoteRef: `refs/remotes/${upstream}`,
+      ahead: status.branch.ahead,
+      behind: status.branch.behind,
+      readiness,
+    };
+  }
   protected readonly selectedConflictIsBinary = computed(() => {
     const state = this.conflictDetailState();
     return state.kind === 'ready' &&
@@ -1452,7 +1481,13 @@ export class WorkspaceHistory implements OnDestroy {
       }
     } catch (error) {
       if (generation === this.pushAnalysisRequestGeneration && !this.destroyed) {
-        this.pushAnalysisState.set({ kind: 'error', message: this.errorMessage(error, 'Push analysis failed.') });
+        const message = this.errorMessage(error, 'Push analysis failed.');
+        const status = this.statusStore.state();
+        if (this.pullFailureNeedsCleanTree(message) && status.kind === 'ready') {
+          this.pushAnalysisState.set({ kind: 'ready', analysis: this.pushAnalysisFromStatus(status.status) });
+          return;
+        }
+        this.pushAnalysisState.set({ kind: 'error', message });
       }
     }
   }

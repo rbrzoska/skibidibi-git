@@ -3784,6 +3784,24 @@ describe('WorkspaceHistory', () => {
     expect(pushCall[1].operation.target).toEqual({ kind: 'setUpstream', remote: 'origin', remoteBranch: 'main' });
   });
 
+  it('allows push when push analysis fails due to working-tree dirtiness', async () => {
+    const ipc = (command: string, request: unknown): Promise<unknown> => {
+      if (command === 'repository_push_analysis') {
+        return Promise.reject(new Error('Pull requires a clean working tree'));
+      }
+      return defaultIpc(command, request);
+    };
+    const { fixture, invoke } = await createFixture(ipc);
+    const push = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.network-actions button')]
+      .find((button) => button.textContent?.trim() === 'Push')!;
+    expect(push.disabled).toBe(false);
+    push.click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(invoke).toHaveBeenCalledWith('repository_push', expect.objectContaining({ repositoryId: 'skibidibi-git' }));
+    });
+  });
+
   it('requires explicit confirmation before setting a natural upstream and supports cancel', async () => {
     const upstreamStatus = {
       ...repositoryStatus(),
