@@ -625,6 +625,18 @@ export class WorkspaceHistory implements OnDestroy {
     untracked(() => this.feedback.setLoading(`workspace:${this.repositoryId}`, active, label));
   });
   protected readonly pushDisabledReason = computed(() => {
+    const status = this.statusStore.state();
+    if (status.kind === 'ready') {
+      if (status.status.branch.unborn) {
+        return 'Push is unavailable while HEAD is unborn.';
+      }
+      if (status.status.branch.detached) {
+        return 'Push is unavailable in detached HEAD.';
+      }
+      if (status.status.branch.head === null || status.status.branch.oid === null) {
+        return 'Push is unavailable for unnamed branch.';
+      }
+    }
     const state = this.pushAnalysisState();
     if (state.kind !== 'ready') {
       return state.kind === 'loading' ? 'Push analysis is loading.' : state.message;
@@ -643,11 +655,13 @@ export class WorkspaceHistory implements OnDestroy {
     }
   });
   private pushAnalysisFromStatus(status: RepositoryStatusResponse): PushAnalysisResponse {
+    const head = status.branch.head ?? '';
+    const oid = status.branch.oid ?? '';
     const upstream = status.branch.upstream;
     if (upstream === null) {
       return {
-        branch: status.branch.head,
-        head: status.branch.oid,
+        branch: head,
+        head: oid,
         upstream: null,
         remote: null,
         remoteRef: null,
@@ -661,8 +675,8 @@ export class WorkspaceHistory implements OnDestroy {
       ? 'upToDate'
       : status.branch.behind > 0 ? (status.branch.ahead > 0 ? 'diverged' : 'behind') : 'ready';
     return {
-      branch: status.branch.head,
-      head: status.branch.oid,
+      branch: head,
+      head: oid,
       upstream,
       remote: separator > 0 ? upstream.slice(0, separator) : upstream,
       remoteRef: `refs/remotes/${upstream}`,
