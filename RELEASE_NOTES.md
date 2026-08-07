@@ -1,5 +1,9 @@
 # Skibidibi Git — release notes
 
+## 0.1.9 — 2026-08-07
+
+- Fixed release breakage by blocking push path when branch metadata is missing and adding safe guardrails for detached/unborn branch push analysis.
+
 ## 0.1.8 — 2026-08-07
 
 - Fixed push blocking behavior so you can push with local uncommitted changes in the working tree.
